@@ -2,14 +2,26 @@
 //! libVLC draws the video and Core Animation composites the HTML UI on top.
 
 use std::ffi::c_void;
+use std::ptr::NonNull;
 
 use objc2::{MainThreadMarker, MainThreadOnly};
 use objc2::rc::Retained;
-use objc2_app_kit::{NSAutoresizingMaskOptions, NSColor, NSView, NSWindow, NSWindowOrderingMode};
+use block2::RcBlock;
+use objc2_app_kit::{
+    NSAutoresizingMaskOptions, NSColor, NSCursor, NSEvent, NSEventMask, NSView, NSWindow, NSWindowOrderingMode,
+};
 
 /// Creates the video view below `webview` and returns it as an `NSView*`.
 /// Must run on the main thread. The view lives as long as the window.
-pub fn attach(webview: *mut c_void, window: *mut c_void) -> Result<*mut c_void, String> {
+///
+/// `on_pointer` is called for every mouse move or scroll in the window, from
+/// a native event monitor. The UI uses it to show its controls, so they still
+/// wake up if libVLC's view takes the event before the web view sees it.
+pub fn attach(
+    webview: *mut c_void,
+    window: *mut c_void,
+    on_pointer: impl Fn() + 'static,
+) -> Result<*mut c_void, String> {
     let mtm = MainThreadMarker::new().ok_or("attach must run on the main thread")?;
     // SAFETY: Tauri hands us the window's live WKWebView and NSWindow.
     let webview: &NSView = unsafe { &*(webview as *const NSView) };
@@ -30,5 +42,19 @@ pub fn attach(webview: *mut c_void, window: *mut c_void) -> Result<*mut c_void, 
     window.setBackgroundColor(Some(&NSColor::blackColor()));
     window.setOpaque(true);
 
+    window.setAcceptsMouseMovedEvents(true);
+    let handler = RcBlock::new(move |event: NonNull<NSEvent>| -> *mut NSEvent {
+        on_pointer();
+        event.as_ptr()
+    });
+    let mask = NSEventMask::MouseMoved | NSEventMask::LeftMouseDragged | NSEventMask::ScrollWheel;
+    // The monitor lives for the whole app.
+    std::mem::forget(unsafe { NSEvent::addLocalMonitorForEventsMatchingMask_handler(mask, &handler) });
+
     Ok(Retained::into_raw(video) as *mut c_void)
+}
+
+/// Hides the cursor until the mouse moves (used while video plays).
+pub fn hide_cursor() {
+    NSCursor::setHiddenUntilMouseMoves(true);
 }

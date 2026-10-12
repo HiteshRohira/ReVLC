@@ -1,6 +1,6 @@
 # VLC feature parity checklist
 
-This is revlc's public roadmap. The goal is every user-facing feature of VLC
+This is ReVLC's public roadmap. The goal is every user-facing feature of VLC
 3.0 desktop, with a modern UI. Codec support covers the popular formats
 rather than everything VLC can decode.
 
@@ -101,7 +101,7 @@ Main features come first. Ship, get feedback, then keep ticking boxes.
 - [ ] Lua extensions
 
 ## Platforms
-- [x] macOS (Apple Silicon), using the installed VLC 3 for now
-- [ ] macOS: bundle libVLC inside the app
+- [x] macOS (Apple Silicon), libVLC bundled in the app
+- [ ] Signed and notarised macOS builds
 - [ ] Windows
 - [ ] Linux

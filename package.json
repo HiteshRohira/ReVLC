@@ -8,7 +8,9 @@
     "dev": "vite",
     "build": "vite build",
     "check": "svelte-check --tsconfig ./tsconfig.json",
-    "tauri": "tauri"
+    "tauri": "tauri",
+    "prepare:vlc": "scripts/prepare-libvlc.sh",
+    "build:app": "test -d src-tauri/vlc || scripts/prepare-libvlc.sh; tauri build && scripts/make-dmg.sh"
   },
   "dependencies": {
     "@tauri-apps/api": "^2",

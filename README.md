@@ -1,10 +1,12 @@
-# revlc
+# ReVLC
 
 A modern, lightweight media player built on libVLC.
 
-revlc aims for full VLC feature parity with a cleaner, faster UI. It is early:
+ReVLC aims for full VLC feature parity with a cleaner, faster UI. It is early:
 see the [feature parity checklist](docs/parity.md) for what works today and
 what's next.
+
+![ReVLC playing a video with subtitles](docs/screenshot.jpg)
 
 ## Stack
 
@@ -16,20 +18,33 @@ what's next.
 
 See [docs/plan.md](docs/plan.md) for the reasoning and milestones.
 
-## Running (macOS)
+## Install (macOS, Apple Silicon)
 
-Requirements: Rust, Node 20+, and [VLC 3](https://www.videolan.org/vlc/)
-installed in `/Applications` (revlc uses its libVLC until we bundle our own).
+Download the `.dmg` from [Releases](../../releases) and drag ReVLC to
+Applications. Builds aren't notarised yet, so the first time, right-click
+ReVLC and choose **Open**, or run `xattr -cr /Applications/ReVLC.app`.
+
+## Building
+
+Requirements: Rust, Node 20+.
 
 ```sh
 npm install
-npm run tauri dev
-# or open a file directly:
-npx tauri dev -- -- /path/to/video.mkv
+npm run prepare:vlc   # copies libVLC from /Applications/VLC.app, or downloads VLC 3
+npm run tauri dev     # run in development
+npm run build:app     # ReVLC.app and a .dmg in src-tauri/target/release/bundle
 ```
 
-To use libVLC from somewhere else, set `REVLC_VLC_DIR` to a directory
-containing `lib/`, `plugins/` and `share/`.
+`prepare:vlc` puts libVLC (libraries, plugins and Lua scripts, about 80 MB)
+in `src-tauri/vlc`, which is bundled into the app. Without it, development
+builds fall back to an installed VLC.app. Set `REVLC_VLC_DIR` to use libVLC
+from somewhere else (a directory with `lib/`, `plugins/` and `share/`).
+
+## Known issues
+
+- Subtitles can overlap the control bar while it's visible.
+- HDR is tone-mapped to SDR by libVLC 3 (true HDR on XDR displays is milestone M2).
+- Only macOS so far; Windows and Linux are next.
 
 ## Contributing
 
@@ -38,4 +53,6 @@ items only need UI and a thin command in `src-tauri/src/vlc.rs`.
 
 ## License
 
-GPL-3.0-or-later. libVLC is LGPL-2.1-or-later.
+GPL-3.0-or-later. The app bundles libVLC (LGPL-2.1-or-later) and VLC
+plugins (GPL/LGPL) from [VideoLAN](https://www.videolan.org/); their
+source code is available at https://code.videolan.org/videolan/vlc.

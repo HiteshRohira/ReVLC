@@ -1,6 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "revlc",
+  "productName": "ReVLC",
   "version": "0.1.0",
   "identifier": "app.revlc",
   "build": {
@@ -14,7 +14,7 @@
     "windows": [
       {
         "label": "main",
-        "title": "revlc",
+        "title": "ReVLC",
         "width": 1120,
         "height": 680,
         "minWidth": 480,
@@ -31,7 +31,9 @@
   },
   "bundle": {
     "active": true,
-    "targets": "all",
+    "targets": [
+      "app"
+    ],
     "category": "Video",
     "icon": [
       "icons/32x32.png",
@@ -42,20 +44,61 @@
     ],
     "fileAssociations": [
       {
-        "ext": ["mp4", "m4v", "mkv", "webm", "mov", "avi", "ts", "m2ts", "mpg", "mpeg", "wmv", "flv", "ogv", "3gp"],
+        "ext": [
+          "mp4",
+          "m4v",
+          "mkv",
+          "webm",
+          "mov",
+          "avi",
+          "ts",
+          "m2ts",
+          "mpg",
+          "mpeg",
+          "wmv",
+          "flv",
+          "ogv",
+          "3gp"
+        ],
         "name": "Video",
         "role": "Viewer"
       },
       {
-        "ext": ["mp3", "m4a", "aac", "flac", "wav", "ogg", "opus", "wma", "alac", "aiff"],
+        "ext": [
+          "mp3",
+          "m4a",
+          "aac",
+          "flac",
+          "wav",
+          "ogg",
+          "opus",
+          "wma",
+          "alac",
+          "aiff"
+        ],
         "name": "Audio",
         "role": "Viewer"
       },
       {
-        "ext": ["m3u", "m3u8", "pls", "xspf"],
+        "ext": [
+          "m3u",
+          "m3u8",
+          "pls",
+          "xspf"
+        ],
         "name": "Playlist",
         "role": "Viewer"
       }
-    ]
+    ],
+    "resources": {
+      "vlc/": "vlc/"
+    },
+    "copyright": "GPL-3.0-or-later. Includes libVLC (LGPL-2.1-or-later) and VLC plugins from VideoLAN.",
+    "macOS": {
+      "minimumSystemVersion": "11.0",
+      "signingIdentity": "-",
+      "entitlements": "Entitlements.plist",
+      "hardenedRuntime": true
+    }
   }
 }

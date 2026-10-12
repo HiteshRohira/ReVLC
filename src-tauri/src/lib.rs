@@ -424,6 +424,14 @@ fn take_snapshot(app: AppHandle, player: tauri::State<Player>) -> Res {
 }
 
 #[tauri::command]
+fn hide_cursor(app: AppHandle) {
+    #[cfg(target_os = "macos")]
+    let _ = app.run_on_main_thread(surface_macos::hide_cursor);
+    #[cfg(not(target_os = "macos"))]
+    let _ = app;
+}
+
+#[tauri::command]
 fn playlist_remove(player: tauri::State<Player>, index: usize) -> Res {
     let core = player.core()?;
     let was_current = core.playlist().remove(index);
@@ -499,7 +507,16 @@ fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     let attach = core.clone();
     window.with_webview(move |webview| {
         #[cfg(target_os = "macos")]
-        match surface_macos::attach(webview.inner(), webview.ns_window()) {
+        let app = attach.app.clone();
+        let last = std::cell::Cell::new(Instant::now() - Duration::from_secs(1));
+        let on_pointer = move || {
+            // Throttled: the UI only needs to know the pointer is active.
+            if last.get().elapsed() >= Duration::from_millis(150) {
+                last.set(Instant::now());
+                let _ = app.emit("native://pointer", ());
+            }
+        };
+        match surface_macos::attach(webview.inner(), webview.ns_window(), on_pointer) {
             Ok(view) => attach.vlc.set_nsview(view),
             Err(e) => eprintln!("revlc: could not create the video view: {e}"),
         }
@@ -540,6 +557,7 @@ pub fn run() {
             set_crop,
             set_deinterlace,
             take_snapshot,
+            hide_cursor,
             playlist_remove,
             playlist_move,
             playlist_clear,

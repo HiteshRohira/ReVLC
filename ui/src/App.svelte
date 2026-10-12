@@ -1,5 +1,7 @@
 <script lang="ts">
   import { onMount } from "svelte";
+  import { invoke } from "@tauri-apps/api/core";
+  import { listen } from "@tauri-apps/api/event";
   import { getCurrentWindow } from "@tauri-apps/api/window";
   import { getCurrentWebview } from "@tauri-apps/api/webview";
   import { open as openDialog } from "@tauri-apps/plugin-dialog";
@@ -27,8 +29,12 @@
   const showVideo = $derived(player.active && player.state.hasVideo);
 
   $effect(() => {
+    if (controlsHidden) invoke("hide_cursor");
+  });
+
+  $effect(() => {
     const title = player.current?.title;
-    appWindow.setTitle(title ? `${title} — revlc` : "revlc");
+    appWindow.setTitle(title ? `${title} — ReVLC` : "ReVLC");
   });
 
   function wake() {
@@ -78,6 +84,8 @@
           if (media.length) player.open(media);
         }
       }),
+      // The native video view eats mouse moves, so the app forwards them.
+      listen("native://pointer", wake),
       appWindow.onResized(async () => (ui.fullscreen = await appWindow.isFullscreen())),
     ];
     return () => unlisteners.forEach((p) => p.then((off) => off()));
@@ -88,7 +96,7 @@
 
 <main class:show-video={showVideo} class:hide-cursor={controlsHidden}>
   <div class="titlebar" data-tauri-drag-region class:hidden={controlsHidden || ui.fullscreen}>
-    <span data-tauri-drag-region>{player.current?.title ?? "revlc"}</span>
+    <span data-tauri-drag-region>{player.current?.title ?? "ReVLC"}</span>
   </div>
 
   <div class="stage">
@@ -101,7 +109,7 @@
         </div>
       {:else if !player.active}
         <div class="center">
-          <div class="logo">revlc</div>
+          <div class="logo">ReVLC</div>
           <p>Drop a file here, or</p>
           <div class="start">
             <button class="btn primary" onclick={openFiles}><Icon name="folder" size={16} /> Open files</button>
