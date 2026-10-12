@@ -1,0 +1,61 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "revlc",
+  "version": "0.1.0",
+  "identifier": "app.revlc",
+  "build": {
+    "beforeDevCommand": "npm run dev",
+    "devUrl": "http://localhost:1420",
+    "beforeBuildCommand": "npm run build",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "macOSPrivateApi": true,
+    "windows": [
+      {
+        "label": "main",
+        "title": "revlc",
+        "width": 1120,
+        "height": 680,
+        "minWidth": 480,
+        "minHeight": 300,
+        "transparent": true,
+        "titleBarStyle": "Overlay",
+        "hiddenTitle": true,
+        "dragDropEnabled": true
+      }
+    ],
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "category": "Video",
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ],
+    "fileAssociations": [
+      {
+        "ext": ["mp4", "m4v", "mkv", "webm", "mov", "avi", "ts", "m2ts", "mpg", "mpeg", "wmv", "flv", "ogv", "3gp"],
+        "name": "Video",
+        "role": "Viewer"
+      },
+      {
+        "ext": ["mp3", "m4a", "aac", "flac", "wav", "ogg", "opus", "wma", "alac", "aiff"],
+        "name": "Audio",
+        "role": "Viewer"
+      },
+      {
+        "ext": ["m3u", "m3u8", "pls", "xspf"],
+        "name": "Playlist",
+        "role": "Viewer"
+      }
+    ]
+  }
+}

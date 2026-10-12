@@ -1,0 +1,147 @@
+:root {
+  --bg: #0d0d10;
+  --panel: rgb(28 28 33 / 0.97);
+  --border: rgb(255 255 255 / 0.08);
+  --text: #ececf1;
+  --muted: #9a9aa6;
+  --hover: rgb(255 255 255 / 0.07);
+  --hover-strong: rgb(255 255 255 / 0.14);
+  --accent: #ff6a3d;
+  --accent-soft: rgb(255 106 61 / 0.16);
+
+  color-scheme: dark;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+  font-size: 14px;
+  color: var(--text);
+  -webkit-font-smoothing: antialiased;
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+html,
+body {
+  margin: 0;
+  height: 100%;
+  overflow: hidden;
+  /* Transparent so the native video view underneath can show through. */
+  background: transparent;
+}
+
+button {
+  font: inherit;
+  border: 0;
+  background: none;
+  color: inherit;
+  cursor: pointer;
+}
+
+button:disabled {
+  cursor: default;
+  opacity: 0.4;
+}
+
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+kbd {
+  padding: 1px 5px;
+  border-radius: 4px;
+  border: 1px solid var(--border);
+  background: var(--hover);
+  font: inherit;
+  font-size: 11px;
+}
+
+.icon-btn {
+  display: grid;
+  place-items: center;
+  width: 36px;
+  height: 36px;
+  border-radius: 8px;
+  color: var(--text);
+}
+
+.icon-btn.small {
+  width: 30px;
+  height: 30px;
+}
+
+.icon-btn:hover:not(:disabled) {
+  background: var(--hover-strong);
+}
+
+.icon-btn.active {
+  color: var(--accent);
+}
+
+.btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 16px;
+  border-radius: 8px;
+  background: var(--hover-strong);
+  color: var(--text);
+  font-weight: 500;
+}
+
+.btn:hover:not(:disabled) {
+  background: rgb(255 255 255 / 0.2);
+}
+
+.btn.primary {
+  background: var(--accent);
+  color: #fff;
+}
+
+.btn.primary:hover:not(:disabled) {
+  background: #ff7d55;
+}
+
+input[type="range"] {
+  --progress: 0%;
+  -webkit-appearance: none;
+  appearance: none;
+  height: 18px;
+  margin: 0;
+  background: transparent;
+  cursor: pointer;
+}
+
+input[type="range"]::-webkit-slider-runnable-track {
+  height: 4px;
+  border-radius: 2px;
+  background: linear-gradient(to right, var(--accent) var(--progress), rgb(255 255 255 / 0.25) var(--progress));
+}
+
+input[type="range"]:hover::-webkit-slider-runnable-track {
+  height: 6px;
+  border-radius: 3px;
+}
+
+input[type="range"]::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  width: 13px;
+  height: 13px;
+  margin-top: -4.5px;
+  border-radius: 50%;
+  background: #fff;
+  box-shadow: 0 1px 4px rgb(0 0 0 / 0.5);
+  opacity: 0;
+  transition: opacity 0.15s;
+}
+
+input[type="range"]:hover::-webkit-slider-thumb {
+  margin-top: -3.5px;
+}
+
+input[type="range"]:hover::-webkit-slider-thumb,
+input[type="range"]:focus-visible::-webkit-slider-thumb {
+  opacity: 1;
+}
+
+input[type="range"]:disabled {
+  cursor: default;
+}
