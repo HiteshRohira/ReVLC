@@ -3,6 +3,7 @@ import { ui } from "./ui.svelte";
 
 export interface Actions {
   openFiles: () => void;
+  openFolder: () => void;
   toggleFullscreen: () => void;
   exitFullscreen: () => void;
 }
@@ -19,14 +20,14 @@ export const SHORTCUTS: [string, string][] = [
   ["[ / ] / =", "Slower / faster / normal speed"],
   ["E", "Next frame"],
   ["0–9", "Jump to 0–90%"],
-  ["B / V", "Cycle audio / subtitle track"],
+  ["B / V", "Cycle audio / subtitles on-off"],
   ["A / C", "Cycle aspect ratio / crop"],
   ["G / H", "Subtitle delay −/+ 50 ms"],
   ["J / K", "Audio delay −/+ 50 ms"],
   ["⇧S", "Snapshot"],
-  ["⌘O", "Open files"],
+  ["⌘O / ⇧⌘O", "Open files / add folder"],
   ["⌘N", "Open network stream"],
-  ["⌘L", "Toggle playlist"],
+  ["⌘L", "Up next"],
   ["?", "Show shortcuts"],
 ];
 
@@ -45,7 +46,8 @@ export function handleKey(e: KeyboardEvent, actions: Actions): boolean {
   if (cmd) {
     switch (e.key.toLowerCase()) {
       case "o":
-        actions.openFiles();
+        if (e.shiftKey) actions.openFolder();
+        else actions.openFiles();
         return true;
       case "n":
         ui.urlOpen = true;
@@ -76,7 +78,9 @@ export function handleKey(e: KeyboardEvent, actions: Actions): boolean {
       player.notify("osd", `Volume ${Math.max(0, s.volume - 5)}%`);
       return true;
     case "Escape":
-      if (ui.helpOpen) ui.helpOpen = false;
+      if (ui.settingsOpen) ui.settingsOpen = false;
+      else if (ui.playlistOpen) ui.playlistOpen = false;
+      else if (ui.helpOpen) ui.helpOpen = false;
       else actions.exitFullscreen();
       return true;
     case "?":
@@ -117,7 +121,7 @@ export function handleKey(e: KeyboardEvent, actions: Actions): boolean {
       player.cycle("audio");
       return true;
     case "v":
-      player.cycle("subtitles");
+      player.toggleSubtitles();
       return true;
     case "a":
       player.setAspect(cycleValue(ASPECT_RATIOS, player.aspect));

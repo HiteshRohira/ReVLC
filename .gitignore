@@ -5,3 +5,7 @@ src-tauri/gen/
 testmedia/
 .DS_Store
 src-tauri/vlc/
+design/node_modules/
+design/package*.json
+design/final/
+design/shots/*.png
