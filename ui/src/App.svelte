@@ -36,6 +36,12 @@
     appWindow.setTitle(showPlayer && title ? `${cleanTitle(title)} — ReVLC` : "ReVLC");
   });
 
+  // Media opened before onboarding finishes (e.g. a first launch from
+  // Finder) should play straight away; the accent can be picked later.
+  $effect(() => {
+    if (player.active && !theme.onboarded) theme.finishOnboarding();
+  });
+
   // Back on the home screen: refresh "continue watching" and close player panels.
   $effect(() => {
     if (!showPlayer) {
