@@ -5,6 +5,7 @@
 
 use std::ffi::{CStr, CString, c_char, c_float, c_int, c_uint, c_void};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::mpsc::Sender;
 
 use libloading::Library;
@@ -190,6 +191,10 @@ pub enum ConfigValue {
     Str(String),
 }
 
+/// Percentage of the input cache filled, from the last Buffering event.
+/// Only the main player subscribes to events, so one value is enough.
+static BUFFERING: AtomicU32 = AtomicU32::new(0);
+
 /// libVLC's audio output module on this platform.
 const AUDIO_MODULE: &str = if cfg!(target_os = "macos") { "auhal" } else if cfg!(windows) { "mmdevice" } else { "pulse" };
 
@@ -362,6 +367,12 @@ impl Vlc {
         unsafe extern "C" fn on_event(ev: *const c_void, data: *mut c_void) {
             unsafe {
                 let ty = *(ev as *const c_int);
+                if ty == event::BUFFERING {
+                    // libvlc_event_t: int type, void *p_obj, then the union
+                    // whose first member here is `float new_cache`.
+                    let cache = *((ev as *const u8).add(2 * size_of::<*const c_void>()) as *const c_float);
+                    BUFFERING.store(cache.to_bits(), Ordering::Relaxed);
+                }
                 let tx = &*(data as *const Sender<i32>);
                 let _ = tx.send(ty);
             }
@@ -384,6 +395,7 @@ impl Vlc {
     /// Opens a local path or a URL and starts playback. `options` are
     /// per-media libVLC options such as ":network-caching=1000".
     pub fn open(&self, uri: &str, options: &[String]) -> Result<(), String> {
+        BUFFERING.store(0, Ordering::Relaxed);
         let c = cstr(uri);
         unsafe {
             let media = if uri.contains("://") {
@@ -413,6 +425,12 @@ impl Vlc {
 
     pub fn stop(&self) {
         unsafe { (self.api.libvlc_media_player_stop)(self.mp) }
+    }
+
+    /// How full the input cache is, 0–100. Drops after opening and seeking,
+    /// and reaches 100 once libVLC has enough data to play.
+    pub fn buffering(&self) -> f32 {
+        f32::from_bits(BUFFERING.load(Ordering::Relaxed))
     }
 
     pub fn state(&self) -> State {

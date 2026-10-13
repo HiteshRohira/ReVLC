@@ -13,6 +13,8 @@ export interface PlayerState {
   rate: number;
   volume: number;
   muted: boolean;
+  /** Input cache fill, 0–100; below 100 while loading or after a seek. */
+  buffering: number;
   audioDelay: number;
   subtitleDelay: number;
 }
@@ -102,6 +104,7 @@ class Player {
     rate: 1,
     volume: 100,
     muted: false,
+    buffering: 100,
     audioDelay: 0,
     subtitleDelay: 0,
   });
@@ -121,6 +124,12 @@ class Player {
 
   active = $derived(ACTIVE.includes(this.state.state));
   playing = $derived(this.state.state === "playing" || this.state.state === "buffering" || this.state.state === "opening");
+  /** Waiting for data: opening, or refilling the cache after a seek. */
+  loading = $derived(
+    this.state.state === "opening" ||
+      this.state.state === "buffering" ||
+      (this.state.state === "playing" && this.state.buffering < 100),
+  );
   current = $derived(this.playlist.current != null ? (this.playlist.items[this.playlist.current] ?? null) : null);
   chapter = $derived(chapterAt(this.chapters, this.state.time));
 

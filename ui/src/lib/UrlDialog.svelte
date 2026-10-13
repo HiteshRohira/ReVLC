@@ -65,6 +65,7 @@
     font-size: 13px;
   }
   input {
+    box-sizing: border-box;
     width: 100%;
     padding: 10px 12px;
     border-radius: 8px;

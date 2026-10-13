@@ -1,13 +1,15 @@
 <script lang="ts">
   import { invoke } from "@tauri-apps/api/core";
   import { open as openDialog } from "@tauri-apps/plugin-dialog";
-  import { AudioLines, Camera, Captions, Check, ChevronLeft, ChevronRight, Crop, FileUp, Gauge, Rows3, Settings2 } from "@lucide/svelte";
+  import { AudioLines, Camera, Check, ChevronLeft, ChevronRight, Crop, FileUp, Gauge, Rows3, Settings2 } from "@lucide/svelte";
   import { player, trackName, ASPECT_RATIOS, CROPS, SPEEDS, SUBTITLE_EXTENSIONS, type Track } from "./player.svelte";
 
-  let { onclose }: { onclose: () => void } = $props();
+  // "subtitles" is the subtitle button's menu; "settings" is the gear menu.
+  let { kind = "settings", onclose }: { kind?: "settings" | "subtitles"; onclose: () => void } = $props();
 
   type Page = "root" | "speed" | "audio" | "subtitles" | "crop";
-  let page = $state<Page>("root");
+  // svelte-ignore state_referenced_locally
+  let page = $state<Page>(kind === "subtitles" ? "subtitles" : "root");
 
   const s = $derived(player.state);
   const t = $derived(player.tracks);
@@ -50,11 +52,10 @@
   </div>
 {/snippet}
 
-<div class="menu" role="menu" aria-label="Settings">
+<div class="menu" role="menu" aria-label={kind === "subtitles" ? "Subtitles" : "Settings"}>
   {#if page === "root"}
     {@render item("Playback speed", speedLabel, "speed", Gauge)}
     {@render item("Audio", name(t.audio, t.audioCurrent), "audio", AudioLines)}
-    {@render item("Subtitles", name(t.subtitles, t.subtitleCurrent), "subtitles", Captions)}
     {@render item("Crop & aspect", cropLabel, "crop", Crop)}
     <hr />
     <button class="it" role="menuitemcheckbox" aria-checked={player.deinterlace} onclick={() => player.setDeinterlace(!player.deinterlace)}>
@@ -82,7 +83,8 @@
     <hr />
     {@render delay("Audio delay", s.audioDelay, (v) => player.setAudioDelay(v))}
   {:else if page === "subtitles"}
-    {@render header("Subtitles")}
+    <h5>Subtitles</h5>
+    <hr />
     <div class="scroll">
       {#each t.subtitles as track (track.id)}
         {@render choice(trackName(track.name), track.id === t.subtitleCurrent, () => player.setSubtitleTrack(track.id))}
@@ -151,8 +153,14 @@
     color: var(--muted);
     flex-shrink: 0;
   }
-  .head {
+  .head,
+  h5 {
     font-weight: 600;
+  }
+  h5 {
+    margin: 0;
+    padding: 9px 16px;
+    font-size: inherit;
   }
   .choice .ck {
     width: 18px;

@@ -107,6 +107,8 @@ struct PlayerState {
     rate: f32,
     volume: i32,
     muted: bool,
+    /// Input cache fill, 0–100; below 100 while loading or after a seek.
+    buffering: f32,
     audio_delay: i64,
     subtitle_delay: i64,
 }
@@ -270,6 +272,7 @@ impl Core {
             rate: v.rate(),
             volume: v.volume(),
             muted: v.muted(),
+            buffering: v.buffering(),
             audio_delay: v.audio_delay(),
             subtitle_delay: v.subtitle_delay(),
         }
@@ -498,8 +501,11 @@ fn pump_events(core: Arc<Core>, rx: Receiver<i32>) {
             core.emit_tracks();
         }
 
-        let only_time = events.iter().all(|&e| e == event::TIME_CHANGED);
-        if !only_time || last_time_emit.elapsed() >= TIME_INTERVAL {
+        // Time and buffering progress arrive many times a second; throttle
+        // them, but always send the moment buffering finishes.
+        let minor = events.iter().all(|&e| e == event::TIME_CHANGED || e == event::BUFFERING)
+            && !(has(event::BUFFERING) && core.vlc.buffering() >= 100.0);
+        if !minor || last_time_emit.elapsed() >= TIME_INTERVAL {
             core.emit_state();
             last_time_emit = Instant::now();
         }
