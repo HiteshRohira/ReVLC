@@ -1,4 +1,4 @@
-import { invoke } from "@tauri-apps/api/core";
+import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 
 export type PlayState = "idle" | "opening" | "buffering" | "playing" | "paused" | "stopped" | "ended" | "error";
@@ -29,6 +29,36 @@ export interface Tracks {
   subtitleCurrent: number;
 }
 
+export interface Chapter {
+  start: number;
+  duration: number;
+  name: string;
+}
+
+export interface HistoryEntry {
+  uri: string;
+  title: string;
+  position: number;
+  length: number;
+  updated: number;
+  finished: boolean;
+  thumb: string | null;
+}
+
+export interface LibraryItem {
+  uri: string;
+  title: string;
+  root: string;
+  folder: string;
+  modified: number;
+  thumb: string | null;
+}
+
+export interface Library {
+  folders: string[];
+  items: LibraryItem[];
+}
+
 export interface Item {
   uri: string;
   title: string;
@@ -45,6 +75,7 @@ interface Snapshot {
   state: PlayerState | null;
   tracks: Tracks | null;
   playlist: Playlist | null;
+  chapters: Chapter[];
   engine: { Ok: string } | { Err: string };
 }
 
@@ -76,6 +107,11 @@ class Player {
   });
   tracks = $state<Tracks>({ audio: [], audioCurrent: -1, subtitles: [], subtitleCurrent: -1 });
   playlist = $state<Playlist>({ items: [], current: null, repeat: "off", shuffle: false });
+  chapters = $state<Chapter[]>([]);
+  history = $state<HistoryEntry[]>([]);
+  library = $state<Library>({ folders: [], items: [] });
+  /** Bumped when a thumbnail file changes, to bust the web view's image cache. */
+  thumbVersion = $state(0);
   engine = $state("");
   engineError = $state<string | null>(null);
   notices = $state<Notice[]>([]);
@@ -86,6 +122,7 @@ class Player {
   active = $derived(ACTIVE.includes(this.state.state));
   playing = $derived(this.state.state === "playing" || this.state.state === "buffering" || this.state.state === "opening");
   current = $derived(this.playlist.current != null ? (this.playlist.items[this.playlist.current] ?? null) : null);
+  chapter = $derived(chapterAt(this.chapters, this.state.time));
 
   #noticeId = 0;
 
@@ -94,6 +131,11 @@ class Player {
       listen<PlayerState>("player://state", (e) => (this.state = e.payload)),
       listen<Tracks>("player://tracks", (e) => (this.tracks = e.payload)),
       listen<Playlist>("player://playlist", (e) => (this.playlist = e.payload)),
+      listen<Chapter[]>("player://chapters", (e) => (this.chapters = e.payload)),
+      listen<string>("library://thumb", () => {
+        this.thumbVersion++;
+        this.#refreshLibrarySoon();
+      }),
       listen<{ kind: "info" | "error"; text: string }>("player://notice", (e) =>
         this.notify(e.payload.kind, e.payload.text),
       ),
@@ -107,6 +149,51 @@ class Player {
     if (snap.state) this.state = snap.state;
     if (snap.tracks) this.tracks = snap.tracks;
     if (snap.playlist) this.playlist = snap.playlist;
+    this.chapters = snap.chapters;
+    await Promise.all([this.loadHistory(), this.loadLibrary()]);
+  }
+
+  async loadLibrary() {
+    try {
+      this.library = await invoke<Library>("library_list");
+    } catch {
+      this.library = { folders: [], items: [] };
+    }
+  }
+
+  #refreshTimer: ReturnType<typeof setTimeout> | undefined;
+  // Thumbnails arrive one by one; refresh the lists at most every couple of seconds.
+  #refreshLibrarySoon() {
+    this.#refreshTimer ??= setTimeout(() => {
+      this.#refreshTimer = undefined;
+      this.loadLibrary();
+      this.loadHistory();
+    }, 1500);
+  }
+
+  async addFolder(path: string) {
+    try {
+      this.library = await invoke<Library>("library_add", { path });
+    } catch (e) {
+      this.notify("error", String(e));
+    }
+  }
+
+  async removeFolder(path: string) {
+    this.library = await invoke<Library>("library_remove", { path });
+  }
+
+  async loadHistory() {
+    try {
+      this.history = await invoke<HistoryEntry[]>("history_list");
+    } catch {
+      this.history = [];
+    }
+  }
+
+  async forget(uri: string) {
+    await this.#call("history_remove", { uri });
+    await this.loadHistory();
   }
 
   notify(kind: Notice["kind"], text: string) {
@@ -127,7 +214,10 @@ class Player {
   open = (uris: string[], play = true) => this.#call("open", { uris, play });
   playIndex = (index: number) => this.#call("play_index", { index });
   togglePause = () => this.#call("toggle_pause");
-  stop = () => this.#call("stop");
+  stop = async () => {
+    await this.#call("stop");
+    await this.loadHistory();
+  };
   next = () => this.#call("next");
   previous = () => this.#call("previous");
   nextFrame = () => this.#call("next_frame");
@@ -185,6 +275,22 @@ class Player {
   setRepeat = (repeat: Repeat) => this.#call("set_repeat", { repeat });
   setShuffle = (shuffle: boolean) => this.#call("set_shuffle", { shuffle });
 
+  #lastSubtitle = -1;
+
+  /** Turns subtitles off, or back on to the last (or first) track. */
+  toggleSubtitles() {
+    const { subtitles, subtitleCurrent } = this.tracks;
+    if (subtitleCurrent !== -1) {
+      this.#lastSubtitle = subtitleCurrent;
+      this.notify("osd", "Subtitles off");
+      return this.setSubtitleTrack(-1);
+    }
+    const next = subtitles.find((t) => t.id === this.#lastSubtitle) ?? subtitles.find((t) => t.id !== -1);
+    if (!next) return this.notify("osd", "No subtitles");
+    this.notify("osd", `Subtitles: ${next.name}`);
+    return this.setSubtitleTrack(next.id);
+  }
+
   /** Selects the next entry in a track list, wrapping around. */
   cycle(kind: "audio" | "subtitles") {
     const list = kind === "audio" ? this.tracks.audio : this.tracks.subtitles;
@@ -201,6 +307,39 @@ export const player = new Player();
 export function isSubtitle(path: string) {
   const ext = path.split(".").pop()?.toLowerCase() ?? "";
   return SUBTITLE_EXTENSIONS.includes(ext);
+}
+
+const MEDIA_EXT = /\.(mp4|m4v|mkv|webm|mov|avi|ts|m2ts|mts|mpg|mpeg|wmv|flv|ogv|3gp|vob|mp3|m4a|aac|flac|wav|ogg|opus|wma|aiff)$/i;
+
+/** A display title: file names lose their extension. */
+export function cleanTitle(title: string) {
+  return title.replace(MEDIA_EXT, "");
+}
+
+/** libVLC calls the "no track" entry "Disable". */
+export function trackName(name: string) {
+  return name === "Disable" ? "Off" : name;
+}
+
+/** URL for a thumbnail file in the app cache. */
+export function thumbUrl(path: string | null, version = 0) {
+  return path ? `${convertFileSrc(path)}?v=${version}` : null;
+}
+
+/** True for placeholder chapter names like "Chapter 01". */
+export function genericChapter(name: string) {
+  return /^(chapter|chap\.?)\s*\d+$/i.test(name.trim());
+}
+
+export function chapterAt(chapters: Chapter[], ms: number): Chapter | null {
+  let found: Chapter | null = null;
+  for (const c of chapters) if (c.start <= ms) found = c;
+  return found;
+}
+
+/** Whether a history entry was left part-way through (mirrors the backend's rule). */
+export function resumable(e: HistoryEntry) {
+  return !e.finished && e.position > 15_000 && (e.length === 0 || e.position < e.length - 15_000);
 }
 
 export function formatTime(ms: number) {

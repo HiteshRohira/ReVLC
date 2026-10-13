@@ -15,10 +15,10 @@
       {
         "label": "main",
         "title": "ReVLC",
-        "width": 1120,
-        "height": 680,
-        "minWidth": 480,
-        "minHeight": 300,
+        "width": 1280,
+        "height": 800,
+        "minWidth": 720,
+        "minHeight": 450,
         "transparent": true,
         "titleBarStyle": "Overlay",
         "hiddenTitle": true,
@@ -26,7 +26,13 @@
       }
     ],
     "security": {
-      "csp": null
+      "csp": null,
+      "assetProtocol": {
+        "enable": true,
+        "scope": [
+          "$APPCACHE/thumbs/*"
+        ]
+      }
     }
   },
   "bundle": {

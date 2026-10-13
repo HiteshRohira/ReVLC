@@ -75,7 +75,7 @@
     outline: none;
   }
   input:focus {
-    border-color: var(--accent);
+    border-color: var(--acc);
   }
   .buttons {
     display: flex;
