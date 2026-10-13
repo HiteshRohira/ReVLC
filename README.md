@@ -25,6 +25,7 @@ See [docs/plan.md](docs/plan.md) for the reasoning and milestones.
 Download the `.dmg` from [Releases](../../releases) and drag ReVLC to
 Applications. Builds aren't notarised yet, so the first time, right-click
 ReVLC and choose **Open**, or run `xattr -cr /Applications/ReVLC.app`.
+After that, ReVLC updates itself (Settings → General → Updates).
 
 ## Building
 
@@ -41,6 +42,17 @@ npm run build:app     # ReVLC.app and a .dmg in src-tauri/target/release/bundle
 in `src-tauri/vlc`, which is bundled into the app. Without it, development
 builds fall back to an installed VLC.app. Set `REVLC_VLC_DIR` to use libVLC
 from somewhere else (a directory with `lib/`, `plugins/` and `share/`).
+
+### Releasing
+
+`build:app` signs the updater archive with `~/.tauri/revlc-updater.key`;
+installed copies only accept updates signed with that key. Then:
+
+```sh
+scripts/release-files.sh "What changed"   # release/ files + site/latest.json
+gh release create v<version>-alpha release/* --prerelease
+cd site && vercel deploy --prod            # publishes latest.json; apps see the update
+```
 
 ## Known issues
 

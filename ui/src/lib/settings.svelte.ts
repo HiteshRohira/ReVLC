@@ -9,6 +9,7 @@ export interface Settings {
   stopAfterEach: boolean;
   pauseWhenMinimized: boolean;
   seekbarChapters: boolean;
+  autoUpdate: boolean;
 
   video: boolean;
   startFullscreen: boolean;
