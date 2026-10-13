@@ -1,5 +1,6 @@
 <script lang="ts">
   import { player, formatTime, chapterAt, genericChapter } from "./player.svelte";
+  import { settings } from "./settings.svelte";
 
   const s = $derived(player.state);
   const length = $derived(s.length);
@@ -12,7 +13,7 @@
 
   // Chapters as segments; a single segment when the media has none.
   const segments = $derived(
-    player.chapters.length > 1 && length > 0
+    player.chapters.length > 1 && length > 0 && settings.value?.seekbarChapters !== false
       ? player.chapters.map((c, i) => ({
           start: c.start,
           end: player.chapters[i + 1]?.start ?? length,

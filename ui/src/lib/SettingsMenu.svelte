@@ -1,6 +1,7 @@
 <script lang="ts">
+  import { invoke } from "@tauri-apps/api/core";
   import { open as openDialog } from "@tauri-apps/plugin-dialog";
-  import { AudioLines, Camera, Captions, Check, ChevronLeft, ChevronRight, Crop, FileUp, Gauge, Rows3 } from "@lucide/svelte";
+  import { AudioLines, Camera, Captions, Check, ChevronLeft, ChevronRight, Crop, FileUp, Gauge, Rows3, Settings2 } from "@lucide/svelte";
   import { player, trackName, ASPECT_RATIOS, CROPS, SPEEDS, SUBTITLE_EXTENSIONS, type Track } from "./player.svelte";
 
   let { onclose }: { onclose: () => void } = $props();
@@ -61,6 +62,10 @@
     </button>
     <button class="it" onclick={() => { player.snapshot(); onclose(); }}>
       <Camera size={18} /><span class="lab">Take snapshot</span><em>⇧S</em>
+    </button>
+    <hr />
+    <button class="it" onclick={() => { invoke("open_settings"); onclose(); }}>
+      <Settings2 size={18} /><span class="lab">More settings…</span><em>⌘,</em>
     </button>
   {:else if page === "speed"}
     {@render header("Playback speed")}

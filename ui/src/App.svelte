@@ -10,7 +10,9 @@
   import PlayerView from "./lib/PlayerView.svelte";
   import UrlDialog from "./lib/UrlDialog.svelte";
   import { player, isSubtitle, cleanTitle } from "./lib/player.svelte";
-  import { handleKey, SHORTCUTS } from "./lib/shortcuts";
+  import { ACTIONS, ACTION_BY_ID, FIXED_SHORTCUTS, effectiveBindings, eventBinding, formatBinding, syncMenu, type Host } from "./lib/actions";
+  import { formatTime } from "./lib/player.svelte";
+  import { settings } from "./lib/settings.svelte";
   import { theme } from "./lib/theme.svelte";
   import { ui } from "./lib/ui.svelte";
 
@@ -18,6 +20,9 @@
   const IDLE_HIDE_MS = 2500;
 
   let dropping = $state(false);
+  /** A resume point waiting for the user's answer ("Ask" setting). */
+  let resumePrompt = $state<number | null>(null);
+  let resumeTimer: ReturnType<typeof setTimeout> | undefined;
   let idle = $state(false);
   let idleTimer: ReturnType<typeof setTimeout> | undefined;
 
@@ -49,6 +54,37 @@
       player.loadLibrary();
       ui.settingsOpen = false;
     }
+  });
+
+  const bindings = $derived(effectiveBindings(settings.value?.shortcuts ?? {}));
+  const host: Host = { openFiles: () => openFiles(), openFolder: () => openFolder(), toggleFullscreen: () => toggleFullscreen() };
+
+  // Keep the menu bar's shortcuts in step with the user's bindings.
+  $effect(() => {
+    if (settings.value) syncMenu(bindings);
+  });
+
+  $effect(() => {
+    if (settings.value) appWindow.setAlwaysOnTop(settings.value.alwaysOnTop);
+  });
+
+  // "Start in fullscreen": once per item, when its video appears.
+  let fullscreenedFor: string | null = null;
+  $effect(() => {
+    const uri = currentUri;
+    if (!uri || !player.state.hasVideo || !settings.value?.startFullscreen || fullscreenedFor === uri) return;
+    fullscreenedFor = uri;
+    appWindow.isFullscreen().then((fs) => {
+      if (!fs) appWindow.setFullscreen(true);
+    });
+  });
+
+  // A different item started: drop any stale resume offer. (Keyed on the
+  // URI: the item object is rebuilt when, e.g., its title is updated.)
+  const currentUri = $derived(player.current?.uri ?? null);
+  $effect(() => {
+    currentUri;
+    resumePrompt = null;
   });
 
   function wake() {
@@ -83,15 +119,46 @@
   }
 
   function onKeyDown(e: KeyboardEvent) {
-    if (!theme.onboarded) return;
-    if (handleKey(e, { openFiles, openFolder, toggleFullscreen, exitFullscreen })) {
-      e.preventDefault();
-      wake();
+    if (!theme.onboarded || ui.urlOpen) return;
+    const target = e.target as HTMLElement | null;
+    if (target?.closest("input, select, textarea")) return;
+    if (e.key === "Escape") {
+      if (ui.settingsOpen) ui.settingsOpen = false;
+      else if (ui.playlistOpen) ui.playlistOpen = false;
+      else if (ui.helpOpen) ui.helpOpen = false;
+      else exitFullscreen();
+    } else if (/^[0-9]$/.test(e.key) && !e.metaKey && player.state.length > 0 && player.state.seekable) {
+      player.seek((Number(e.key) / 10) * player.state.length);
+    } else {
+      const binding = eventBinding(e);
+      // ⌘ shortcuts belong to the menu bar, which runs them itself.
+      if (!binding || binding.includes("Cmd")) return;
+      const action = ACTIONS.find((a) => bindings[a.id] === binding);
+      if (!action) return;
+      action.run(host);
+    }
+    e.preventDefault();
+    wake();
+  }
+
+  function answerResume(resume: boolean) {
+    if (resume && resumePrompt !== null) invoke("resume_at", { ms: resumePrompt });
+    resumePrompt = null;
+    clearTimeout(resumeTimer);
+  }
+
+  function onVisibility() {
+    // "Pause when minimised": hidden can also mean covered, so check.
+    if (document.hidden && settings.value?.pauseWhenMinimized && player.playing) {
+      appWindow.isMinimized().then((min) => {
+        if (min) player.togglePause();
+      });
     }
   }
 
   onMount(() => {
     player.init();
+    settings.load();
     wake();
     const unlisteners = [
       getCurrentWebview().onDragDropEvent(({ payload }) => {
@@ -107,6 +174,15 @@
       }),
       // The native video view eats mouse moves, so the app forwards them.
       listen("native://pointer", wake),
+      listen<string>("menu://action", (e) => {
+        ACTION_BY_ID.get(e.payload)?.run(host);
+        wake();
+      }),
+      listen<number>("player://resume-prompt", (e) => {
+        resumePrompt = e.payload;
+        clearTimeout(resumeTimer);
+        resumeTimer = setTimeout(() => (resumePrompt = null), 12000);
+      }),
       appWindow.onResized(async () => (ui.fullscreen = await appWindow.isFullscreen())),
     ];
     return () => unlisteners.forEach((p) => p.then((off) => off()));
@@ -114,6 +190,7 @@
 </script>
 
 <svelte:window onkeydown={onKeyDown} onpointermove={wake} onpointerdown={wake} />
+<svelte:document onvisibilitychange={onVisibility} />
 
 <div class="app" class:video={showPlayer && player.state.hasVideo} class:hide-cursor={controlsHidden} class:fullscreen={ui.fullscreen}>
   {#if !theme.onboarded}
@@ -123,6 +200,14 @@
     <PlayerView hidden={controlsHidden} onfullscreen={toggleFullscreen} onadd={openFiles} />
   {:else}
     <Home onopen={openFiles} onopenfolder={openFolder} />
+  {/if}
+
+  {#if resumePrompt !== null && showPlayer}
+    <div class="resume" role="alertdialog" aria-label="Continue where you left off">
+      <span>Continue from <b class="tnum">{formatTime(resumePrompt)}</b>?</span>
+      <button class="btn pri" onclick={() => answerResume(true)}>Continue</button>
+      <button class="btn" onclick={() => answerResume(false)}>Start over</button>
+    </div>
   {/if}
 
   <div class="notices" aria-live="polite">
@@ -142,7 +227,8 @@
       <div class="help" role="dialog" aria-label="Keyboard shortcuts">
         <h2>Keyboard shortcuts</h2>
         <dl>
-          {#each SHORTCUTS as [keys, action]}<dt>{keys}</dt><dd>{action}</dd>{/each}
+          {#each ACTIONS.filter((a) => bindings[a.id]) as a (a.id)}<dt>{formatBinding(bindings[a.id])}</dt><dd>{a.label}</dd>{/each}
+          {#each FIXED_SHORTCUTS as [k, label]}<dt>{formatBinding(k)}</dt><dd>{label}</dd>{/each}
         </dl>
       </div>
     </div>
@@ -165,6 +251,25 @@
   .stage {
     position: absolute;
     inset: 0;
+  }
+  .resume {
+    position: absolute;
+    top: 52px;
+    left: 50%;
+    transform: translateX(-50%);
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 8px 8px 8px 16px;
+    border-radius: 12px;
+    background: var(--panel);
+    border: 1px solid var(--border);
+    box-shadow: 0 10px 30px rgb(0 0 0 / 0.5);
+    font-size: 13.5px;
+    z-index: 45;
+  }
+  .resume .btn {
+    height: 30px;
   }
   .notices {
     position: absolute;
