@@ -52,7 +52,7 @@
     if (!showPlayer) {
       player.loadHistory();
       player.loadLibrary();
-      ui.settingsOpen = false;
+      ui.menu = null;
     }
   });
 
@@ -123,7 +123,7 @@
     const target = e.target as HTMLElement | null;
     if (target?.closest("input, select, textarea")) return;
     if (e.key === "Escape") {
-      if (ui.settingsOpen) ui.settingsOpen = false;
+      if (ui.menu) ui.menu = null;
       else if (ui.playlistOpen) ui.playlistOpen = false;
       else if (ui.helpOpen) ui.helpOpen = false;
       else exitFullscreen();

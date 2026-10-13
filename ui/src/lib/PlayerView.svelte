@@ -16,27 +16,59 @@
     player.chapters.length > 1 && player.chapter && !genericChapter(player.chapter.name) ? player.chapter.name : null,
   );
   const subtitlesOn = $derived(player.tracks.subtitleCurrent !== -1 && player.tracks.subtitles.length > 0);
-  let menuEl = $state<HTMLDivElement>();
+  let menusEl = $state<HTMLDivElement>();
+  // Shown only if loading lasts a moment, so local seeks don't flash it.
+  let spinner = $state(false);
+  // libVLC reports "playing" before the first frame, and while a stream
+  // refills after a seek, so a clock that stops moving counts as buffering.
+  let stalled = $state(false);
+  // Primitives, so the effect below reruns only when they actually change.
+  const time = $derived(s.time);
+  const playState = $derived(s.state);
 
   $effect(() => {
-    if (!ui.settingsOpen) return;
+    time;
+    stalled = false;
+    if (playState !== "playing") return;
+    const timer = setTimeout(() => (stalled = true), 700);
+    return () => clearTimeout(timer);
+  });
+
+  $effect(() => {
+    if (!player.loading && !stalled) return;
+    const timer = setTimeout(() => (spinner = true), 150);
+    return () => {
+      clearTimeout(timer);
+      spinner = false;
+    };
+  });
+
+  $effect(() => {
+    if (!ui.menu) return;
     ui.openMenus++;
     return () => ui.openMenus--;
   });
 
   function onWindowPointer(e: PointerEvent) {
-    if (ui.settingsOpen && menuEl && !menuEl.contains(e.target as Node)) ui.settingsOpen = false;
+    if (ui.menu && menusEl && !menusEl.contains(e.target as Node)) ui.menu = null;
   }
+
+  const toggleMenu = (menu: "settings" | "subtitles") => (ui.menu = ui.menu === menu ? null : menu);
 </script>
 
 <svelte:window onpointerdown={onWindowPointer} />
 
+{#if spinner}
+  <div class="loading" role="status" aria-label="Buffering"><div class="ring"></div></div>
+{/if}
+
 <div class="player" class:hidden>
   {#if !s.hasVideo}
     <div class="audio">
-      <Music2 size={56} strokeWidth={1.5} />
-      <h1>{cleanTitle(player.current?.title ?? "")}</h1>
-      {#if s.state === "opening" || s.state === "buffering"}<p>Loading…</p>{/if}
+      {#if !spinner}
+        <Music2 size={56} strokeWidth={1.5} />
+        <h1>{cleanTitle(player.current?.title ?? "")}</h1>
+      {/if}
     </div>
   {/if}
 
@@ -66,14 +98,17 @@
         <span class="time tnum">{formatTime(s.time)} <span>/ {s.length > 0 ? formatTime(s.length) : "Live"}</span></span>
       </div>
       <div class="grp">
-        <button class="icon cc" class:on={subtitlesOn} title="Subtitles (V)" aria-label="Toggle subtitles" aria-pressed={subtitlesOn} onclick={() => player.toggleSubtitles()}>
-          <Captions size={21} />
-        </button>
-        <div class="menu-wrap" bind:this={menuEl}>
-          <button class="icon" class:active={ui.settingsOpen} title="Settings" aria-label="Settings" aria-expanded={ui.settingsOpen} onclick={() => (ui.settingsOpen = !ui.settingsOpen)}>
+        <div class="menu-wrap" bind:this={menusEl}>
+          <button class="icon cc" class:on={subtitlesOn} class:active={ui.menu === "subtitles"} title="Subtitles" aria-label="Subtitles"
+            aria-expanded={ui.menu === "subtitles"} onclick={() => toggleMenu("subtitles")}>
+            <Captions size={21} />
+          </button>
+          <button class="icon" class:active={ui.menu === "settings"} title="Settings" aria-label="Settings" aria-expanded={ui.menu === "settings"} onclick={() => toggleMenu("settings")}>
             <Settings size={20} />
           </button>
-          {#if ui.settingsOpen}<div class="pop"><SettingsMenu onclose={() => (ui.settingsOpen = false)} /></div>{/if}
+          {#if ui.menu}
+            {#key ui.menu}<div class="pop"><SettingsMenu kind={ui.menu} onclose={() => (ui.menu = null)} /></div>{/key}
+          {/if}
         </div>
         <button class="icon" class:active={ui.playlistOpen} title="Up next (⌘L)" aria-label="Up next" onclick={() => (ui.playlistOpen = !ui.playlistOpen)}>
           <ListVideo size={21} />
@@ -101,6 +136,7 @@
   .top {
     position: absolute;
     inset: 0 0 auto;
+    z-index: 2;
     height: 72px;
     padding: 0 16px 0 76px;
     background: linear-gradient(rgb(0 0 0 / 0.6), transparent);
@@ -137,6 +173,7 @@
   }
   .bottom {
     position: absolute;
+    z-index: 2;
     inset: auto 0 0;
     padding: 40px 16px 8px;
     background: linear-gradient(transparent, rgb(0 0 0 / 0.5) 40%, rgb(0 0 0 / 0.78));
@@ -205,11 +242,42 @@
   }
   .menu-wrap {
     position: relative;
+    display: flex;
+    gap: 4px;
   }
   .pop {
     position: absolute;
     right: -88px;
     bottom: 48px;
+  }
+  .loading {
+    position: absolute;
+    inset: 0;
+    display: grid;
+    place-items: center;
+    background: rgb(24 24 27 / 0.55);
+    pointer-events: none;
+    animation: fade-in 0.2s;
+    /* Above the audio-only backdrop, below the controls. */
+    z-index: 1;
+  }
+  .ring {
+    width: 44px;
+    height: 44px;
+    border-radius: 50%;
+    border: 3.5px solid rgb(255 255 255 / 0.2);
+    border-top-color: #fff;
+    animation: spin 0.8s linear infinite;
+  }
+  @keyframes spin {
+    to {
+      transform: rotate(360deg);
+    }
+  }
+  @keyframes fade-in {
+    from {
+      opacity: 0;
+    }
   }
   .audio {
     position: absolute;
@@ -228,8 +296,5 @@
     text-align: center;
     font-size: 20px;
     color: var(--text);
-  }
-  .audio p {
-    margin: 0;
   }
 </style>
