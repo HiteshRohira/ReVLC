@@ -1,24 +1,27 @@
 mod history;
 mod library;
+mod menu;
 mod playlist;
+mod settings;
 #[cfg(target_os = "macos")]
 mod surface_macos;
 mod vlc;
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver};
-use std::collections::{HashSet, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::thread;
 use std::time::{Duration, Instant};
 
 use serde::Serialize;
-use tauri::{AppHandle, Emitter, Manager, RunEvent};
+use tauri::{AppHandle, Emitter, Manager, RunEvent, WebviewUrl, WebviewWindowBuilder};
 
 use history::{History, UiEntry};
 use library::{Library, LibraryItem};
 use playlist::{Playlist, Repeat};
+use settings::{Resume, Settings};
 use vlc::{Chapter, State, Track, Vlc, event};
 
 struct Core {
@@ -30,12 +33,36 @@ struct Core {
     ready: AtomicBool,
     pending: Mutex<Vec<String>>,
     history: Mutex<History>,
-    /// Position to jump to once the current item starts playing.
-    resume: Mutex<Option<i64>>,
+    /// What to do once the current item starts playing.
+    resume: Mutex<Option<PendingSeek>>,
+    settings: Mutex<Settings>,
+    data_dir: PathBuf,
+    /// The user's preferred languages, for the default subtitle language.
+    languages: Vec<String>,
+    /// Installed font families (read once; AppKit needs the main thread).
+    fonts: Vec<String>,
     /// Distinguishes the user's snapshots from thumbnail captures.
     user_snapshot: AtomicBool,
     library: Mutex<Library>,
     thumbs: Thumbnails,
+}
+
+#[derive(Clone, Copy)]
+enum PendingSeek {
+    /// Jump there, optionally with a "Resuming from…" message.
+    Seek { ms: i64, announce: bool },
+    /// Offer to resume (the "Ask" setting).
+    Ask(i64),
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SettingsInfo {
+    settings: Settings,
+    defaults: Settings,
+    system_languages: Vec<String>,
+    audio_devices: Vec<(String, String)>,
+    fonts: Vec<String>,
 }
 
 /// Thumbnails waiting to be generated, handled by one background thread.
@@ -116,6 +143,50 @@ impl Core {
 
     fn history(&self) -> MutexGuard<'_, History> {
         self.history.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    fn settings(&self) -> MutexGuard<'_, Settings> {
+        self.settings.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Pushes VLC-backed settings into libVLC's configuration (only the ones
+    /// that differ from `previous`). Returns whether anything changed.
+    fn apply_vlc_settings(&self, settings: &Settings, previous: Option<&Settings>) -> bool {
+        let new = settings.vlc_config(&self.languages);
+        let old = previous.map(|p| p.vlc_config(&self.languages));
+        let mut changed = false;
+        for (i, (name, value)) in new.iter().enumerate() {
+            if old.as_ref().is_none_or(|o| o[i].1 != *value) {
+                self.vlc.set_config(name, value);
+                changed = true;
+                // The player keeps its own copy of these, so set them directly too.
+                if name.starts_with("video-title-") {
+                    self.vlc.set_title_display(settings.show_title, settings.title_position, settings.title_timeout);
+                } else if name.starts_with("deinterlace") && settings.deinterlace >= 0 {
+                    let on = settings.deinterlace == 1;
+                    self.vlc.set_deinterlace(on.then_some(settings.deinterlace_mode.as_str()).map(|m| if m == "auto" { "blend" } else { m }));
+                }
+            }
+        }
+        changed
+    }
+
+    /// Reopens the current item at the same position, so settings that
+    /// only apply when a video starts take effect now.
+    fn reload(&self) {
+        let Some(uri) = self.current_uri() else { return };
+        let state = self.vlc.state();
+        if !matches!(state, State::Playing | State::Paused) {
+            return;
+        }
+        *self.resume.lock().unwrap_or_else(|e| e.into_inner()) =
+            Some(PendingSeek::Seek { ms: self.vlc.time(), announce: false });
+        let _ = self.vlc.open(&uri, &[]);
+        if state == State::Paused {
+            // Let it show a frame at the old position, then pause again.
+            thread::sleep(Duration::from_millis(400));
+            self.vlc.set_pause(true);
+        }
     }
 
     fn library(&self) -> MutexGuard<'_, Library> {
@@ -241,12 +312,18 @@ impl Core {
         };
         {
             let mut history = self.history();
-            *self.resume.lock().unwrap_or_else(|e| e.into_inner()) = history.resume_point(&uri);
+            let point = history.resume_point(&uri);
+            let pending = match (self.settings().resume, point) {
+                (Resume::Always, Some(ms)) => Some(PendingSeek::Seek { ms, announce: true }),
+                (Resume::Ask, Some(ms)) => Some(PendingSeek::Ask(ms)),
+                _ => None,
+            };
+            *self.resume.lock().unwrap_or_else(|e| e.into_inner()) = pending;
             history.touch(&uri, &title);
             history.save(true);
         }
         self.emit_playlist();
-        self.vlc.open(&uri)
+        self.vlc.open(&uri, &[])
     }
 
     /// Stops playback, remembering where we were.
@@ -346,8 +423,11 @@ fn pump_events(core: Arc<Core>, rx: Receiver<i32>) {
                 history.finish(&uri);
                 history.save(true);
             }
-            if let Err(e) = core.advance(true) {
-                core.notice("error", e);
+            let stop_after_each = core.settings().stop_after_each;
+            if !stop_after_each {
+                if let Err(e) = core.advance(true) {
+                    core.notice("error", e);
+                }
             }
         }
         if has(event::ERROR) {
@@ -358,9 +438,21 @@ fn pump_events(core: Arc<Core>, rx: Receiver<i32>) {
             core.notice("error", format!("Could not play {}", title.unwrap_or_else(|| "this media".into())));
         }
         if has(event::PLAYING) {
-            if let Some(ms) = core.resume.lock().unwrap_or_else(|e| e.into_inner()).take() {
-                core.vlc.set_time(ms);
-                core.notice("osd", format!("Resuming from {}", format_time(ms)));
+            match core.resume.lock().unwrap_or_else(|e| e.into_inner()).take() {
+                Some(PendingSeek::Seek { ms, announce }) => {
+                    core.vlc.set_time(ms);
+                    if announce {
+                        core.notice("osd", format!("Resuming from {}", format_time(ms)));
+                    }
+                }
+                Some(PendingSeek::Ask(ms)) => {
+                    let _ = core.app.emit("player://resume-prompt", ms);
+                }
+                None => {}
+            }
+            let device = core.settings().audio_device.clone();
+            if !device.is_empty() {
+                core.vlc.set_audio_device(&device);
             }
         }
         if has(event::PAUSED) {
@@ -397,7 +489,7 @@ fn pump_events(core: Arc<Core>, rx: Receiver<i32>) {
             }
         }
         if has(event::SNAPSHOT_TAKEN) && core.user_snapshot.swap(false, Ordering::AcqRel) {
-            core.notice("info", "Snapshot saved to Pictures");
+            core.notice("info", "Snapshot saved");
         }
         if [event::PLAYING, event::VOUT, event::ES_ADDED, event::ES_DELETED, event::ES_SELECTED]
             .iter()
@@ -503,6 +595,90 @@ fn history_list(player: tauri::State<Player>) -> Result<Vec<UiEntry>, String> {
         .collect();
     core.queue_thumbnails(missing, true);
     Ok(list)
+}
+
+#[tauri::command]
+fn settings_get(player: tauri::State<Player>) -> Result<SettingsInfo, String> {
+    let core = player.core()?;
+    Ok(SettingsInfo {
+        settings: core.settings().clone(),
+        defaults: Settings::default(),
+        system_languages: core.languages.clone(),
+        audio_devices: core.vlc.audio_devices(),
+        fonts: core.fonts.clone(),
+    })
+}
+
+/// Saves new settings, applies them, and reopens the current video if a
+/// change only takes effect when a video starts.
+#[tauri::command]
+fn settings_set(player: tauri::State<Player>, settings: Settings) -> Res {
+    let core = player.core()?;
+    let previous = core.settings().clone();
+    if previous == settings {
+        return Ok(());
+    }
+    let vlc_changed = core.apply_vlc_settings(&settings, Some(&previous));
+    if settings.audio_device != previous.audio_device {
+        core.vlc.set_audio_device(&settings.audio_device);
+    }
+    settings.save(&core.data_dir);
+    *core.settings() = settings.clone();
+    let _ = core.app.emit("settings://changed", settings);
+    if vlc_changed {
+        let reload = core.clone();
+        thread::spawn(move || reload.reload());
+    }
+    Ok(())
+}
+
+/// Seeks to a resume point the user accepted.
+#[tauri::command]
+fn resume_at(player: tauri::State<Player>, ms: i64) -> Res {
+    player.core()?.vlc.set_time(ms);
+    Ok(())
+}
+
+#[tauri::command]
+fn open_settings(app: AppHandle) -> Res {
+    show_settings(&app).map_err(|e| e.to_string())
+}
+
+/// Rebuilds the menu bar with the current shortcut bindings.
+#[tauri::command]
+fn set_menu_shortcuts(app: AppHandle, keys: HashMap<String, String>) -> Res {
+    let menu = menu::build(&app, &keys).map_err(|e| e.to_string())?;
+    app.set_menu(menu).map(|_| ()).map_err(|e| e.to_string())
+}
+
+fn show_settings(app: &AppHandle) -> tauri::Result<()> {
+    if let Some(window) = app.get_webview_window("settings") {
+        window.unminimize()?;
+        return window.set_focus();
+    }
+    WebviewWindowBuilder::new(app, "settings", WebviewUrl::App("index.html?view=settings".into()))
+        .title("Settings")
+        .inner_size(760.0, 640.0)
+        .min_inner_size(640.0, 480.0)
+        .title_bar_style(tauri::TitleBarStyle::Overlay)
+        .hidden_title(true)
+        .build()?;
+    Ok(())
+}
+
+/// Installed font families, for the subtitle font picker. Main thread only.
+fn font_families() -> Vec<String> {
+    #[cfg(target_os = "macos")]
+    {
+        let Some(mtm) = objc2::MainThreadMarker::new() else { return Vec::new() };
+        let manager = objc2_app_kit::NSFontManager::sharedFontManager(mtm);
+        let mut fonts: Vec<String> = manager.availableFontFamilies().iter().map(|f| f.to_string()).collect();
+        fonts.retain(|f| !f.starts_with('.'));
+        fonts.sort_by_key(|f| f.to_lowercase());
+        fonts
+    }
+    #[cfg(not(target_os = "macos"))]
+    Vec::new()
 }
 
 #[tauri::command]
@@ -665,8 +841,8 @@ fn set_deinterlace(player: tauri::State<Player>, mode: Option<String>) -> Res {
 
 #[tauri::command]
 fn take_snapshot(app: AppHandle, player: tauri::State<Player>) -> Res {
-    let dir = app.path().picture_dir().map_err(|e| e.to_string())?;
     let core = player.core()?;
+    let dir = core.settings().snapshot_dir(app.path().desktop_dir().ok()).ok_or("no snapshot folder")?;
     core.user_snapshot.store(true, Ordering::Release);
     core.vlc.snapshot(&dir, 0)
 }
@@ -742,19 +918,12 @@ fn preferred_languages() -> Vec<String> {
 
 fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     let resource_dir = app.path().resource_dir().ok();
-    // Turn on subtitles in the user's languages, like other players do.
+    let data_dir = app.path().app_data_dir()?;
     let languages = preferred_languages();
-    let args: Vec<String> = if languages.is_empty() {
-        Vec::new()
-    } else {
-        vec![format!("--sub-language={}", languages.join(","))]
-    };
+    let settings = Settings::load(&data_dir);
     // Extra libVLC options for debugging, e.g. REVLC_VLC_ARGS="--verbose=2".
-    let args: Vec<String> = args
-        .into_iter()
-        .chain(std::env::var("REVLC_VLC_ARGS").unwrap_or_default().split_whitespace().map(String::from))
-        .collect();
-    let vlc = match Vlc::load(resource_dir.as_deref(), &args) {
+    let args: Vec<String> = std::env::var("REVLC_VLC_ARGS").unwrap_or_default().split_whitespace().map(String::from).collect();
+    let vlc = match Vlc::load(resource_dir.as_deref(), &args, &settings.vlc_config(&languages)) {
         Ok(vlc) => vlc,
         Err(e) => {
             eprintln!("revlc: {e}");
@@ -768,12 +937,25 @@ fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
         app: app.handle().clone(),
         ready: AtomicBool::new(false),
         pending: Mutex::default(),
-        history: Mutex::new(History::load(app.path().app_data_dir()?, app.path().app_cache_dir()?)),
+        history: Mutex::new(History::load(data_dir.clone(), app.path().app_cache_dir()?)),
         resume: Mutex::default(),
+        settings: Mutex::new(settings.clone()),
+        languages,
+        fonts: font_families(),
         user_snapshot: AtomicBool::new(false),
-        library: Mutex::new(Library::load(&app.path().app_data_dir()?)),
+        library: Mutex::new(Library::load(&data_dir)),
         thumbs: Thumbnails::default(),
+        data_dir,
     });
+
+    // The UI sends the real bindings once it loads; start with the defaults.
+    let keys: HashMap<String, String> = [("open", "Cmd+O"), ("openFolder", "Shift+Cmd+O"), ("openUrl", "Cmd+N"), ("queue", "Cmd+L")]
+        .into_iter()
+        .map(|(a, k)| (a.to_string(), k.to_string()))
+        .collect();
+    app.set_menu(menu::build(app.handle(), &keys)?)?;
+    // libVLC's player has its own title-display default; apply ours.
+    core.vlc.set_title_display(settings.show_title, settings.title_position, settings.title_timeout);
     let thumbs = core.clone();
     thread::Builder::new().name("thumbnails".into()).spawn(move || make_thumbnails(thumbs))?;
 
@@ -817,6 +999,20 @@ pub fn run() {
     let app = tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .setup(setup)
+        .on_menu_event(|app, event| match event.id().as_ref() {
+            "settings" => {
+                if let Err(e) = show_settings(app) {
+                    eprintln!("revlc: could not open settings: {e}");
+                }
+            }
+            "github" => {
+                let _ = std::process::Command::new("open").arg("https://github.com/HiteshRohira/ReVLC").spawn();
+            }
+            // Everything else is a player action the UI knows how to run.
+            id => {
+                let _ = app.emit_to("main", "menu://action", id.to_string());
+            }
+        })
         .invoke_handler(tauri::generate_handler![
             snapshot,
             open,
@@ -825,6 +1021,11 @@ pub fn run() {
             stop,
             history_list,
             history_remove,
+            settings_get,
+            settings_set,
+            resume_at,
+            open_settings,
+            set_menu_shortcuts,
             library_list,
             library_add,
             library_remove,

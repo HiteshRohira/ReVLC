@@ -42,7 +42,7 @@ from somewhere else (a directory with `lib/`, `plugins/` and `share/`).
 
 ## Known issues
 
-- Subtitles can overlap the control bar while it's visible.
+- Subtitles can overlap the control bar while it's visible (Settings → Subtitles → "Raise subtitles by" moves them up).
 - HDR is tone-mapped to SDR by libVLC 3 (true HDR on XDR displays is milestone M2).
 - Only macOS so far; Windows and Linux are next.
 

@@ -25,6 +25,13 @@ class Theme {
 
   constructor() {
     apply(this.accent);
+    // Keep every window in sync when another one changes the accent.
+    window.addEventListener("storage", (e) => {
+      if (e.key === ACCENT_KEY && e.newValue && e.newValue in ACCENTS) {
+        this.accent = e.newValue as AccentId;
+        apply(this.accent);
+      }
+    });
   }
 
   setAccent(id: AccentId) {

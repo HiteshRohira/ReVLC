@@ -44,8 +44,8 @@ Main features come first. Ship, get feedback, then keep ticking boxes.
 - [x] Subtitles turn on automatically in your system languages
 - [x] Load external subtitle file (dialog or drag and drop)
 - [x] Subtitle delay
-- [ ] Text encoding override
-- [ ] Font, size, colour, outline, position
+- [x] Text encoding override
+- [x] Font, size, colour, opacity, outline, shadow, background, position
 - [ ] Secondary subtitle track
 - [ ] Teletext
 - [ ] Online subtitle search
@@ -54,11 +54,11 @@ Main features come first. Ship, get feedback, then keep ticking boxes.
 - [x] Audio track selection
 - [x] Volume up to 150% from the slider (200% from the keyboard), mute
 - [x] Audio delay
-- [ ] Output device selection
+- [x] Output device selection
 - [ ] Equaliser with presets
 - [ ] Compressor, spatialiser, stereo widener, normalisation, pitch
 - [ ] Stereo mode (left / right / reverse / mono)
-- [ ] Passthrough (S/PDIF, HDMI)
+- [x] S/PDIF passthrough
 - [ ] Visualisations
 
 ## Video
@@ -73,7 +73,8 @@ Main features come first. Ship, get feedback, then keep ticking boxes.
 - [ ] Sharpen and other effects
 - [ ] Logo and marquee overlays
 - [ ] Video track selection
-- [ ] Always on top, mini player, picture-in-picture
+- [x] Always on top
+- [ ] Mini player, picture-in-picture
 - [ ] HDR shown as HDR on XDR displays (see plan M2)
 
 ## Convert, stream and record
@@ -90,14 +91,16 @@ Main features come first. Ship, get feedback, then keep ticking boxes.
 
 ## Control
 - [x] Keyboard shortcuts (VLC-style) and a shortcut overlay (`?`)
-- [ ] Configurable shortcuts
+- [x] Configurable shortcuts
+- [x] macOS menu bar (File, Playback, Audio, Video, Subtitles, Window, Help)
 - [ ] Mouse wheel and gesture actions
 - [ ] Media keys and the macOS Now Playing widget
 - [ ] Web interface and remote control
 - [ ] Command-line options
 
 ## Settings and extras
-- [ ] Preferences (simple and advanced)
+- [x] Simple preferences, with VLC's defaults (General, Video, Audio, Subtitles, Input & Codecs, Shortcuts)
+- [ ] Advanced preferences (every libVLC option)
 - [ ] Per-file settings
 - [ ] Media information and codec details
 - [ ] Statistics and log viewer

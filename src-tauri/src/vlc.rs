@@ -29,6 +29,13 @@ struct ChapterDescription {
 }
 
 #[repr(C)]
+struct AudioDevice {
+    next: *mut AudioDevice,
+    device: *mut c_char,
+    description: *mut c_char,
+}
+
+#[repr(C)]
 struct TrackDescription {
     id: c_int,
     name: *mut c_char,
@@ -81,12 +88,16 @@ api! {
     libvlc_media_player_set_rate: fn(*mut Player, c_float) -> c_int;
     libvlc_media_player_get_rate: fn(*mut Player) -> c_float;
     libvlc_media_player_next_frame: fn(*mut Player);
+    libvlc_media_player_set_video_title_display: fn(*mut Player, c_int, c_uint);
     libvlc_media_player_add_slave: fn(*mut Player, c_int, *const c_char, bool) -> c_int;
     libvlc_audio_get_volume: fn(*mut Player) -> c_int;
     libvlc_audio_set_volume: fn(*mut Player, c_int) -> c_int;
     libvlc_audio_get_mute: fn(*mut Player) -> c_int;
     libvlc_audio_set_mute: fn(*mut Player, c_int);
     libvlc_audio_get_track_description: fn(*mut Player) -> *mut TrackDescription;
+    libvlc_audio_output_device_list_get: fn(*mut Inst, *const c_char) -> *mut AudioDevice;
+    libvlc_audio_output_device_list_release: fn(*mut AudioDevice);
+    libvlc_audio_output_device_set: fn(*mut Player, *const c_char, *const c_char);
     libvlc_audio_get_track: fn(*mut Player) -> c_int;
     libvlc_audio_set_track: fn(*mut Player, c_int) -> c_int;
     libvlc_audio_get_delay: fn(*mut Player) -> i64;
@@ -163,8 +174,28 @@ pub struct Track {
     pub name: String,
 }
 
+/// Functions from libvlccore for changing VLC's configuration at runtime.
+/// New inputs and video outputs read their options from it, so changes
+/// apply to the next video without restarting libVLC.
+struct CoreApi {
+    put_int: unsafe extern "C" fn(*mut c_void, *const c_char, i64),
+    put_psz: unsafe extern "C" fn(*mut c_void, *const c_char, *const c_char),
+}
+
+/// A value for [`Vlc::set_config`].
+#[derive(Clone, Debug, PartialEq)]
+pub enum ConfigValue {
+    Int(i64),
+    Bool(bool),
+    Str(String),
+}
+
+/// libVLC's audio output module on this platform.
+const AUDIO_MODULE: &str = if cfg!(target_os = "macos") { "auhal" } else if cfg!(windows) { "mmdevice" } else { "pulse" };
+
 pub struct Vlc {
     api: Api,
+    core: CoreApi,
     inst: *mut Inst,
     mp: *mut Player,
     pub version: String,
@@ -207,8 +238,10 @@ fn opt_cstr(s: Option<&str>) -> Option<CString> {
 }
 
 impl Vlc {
-    /// `extra_args` are passed to libVLC as command-line options.
-    pub fn load(resource_dir: Option<&Path>, extra_args: &[String]) -> Result<Self, String> {
+    /// `extra_args` are passed to libVLC as command-line options. `config`
+    /// is applied before the media player is created, because the player
+    /// copies some options (title display, deinterlacing) when it's made.
+    pub fn load(resource_dir: Option<&Path>, extra_args: &[String], config: &[(&str, ConfigValue)]) -> Result<Self, String> {
         let dirs = candidate_dirs(resource_dir);
         let dir = dirs
             .iter()
@@ -234,14 +267,20 @@ impl Vlc {
             Ok(Box::leak(Box::new(lib)))
         };
         // libvlc.dylib refers to libvlccore through @rpath, so load the core first.
-        load(core_name)?;
+        let core_lib = load(core_name)?;
         let lib = load(lib_name)?;
         let api = unsafe { Api::load(lib) }.map_err(|e| format!("libVLC is missing a symbol: {e}"))?;
+        let core = unsafe {
+            CoreApi {
+                put_int: *core_lib.get(b"config_PutInt\0").map_err(|e| e.to_string())?,
+                put_psz: *core_lib.get(b"config_PutPsz\0").map_err(|e| e.to_string())?,
+            }
+        };
 
         // The "macosx" output draws subtitles as an overlay. The default
         // layer-based output tries to blend them into hardware-decoded
         // frames, which fails for 10-bit video, so subtitles never show.
-        let args: Vec<CString> = ["--no-video-title-show", "--no-osd", "--no-snapshot-preview", "--snapshot-format=jpg", "--vout=macosx"]
+        let args: Vec<CString> = ["--no-snapshot-preview", "--vout=macosx"]
             .iter()
             .map(|a| a.to_string())
             .chain(extra_args.iter().cloned())
@@ -253,6 +292,9 @@ impl Vlc {
             if inst.is_null() {
                 return Err(format!("libvlc_new failed: {}", errmsg(&api)));
             }
+            for (name, value) in config {
+                put_config(&core, inst, name, value);
+            }
             let mp = (api.libvlc_media_player_new)(inst);
             if mp.is_null() {
                 return Err(format!("could not create a media player: {}", errmsg(&api)));
@@ -261,8 +303,57 @@ impl Vlc {
             (api.libvlc_video_set_key_input)(mp, 0);
             (api.libvlc_video_set_mouse_input)(mp, 0);
             let version = CStr::from_ptr((api.libvlc_get_version)()).to_string_lossy().into_owned();
-            Ok(Self { api, inst, mp, version })
+            Ok(Self { api, core, inst, mp, version })
         }
+    }
+
+    /// Audio outputs as (id, name). The id "" is the system default.
+    pub fn audio_devices(&self) -> Vec<(String, String)> {
+        let module = cstr(AUDIO_MODULE);
+        let mut out = Vec::new();
+        unsafe {
+            let list = (self.api.libvlc_audio_output_device_list_get)(self.inst, module.as_ptr());
+            let mut node = list;
+            while !node.is_null() {
+                let s = |p: *mut c_char| if p.is_null() { String::new() } else { CStr::from_ptr(p).to_string_lossy().into_owned() };
+                out.push((s((*node).device), s((*node).description)));
+                node = (*node).next;
+            }
+            if !list.is_null() {
+                (self.api.libvlc_audio_output_device_list_release)(list);
+            }
+        }
+        out
+    }
+
+    /// Switches the audio output; "" means the system default.
+    pub fn set_audio_device(&self, id: &str) {
+        let c = cstr(id);
+        unsafe { (self.api.libvlc_audio_output_device_set)(self.mp, std::ptr::null(), c.as_ptr()) }
+    }
+
+    /// Changes a VLC option (same names as the command line, without "--").
+    /// Takes effect for the next video; reopen the current one to apply now.
+    pub fn set_config(&self, name: &str, value: &ConfigValue) {
+        put_config(&self.core, self.inst, name, value);
+    }
+
+    /// Shows the media title on the video when playback starts. `position`
+    /// uses VLC's codes (0 center, 1 left, 2 right, 4 top, 8 bottom, sums for corners).
+    pub fn set_title_display(&self, show: bool, position: i64, timeout_ms: i64) {
+        let pos = match (show, position) {
+            (false, _) => -1,
+            (_, 1) => 1,
+            (_, 2) => 2,
+            (_, 4) => 3,
+            (_, 5) => 4,
+            (_, 6) => 5,
+            (_, 8) => 6,
+            (_, 9) => 7,
+            (_, 10) => 8,
+            _ => 0,
+        };
+        unsafe { (self.api.libvlc_media_player_set_video_title_display)(self.mp, pos, timeout_ms.max(0) as c_uint) }
     }
 
     /// Sends every player event type to `tx`. The callback runs on a libVLC
@@ -290,8 +381,9 @@ impl Vlc {
         unsafe { (self.api.libvlc_media_player_set_nsobject)(self.mp, view) }
     }
 
-    /// Opens a local path or a URL and starts playback.
-    pub fn open(&self, uri: &str) -> Result<(), String> {
+    /// Opens a local path or a URL and starts playback. `options` are
+    /// per-media libVLC options such as ":network-caching=1000".
+    pub fn open(&self, uri: &str, options: &[String]) -> Result<(), String> {
         let c = cstr(uri);
         unsafe {
             let media = if uri.contains("://") {
@@ -301,6 +393,10 @@ impl Vlc {
             };
             if media.is_null() {
                 return Err(format!("could not open {uri}: {}", errmsg(&self.api)));
+            }
+            for opt in options {
+                let o = cstr(opt);
+                (self.api.libvlc_media_add_option)(media, o.as_ptr());
             }
             (self.api.libvlc_media_player_set_media)(self.mp, media);
             (self.api.libvlc_media_release)(media);
@@ -524,6 +620,22 @@ impl Vlc {
             let title = CStr::from_ptr(raw).to_string_lossy().into_owned();
             (self.api.libvlc_free)(raw as *mut c_void);
             Some(title).filter(|t| !t.trim().is_empty())
+        }
+    }
+}
+
+fn put_config(core: &CoreApi, inst: *mut Inst, name: &str, value: &ConfigValue) {
+    let n = cstr(name);
+    unsafe {
+        // libvlc_instance_t starts with a pointer to libVLC's root object.
+        let obj = *(inst as *mut *mut c_void);
+        match value {
+            ConfigValue::Int(v) => (core.put_int)(obj, n.as_ptr(), *v),
+            ConfigValue::Bool(v) => (core.put_int)(obj, n.as_ptr(), *v as i64),
+            ConfigValue::Str(v) => {
+                let c = cstr(v);
+                (core.put_psz)(obj, n.as_ptr(), c.as_ptr())
+            }
         }
     }
 }

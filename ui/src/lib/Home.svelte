@@ -1,5 +1,6 @@
 <script lang="ts">
-  import { Clapperboard, Disc3, Film, FolderOpen, FolderPlus, HardDrive, House, Link, ListMusic, Music2, Play, Radio, X } from "@lucide/svelte";
+  import { invoke } from "@tauri-apps/api/core";
+  import { Clapperboard, Disc3, Film, FolderOpen, FolderPlus, HardDrive, House, Link, ListMusic, Music2, Play, Radio, Settings, X } from "@lucide/svelte";
   import { player, resumable, formatTime, thumbUrl, cleanTitle, type HistoryEntry, type LibraryItem } from "./player.svelte";
   import { ACCENTS, theme, type AccentId } from "./theme.svelte";
   import { ui } from "./ui.svelte";
@@ -100,6 +101,7 @@
       <button class="nv" onclick={() => (ui.urlOpen = true)}><Link size={17} />Open URL…</button>
     </nav>
     <div class="appearance">
+      <button class="nv" onclick={() => invoke("open_settings")}><Settings size={17} />Settings</button>
       <h6>Accent</h6>
       <div class="swatches">
         {#each Object.entries(ACCENTS) as [id, a]}
