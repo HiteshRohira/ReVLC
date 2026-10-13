@@ -108,6 +108,7 @@ pub fn build<R: Runtime>(app: &AppHandle<R>, keys: &HashMap<String, String>) -> 
         true,
         &[
             &PredefinedMenuItem::about(app, Some("About ReVLC"), None)?,
+            &MenuItem::with_id(app, "checkUpdates", "Check for Updates…", true, None::<&str>)?,
             &sep()?,
             &MenuItem::with_id(app, "settings", "Settings…", true, Some("CmdOrCtrl+,"))?,
             &sep()?,

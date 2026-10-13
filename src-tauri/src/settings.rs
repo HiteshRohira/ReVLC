@@ -27,6 +27,8 @@ pub struct Settings {
     pub stop_after_each: bool,
     pub pause_when_minimized: bool,
     pub seekbar_chapters: bool,
+    /// Download and install new versions in the background.
+    pub auto_update: bool,
 
     // Video
     pub video: bool,
@@ -90,6 +92,7 @@ impl Default for Settings {
             stop_after_each: false,
             pause_when_minimized: false,
             seekbar_chapters: true,
+            auto_update: true,
 
             video: true,
             start_fullscreen: false,

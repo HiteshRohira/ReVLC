@@ -5,6 +5,7 @@ mod playlist;
 mod settings;
 #[cfg(target_os = "macos")]
 mod surface_macos;
+mod updater;
 mod vlc;
 
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -923,6 +924,7 @@ fn preferred_languages() -> Vec<String> {
 }
 
 fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
+    updater::start(app.handle());
     let resource_dir = app.path().resource_dir().ok();
     let data_dir = app.path().app_data_dir()?;
     let languages = preferred_languages();
@@ -1004,12 +1006,17 @@ fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
 pub fn run() {
     let app = tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .setup(setup)
         .on_menu_event(|app, event| match event.id().as_ref() {
             "settings" => {
                 if let Err(e) = show_settings(app) {
                     eprintln!("revlc: could not open settings: {e}");
                 }
+            }
+            "checkUpdates" => {
+                let app = app.clone();
+                tauri::async_runtime::spawn(async move { updater::check(&app, true).await });
             }
             "github" => {
                 let _ = std::process::Command::new("open").arg("https://github.com/HiteshRohira/ReVLC").spawn();
@@ -1020,6 +1027,10 @@ pub fn run() {
             }
         })
         .invoke_handler(tauri::generate_handler![
+            updater::update_state,
+            updater::update_check,
+            updater::update_install,
+            updater::update_restart,
             snapshot,
             open,
             play_index,

@@ -15,6 +15,7 @@
   import { settings } from "./lib/settings.svelte";
   import { theme } from "./lib/theme.svelte";
   import { ui } from "./lib/ui.svelte";
+  import { updater } from "./lib/updater.svelte";
 
   const appWindow = getCurrentWindow();
   const IDLE_HIDE_MS = 2500;
@@ -159,6 +160,7 @@
   onMount(() => {
     player.init();
     settings.load();
+    updater.start();
     wake();
     const unlisteners = [
       getCurrentWebview().onDragDropEvent(({ payload }) => {
@@ -207,6 +209,21 @@
       <span>Continue from <b class="tnum">{formatTime(resumePrompt)}</b>?</span>
       <button class="btn pri" onclick={() => answerResume(true)}>Continue</button>
       <button class="btn" onclick={() => answerResume(false)}>Start over</button>
+    </div>
+  {/if}
+
+  {#if updater.prompt && !controlsHidden}
+    <div class="update" role="alertdialog" aria-label="Update available">
+      {#if updater.state.status === "ready"}
+        <span><b>ReVLC {updater.state.version}</b> is ready. Restart to finish updating.</span>
+        <button class="btn pri" onclick={updater.restart}>Restart now</button>
+      {:else if updater.state.status === "downloading"}
+        <span>Downloading ReVLC {updater.state.version}…{#if updater.state.progress !== null}&nbsp;<b class="tnum">{Math.round(updater.state.progress * 100)}%</b>{/if}</span>
+      {:else}
+        <span><b>ReVLC {updater.state.version}</b> is available.</span>
+        <button class="btn pri" onclick={updater.install}>Update</button>
+      {/if}
+      {#if updater.state.status !== "downloading"}<button class="btn" onclick={updater.later}>Later</button>{/if}
     </div>
   {/if}
 
@@ -268,8 +285,25 @@
     font-size: 13.5px;
     z-index: 45;
   }
-  .resume .btn {
+  .resume .btn,
+  .update .btn {
     height: 30px;
+  }
+  .update {
+    position: absolute;
+    top: 64px;
+    right: 16px;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    min-height: 46px;
+    padding: 8px 8px 8px 16px;
+    border-radius: 12px;
+    background: var(--panel);
+    border: 1px solid var(--border);
+    box-shadow: 0 10px 30px rgb(0 0 0 / 0.5);
+    font-size: 13.5px;
+    z-index: 45;
   }
   .notices {
     position: absolute;

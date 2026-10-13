@@ -10,7 +10,7 @@
     "check": "svelte-check --tsconfig ./tsconfig.json",
     "tauri": "tauri",
     "prepare:vlc": "scripts/prepare-libvlc.sh",
-    "build:app": "test -d src-tauri/vlc || scripts/prepare-libvlc.sh; tauri build && scripts/make-dmg.sh"
+    "build:app": "scripts/build-app.sh"
   },
   "dependencies": {
     "@lucide/svelte": "^1.55.0",

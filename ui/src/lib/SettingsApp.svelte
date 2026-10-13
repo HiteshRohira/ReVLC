@@ -1,5 +1,7 @@
 <script lang="ts">
   import { onMount } from "svelte";
+  import { getVersion } from "@tauri-apps/api/app";
+  import { invoke } from "@tauri-apps/api/core";
   import { open as openDialog } from "@tauri-apps/plugin-dialog";
   import { Captions, Cpu, Keyboard, MonitorPlay, RotateCcw, SlidersHorizontal, Volume2 } from "@lucide/svelte";
   import { ACTIONS, FIXED_SHORTCUTS, effectiveBindings, eventBinding, formatBinding } from "./actions";
@@ -17,6 +19,10 @@
   ] as const;
   type Tab = (typeof TABS)[number]["id"];
   let tab = $state<Tab>("general");
+  let version = $state("");
+  getVersion().then((v) => (version = v));
+  // Results show in the main window.
+  const checkForUpdates = () => invoke("update_check");
   let mainEl = $state<HTMLElement>();
   // Each tab starts at the top.
   $effect(() => {
@@ -26,7 +32,7 @@
 
   // Keys reset by each tab's "Restore defaults".
   const TAB_KEYS: Record<Exclude<Tab, "shortcuts">, (keyof Settings)[]> = {
-    general: ["resume", "stopAfterEach", "pauseWhenMinimized", "seekbarChapters"],
+    general: ["resume", "stopAfterEach", "pauseWhenMinimized", "seekbarChapters", "autoUpdate"],
     video: ["video", "startFullscreen", "alwaysOnTop", "deinterlace", "deinterlaceMode", "snapshotPath", "snapshotPrefix", "snapshotFormat", "snapshotSequential"],
     audio: ["audio", "audioDevice", "audioLanguage", "timeStretch", "replayGain", "spdif"],
     subtitles: ["subtitleLanguage", "subAutodetect", "subAutodetectFuzzy", "subEncoding", "font", "fontSize", "fontColor", "fontOpacity", "bold", "outlineThickness", "outlineColor", "backgroundOpacity", "backgroundColor", "shadowOpacity", "subMargin", "showTitle", "titleTimeout", "titlePosition"],
@@ -180,6 +186,15 @@
           </select>
         </Row>
         <Row label="Pause when minimised">{@render toggle("pauseWhenMinimized")}</Row>
+      </div>
+      <h3>Updates</h3>
+      <div class="group">
+        <Row label="Install updates automatically" help="New versions download in the background; you choose when to restart.">
+          {@render toggle("autoUpdate")}
+        </Row>
+        <Row label="ReVLC {version}">
+          <button class="btn" onclick={checkForUpdates}>Check now</button>
+        </Row>
       </div>
     {:else if tab === "video"}
       <h3>Display</h3>

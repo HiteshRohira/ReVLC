@@ -9,3 +9,6 @@ design/node_modules/
 design/package*.json
 design/final/
 design/shots/*.png
+
+# Release files collected by scripts/release-files.sh
+/release/
