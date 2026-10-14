@@ -3,6 +3,10 @@
 //! a new version is downloaded and installed in the background; either way
 //! the UI asks the user, who decides when to restart.
 //!
+//! On Windows, installing means running the installer, which closes the
+//! app; so there the update is only downloaded in the background and
+//! installed when the user restarts.
+//!
 //! Runs here rather than in the web view, whose timers macOS throttles
 //! while the window is hidden.
 
@@ -43,6 +47,9 @@ pub struct UpdateState {
 pub struct Updater {
     state: Mutex<UpdateState>,
     update: Mutex<Option<Update>>,
+    /// The downloaded installer, waiting for a restart (Windows).
+    #[cfg(windows)]
+    installer: Mutex<Option<Vec<u8>>>,
 }
 
 impl Default for Updater {
@@ -50,6 +57,8 @@ impl Default for Updater {
         Self {
             state: Mutex::new(UpdateState { status: Status::Idle, version: String::new(), progress: None, by_user: false }),
             update: Mutex::default(),
+            #[cfg(windows)]
+            installer: Mutex::default(),
         }
     }
 }
@@ -134,6 +143,7 @@ pub async fn check(app: &AppHandle, manual: bool) {
 }
 
 /// Downloads and installs the pending update; it takes effect on restart.
+/// On Windows it's only downloaded; [`update_restart`] installs it.
 pub async fn install(app: &AppHandle, by_user: bool) {
     let updater = app.state::<Updater>();
     let Some(update) = updater.update.lock().unwrap_or_else(|e| e.into_inner()).clone() else {
@@ -149,18 +159,20 @@ pub async fn install(app: &AppHandle, by_user: bool) {
     });
     let mut received = 0u64;
     let mut last_emit = Instant::now();
+    let on_chunk = |chunk: usize, total: Option<u64>| {
+        received += chunk as u64;
+        if last_emit.elapsed() >= Duration::from_millis(200) {
+            last_emit = Instant::now();
+            updater.set(app, |s| s.progress = total.filter(|&t| t > 0).map(|t| received as f64 / t as f64));
+        }
+    };
+    #[cfg(windows)]
     let result = update
-        .download_and_install(
-            |chunk, total| {
-                received += chunk as u64;
-                if last_emit.elapsed() >= Duration::from_millis(200) {
-                    last_emit = Instant::now();
-                    updater.set(app, |s| s.progress = total.filter(|&t| t > 0).map(|t| received as f64 / t as f64));
-                }
-            },
-            || {},
-        )
-        .await;
+        .download(on_chunk, || {})
+        .await
+        .map(|bytes| *updater.installer.lock().unwrap_or_else(|e| e.into_inner()) = Some(bytes));
+    #[cfg(not(windows))]
+    let result = update.download_and_install(on_chunk, || {}).await;
     match result {
         Ok(()) => updater.set(app, |s| s.status = Status::Ready),
         Err(e) => {
@@ -199,6 +211,21 @@ pub fn update_restart(app: AppHandle) {
         && let Ok(core) = player.core()
     {
         core.stop();
+    }
+    // Runs the installer, which closes the app and opens the new version.
+    #[cfg(windows)]
+    {
+        let updater = app.state::<Updater>();
+        let installer = updater.installer.lock().unwrap_or_else(|e| e.into_inner()).take();
+        let update = updater.update.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        if let (Some(update), Some(installer)) = (update, installer) {
+            if let Err(e) = update.install(installer) {
+                eprintln!("revlc: update install failed: {e}");
+                updater.set(&app, |s| s.status = Status::Available);
+                notice(&app, "error", format!("Could not install the update: {e}"));
+                return;
+            }
+        }
     }
     app.restart();
 }
