@@ -9,8 +9,8 @@
     "build": "vite build",
     "check": "svelte-check --tsconfig ./tsconfig.json",
     "tauri": "tauri",
-    "prepare:vlc": "scripts/prepare-libvlc.sh",
-    "build:app": "scripts/build-app.sh"
+    "prepare:vlc": "bash scripts/prepare-libvlc.sh",
+    "build:app": "bash scripts/build-app.sh"
   },
   "dependencies": {
     "@lucide/svelte": "^1.55.0",

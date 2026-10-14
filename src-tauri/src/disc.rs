@@ -38,15 +38,51 @@ pub fn kind_of(path: &Path) -> Option<DiscKind> {
         Some(DiscKind::Bluray)
     } else if has_dir(path, "MPEGAV") || has_dir(path, "MPEG2") {
         Some(DiscKind::Vcd)
-    } else if path.join(".TOC.plist").is_file() {
-        // macOS mounts audio CDs as a volume of AIFF tracks with a table of contents.
+    } else if path.join(".TOC.plist").is_file() || has_cda(path) {
+        // macOS mounts audio CDs as a volume of AIFF tracks with a table of
+        // contents; Windows shows them as .cda track files.
         Some(DiscKind::Cd)
     } else {
         None
     }
 }
 
+fn has_cda(path: &Path) -> bool {
+    cfg!(windows) && !files(path, &["cda"]).is_empty()
+}
+
+/// Discs currently inserted: optical drives with a disc in them.
+#[cfg(windows)]
+pub fn detect() -> Vec<Disc> {
+    use windows_sys::Win32::Storage::FileSystem::{GetDriveTypeW, GetVolumeInformationW};
+    use windows_sys::Win32::System::WindowsProgramming::DRIVE_CDROM;
+
+    let mut discs = Vec::new();
+    for letter in b'A'..=b'Z' {
+        let root = format!("{}:\\", letter as char);
+        let wide: Vec<u16> = root.encode_utf16().chain([0]).collect();
+        if unsafe { GetDriveTypeW(wide.as_ptr()) } != DRIVE_CDROM {
+            continue;
+        }
+        let mut label = [0u16; 261];
+        // Fails when the drive is empty.
+        let ok = unsafe {
+            GetVolumeInformationW(wide.as_ptr(), label.as_mut_ptr(), label.len() as u32, std::ptr::null_mut(), std::ptr::null_mut(), std::ptr::null_mut(), std::ptr::null_mut(), 0)
+        };
+        if ok == 0 {
+            continue;
+        }
+        let path = Path::new(&root);
+        let Some(kind) = kind_of(path) else { continue };
+        let len = label.iter().position(|&c| c == 0).unwrap_or(0);
+        let label = String::from_utf16_lossy(&label[..len]);
+        discs.push(Disc { kind, name: if label.is_empty() { root.clone() } else { label }, path: root });
+    }
+    discs
+}
+
 /// Discs currently inserted (mounted volumes that look like one).
+#[cfg(not(windows))]
 pub fn detect() -> Vec<Disc> {
     let Ok(entries) = std::fs::read_dir("/Volumes") else { return Vec::new() };
     let mut discs: Vec<Disc> = entries
@@ -111,6 +147,8 @@ pub fn items(kind: DiscKind, path: &str, menus: bool) -> Result<Vec<Item>, Strin
             let options = if menus { Vec::new() } else { vec![":no-bluray-menu".to_string()] };
             vec![Item { uri: format!("bluray://{location}"), title: name.clone(), options }]
         }
+        // libVLC reads an audio CD drive directly and lists its tracks.
+        DiscKind::Cd if has_cda(p) => vec![Item { uri: format!("cdda://{location}"), title: name.clone(), options: Vec::new() }],
         DiscKind::Cd => files(p, &["aiff", "aif", "wav", "flac"]).into_iter().map(Item::new).collect(),
         DiscKind::Vcd => ["MPEGAV", "mpegav", "MPEG2", "mpeg2"]
             .iter()

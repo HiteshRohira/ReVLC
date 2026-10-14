@@ -3,6 +3,7 @@
   import { savePlaylist } from "./actions";
   import { player, cleanTitle, type Repeat as RepeatMode, type SortKey } from "./player.svelte";
   import { ui } from "./ui.svelte";
+  import { modKey } from "./platform";
 
   let { onadd }: { onadd: () => void } = $props();
 
@@ -40,7 +41,7 @@
 <aside class="queue" aria-label="Up next">
   <header>
     <h2>Up next <span>{player.playlist.items.length}</span></h2>
-    <button class="icon" title="Close (⌘L)" aria-label="Close" onclick={() => (ui.playlistOpen = false)}><X size={18} /></button>
+    <button class="icon" title="Close ({modKey}L)" aria-label="Close" onclick={() => (ui.playlistOpen = false)}><X size={18} /></button>
   </header>
   <div class="tools">
     <button class="tool" onclick={onadd}><Plus size={15} /> Add</button>
@@ -54,7 +55,7 @@
         </div>
       {/if}
     </div>
-    <button class="icon sm" title="Save playlist (⌘S)" aria-label="Save playlist" disabled={!player.playlist.items.length}
+    <button class="icon sm" title="Save playlist ({modKey}S)" aria-label="Save playlist" disabled={!player.playlist.items.length}
       onclick={savePlaylist}><Save size={16} /></button>
     <button class="icon sm" class:on={player.playlist.shuffle} title={player.playlist.shuffle ? "Shuffle on" : "Shuffle off"}
       aria-pressed={player.playlist.shuffle} onclick={() => player.setShuffle(!player.playlist.shuffle)}><Shuffle size={16} /></button>

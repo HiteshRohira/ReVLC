@@ -6,6 +6,7 @@
   import Transport from "./Transport.svelte";
   import { player, formatTime, genericChapter, cleanTitle } from "./player.svelte";
   import { ui } from "./ui.svelte";
+  import { modKey } from "./platform";
 
   let { hidden, onfullscreen, onadd }: { hidden: boolean; onfullscreen: () => void; onadd: () => void } = $props();
 
@@ -95,7 +96,7 @@
           <input type="range" min="0" max="150" value={s.muted ? 0 : s.volume} style="--progress: {((s.muted ? 0 : s.volume) / 150) * 100}%"
             aria-label="Volume" oninput={(e) => player.setVolume(Number(e.currentTarget.value))} />
         </div>
-        <button class="time tnum" title="Jump to time (⌘T)" disabled={!s.seekable} onclick={() => (ui.dialog = "jump")}>
+        <button class="time tnum" title="Jump to time ({modKey}T)" disabled={!s.seekable} onclick={() => (ui.dialog = "jump")}>
           {formatTime(s.time)}&nbsp;<span>/ {s.length > 0 ? formatTime(s.length) : "Live"}</span>
         </button>
       </div>
@@ -112,7 +113,7 @@
             {#key ui.menu}<div class="pop"><SettingsMenu kind={ui.menu} onclose={() => (ui.menu = null)} /></div>{/key}
           {/if}
         </div>
-        <button class="icon" class:active={ui.playlistOpen} title="Up next (⌘L)" aria-label="Up next" onclick={() => (ui.playlistOpen = !ui.playlistOpen)}>
+        <button class="icon" class:active={ui.playlistOpen} title="Up next ({modKey}L)" aria-label="Up next" onclick={() => (ui.playlistOpen = !ui.playlistOpen)}>
           <ListVideo size={21} />
         </button>
         <button class="icon" title="Fullscreen (F)" aria-label={ui.fullscreen ? "Exit fullscreen" : "Fullscreen"} onclick={onfullscreen}>
@@ -142,6 +143,9 @@
     height: 72px;
     padding: 0 16px 0 76px;
     background: linear-gradient(rgb(0 0 0 / 0.6), transparent);
+  }
+  :global([data-platform="windows"]) .top {
+    padding: 0 150px 0 12px;
   }
   :global(.fullscreen) .top {
     padding-left: 12px;

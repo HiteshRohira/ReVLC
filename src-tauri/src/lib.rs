@@ -10,6 +10,10 @@ mod playlist_file;
 mod settings;
 #[cfg(target_os = "macos")]
 mod surface_macos;
+#[cfg(windows)]
+mod surface_windows;
+#[cfg(windows)]
+mod system_windows;
 mod updater;
 mod vlc;
 
@@ -873,14 +877,20 @@ fn resume_at(player: tauri::State<Player>, ms: i64) -> Res {
     Ok(())
 }
 
+/// Async: on Windows, creating a window from a synchronous command (which
+/// runs on the main thread) deadlocks WebView2.
 #[tauri::command]
-fn open_settings(app: AppHandle) -> Res {
+async fn open_settings(app: AppHandle) -> Res {
     show_settings(&app).map_err(|e| e.to_string())
 }
 
 /// Rebuilds the menu bar with the current shortcut bindings.
 #[tauri::command]
 fn set_menu_shortcuts(app: AppHandle, keys: HashMap<String, String>) -> Res {
+    // Only macOS has a menu bar; elsewhere the UI handles every shortcut.
+    if !cfg!(target_os = "macos") {
+        return Ok(());
+    }
     let menu = menu::build(&app, &keys).map_err(|e| e.to_string())?;
     app.set_menu(menu).map(|_| ()).map_err(|e| e.to_string())
 }
@@ -890,13 +900,17 @@ fn show_settings(app: &AppHandle) -> tauri::Result<()> {
         window.unminimize()?;
         return window.set_focus();
     }
-    WebviewWindowBuilder::new(app, "settings", WebviewUrl::App("index.html?view=settings".into()))
+    let builder = WebviewWindowBuilder::new(app, "settings", WebviewUrl::App("index.html?view=settings".into()))
         .title("Settings")
         .inner_size(760.0, 640.0)
-        .min_inner_size(640.0, 480.0)
-        .title_bar_style(tauri::TitleBarStyle::Overlay)
-        .hidden_title(true)
-        .build()?;
+        .min_inner_size(640.0, 480.0);
+    // The UI draws the title bar: traffic lights over it on macOS, its own
+    // window buttons elsewhere.
+    #[cfg(target_os = "macos")]
+    let builder = builder.title_bar_style(tauri::TitleBarStyle::Overlay).hidden_title(true);
+    #[cfg(not(target_os = "macos"))]
+    let builder = builder.decorations(false);
+    builder.build()?;
     Ok(())
 }
 
@@ -911,7 +925,11 @@ fn font_families() -> Vec<String> {
         fonts.sort_by_key(|f| f.to_lowercase());
         fonts
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(windows)]
+    {
+        system_windows::font_families()
+    }
+    #[cfg(not(any(target_os = "macos", windows)))]
     Vec::new()
 }
 
@@ -1076,7 +1094,9 @@ fn set_deinterlace(player: tauri::State<Player>, mode: Option<String>) -> Res {
 #[tauri::command]
 fn take_snapshot(app: AppHandle, player: tauri::State<Player>) -> Res {
     let core = player.core()?;
-    let dir = core.settings().snapshot_dir(app.path().desktop_dir().ok()).ok_or("no snapshot folder")?;
+    // VLC's default folder: the Desktop on macOS, Pictures on Windows.
+    let default = if cfg!(target_os = "macos") { app.path().desktop_dir() } else { app.path().picture_dir() };
+    let dir = core.settings().snapshot_dir(default.ok()).ok_or("no snapshot folder")?;
     core.user_snapshot.store(true, Ordering::Release);
     core.vlc.snapshot(&dir, 0)
 }
@@ -1256,7 +1276,11 @@ fn preferred_languages() -> Vec<String> {
         }
         langs
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(windows)]
+    {
+        system_windows::preferred_languages()
+    }
+    #[cfg(not(any(target_os = "macos", windows)))]
     Vec::new()
 }
 
@@ -1304,7 +1328,9 @@ fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
         .into_iter()
         .map(|(a, k)| (a.to_string(), k.to_string()))
         .collect();
-    app.set_menu(menu::build(app.handle(), &keys)?)?;
+    if cfg!(target_os = "macos") {
+        app.set_menu(menu::build(app.handle(), &keys)?)?;
+    }
     // libVLC's player has its own title-display default; apply ours.
     core.vlc.set_title_display(settings.show_title, settings.title_position, settings.title_timeout);
     let thumbs = core.clone();
@@ -1320,23 +1346,37 @@ fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     let _ = core.add(args, true);
 
     let window = app.get_webview_window("main").ok_or("main window missing")?;
+    #[cfg(windows)]
+    let hwnd = window.hwnd()?.0 as isize;
     let attach = core.clone();
     window.with_webview(move |webview| {
         #[cfg(target_os = "macos")]
-        let app = attach.app.clone();
-        let last = std::cell::Cell::new(Instant::now() - Duration::from_secs(1));
-        let on_pointer = move || {
-            // Throttled: the UI only needs to know the pointer is active.
-            if last.get().elapsed() >= Duration::from_millis(150) {
-                last.set(Instant::now());
-                let _ = app.emit("native://pointer", ());
+        {
+            let app = attach.app.clone();
+            let last = std::cell::Cell::new(Instant::now() - Duration::from_secs(1));
+            let on_pointer = move || {
+                // Throttled: the UI only needs to know the pointer is active.
+                if last.get().elapsed() >= Duration::from_millis(150) {
+                    last.set(Instant::now());
+                    let _ = app.emit("native://pointer", ());
+                }
+            };
+            match surface_macos::attach(webview.inner(), webview.ns_window(), on_pointer) {
+                Ok(view) => attach.vlc.set_nsview(view),
+                Err(e) => eprintln!("revlc: could not create the video view: {e}"),
             }
-        };
-        match surface_macos::attach(webview.inner(), webview.ns_window(), on_pointer) {
-            Ok(view) => attach.vlc.set_nsview(view),
-            Err(e) => eprintln!("revlc: could not create the video view: {e}"),
         }
-        #[cfg(not(target_os = "macos"))]
+        // The web view covers the whole window and gets every mouse event,
+        // so Windows needs no pointer monitor.
+        #[cfg(windows)]
+        {
+            let _ = webview;
+            match surface_windows::attach(hwnd as *mut std::ffi::c_void) {
+                Ok(video) => attach.vlc.set_hwnd(video),
+                Err(e) => eprintln!("revlc: could not create the video window: {e}"),
+            }
+        }
+        #[cfg(not(any(target_os = "macos", windows)))]
         let _ = webview;
         attach.mark_ready();
     })?;
@@ -1347,7 +1387,26 @@ fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    let app = tauri::Builder::default()
+    let builder = tauri::Builder::default();
+    // Windows starts a new process for each file opened from Explorer; it
+    // hands its files to the running copy and exits.
+    #[cfg(windows)]
+    let builder = builder.plugin(tauri_plugin_single_instance::init(|app, args, _cwd| {
+        if let Some(window) = app.get_webview_window("main") {
+            let _ = window.unminimize();
+            let _ = window.set_focus();
+        }
+        let uris: Vec<String> = args.into_iter().skip(1).filter(|a| !a.starts_with('-')).collect();
+        if uris.is_empty() {
+            return;
+        }
+        if let Some(Ok(core)) = app.try_state::<Player>().as_deref().map(Player::core) {
+            if let Err(e) = core.add(uris, true) {
+                core.notice("error", e);
+            }
+        }
+    }));
+    let app = builder
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .setup(setup)

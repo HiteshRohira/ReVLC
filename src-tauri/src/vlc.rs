@@ -52,7 +52,7 @@ struct TrackDescription {
 
 macro_rules! api {
     ($($name:ident: fn($($arg:ty),*) $(-> $ret:ty)?;)*) => {
-        #[allow(non_snake_case)]
+        #[allow(non_snake_case, dead_code)]
         struct Api { $($name: unsafe extern "C" fn($($arg),*) $(-> $ret)?,)* }
 
         impl Api {
@@ -87,6 +87,7 @@ api! {
     libvlc_media_player_set_pause: fn(*mut Player, c_int);
     libvlc_media_player_stop: fn(*mut Player);
     libvlc_media_player_set_nsobject: fn(*mut Player, *mut c_void);
+    libvlc_media_player_set_hwnd: fn(*mut Player, *mut c_void);
     libvlc_media_player_get_length: fn(*mut Player) -> i64;
     libvlc_media_player_get_time: fn(*mut Player) -> i64;
     libvlc_media_player_set_time: fn(*mut Player, i64);
@@ -265,7 +266,8 @@ pub struct Vlc {
 unsafe impl Send for Vlc {}
 unsafe impl Sync for Vlc {}
 
-/// Directories where we look for libVLC (`lib/`, `plugins/`, `share/`).
+/// Directories where we look for libVLC: `lib/`, `plugins/` and `share/`,
+/// or on Windows VLC's own layout (the DLLs, `plugins/` and `lua/` together).
 fn candidate_dirs(resource_dir: Option<&Path>) -> Vec<PathBuf> {
     let mut dirs = Vec::new();
     if let Some(dir) = std::env::var_os("REVLC_VLC_DIR") {
@@ -277,6 +279,14 @@ fn candidate_dirs(resource_dir: Option<&Path>) -> Vec<PathBuf> {
     #[cfg(target_os = "macos")]
     dirs.push(PathBuf::from("/Applications/VLC.app/Contents/MacOS"));
     dirs
+}
+
+/// Where the libVLC libraries are inside a libVLC directory. On Windows,
+/// libVLC finds its plugins and data next to libvlccore.dll: it reads
+/// `VLC_PLUGIN_PATH` from the C runtime's copy of the environment, which
+/// doesn't see variables we set after startup.
+fn lib_dir(dir: &Path) -> PathBuf {
+    if cfg!(windows) { dir.to_path_buf() } else { dir.join("lib") }
 }
 
 fn lib_names() -> (&'static str, &'static str) {
@@ -293,6 +303,12 @@ fn cstr(s: &str) -> CString {
     CString::new(s.replace('\0', "")).unwrap_or_default()
 }
 
+/// A local path for libvlc_media_new_path. On Windows, libVLC only
+/// recognises absolute paths written with backslashes.
+fn path_cstr(path: &str) -> CString {
+    if cfg!(windows) { cstr(&path.replace('/', "\\")) } else { cstr(path) }
+}
+
 fn opt_cstr(s: Option<&str>) -> Option<CString> {
     s.filter(|s| !s.is_empty()).map(cstr)
 }
@@ -305,7 +321,7 @@ impl Vlc {
         let dirs = candidate_dirs(resource_dir);
         let dir = dirs
             .iter()
-            .find(|d| d.join("lib").join(lib_names().1).exists())
+            .find(|d| lib_dir(d).join(lib_names().1).exists())
             .ok_or_else(|| {
                 format!(
                     "libVLC 3 was not found. Install VLC 3 from videolan.org or set REVLC_VLC_DIR. Looked in: {}",
@@ -321,7 +337,7 @@ impl Vlc {
 
         let (core_name, lib_name) = lib_names();
         let load = |name: &str| -> Result<&'static Library, String> {
-            let path = dir.join("lib").join(name);
+            let path = lib_dir(dir).join(name);
             // SAFETY: loading libVLC runs its initialisers, which are safe to run.
             let lib = unsafe { Library::new(&path) }.map_err(|e| format!("{}: {e}", path.display()))?;
             Ok(Box::leak(Box::new(lib)))
@@ -340,8 +356,10 @@ impl Vlc {
         // The "macosx" output draws subtitles as an overlay. The default
         // layer-based output tries to blend them into hardware-decoded
         // frames, which fails for 10-bit video, so subtitles never show.
-        let args: Vec<CString> = ["--no-snapshot-preview", "--vout=macosx"]
+        let vout: &[&str] = if cfg!(target_os = "macos") { &["--vout=macosx"] } else { &[] };
+        let args: Vec<CString> = ["--no-snapshot-preview"]
             .iter()
+            .chain(vout)
             .map(|a| a.to_string())
             .chain(extra_args.iter().cloned())
             .map(|a| cstr(&a))
@@ -447,11 +465,17 @@ impl Vlc {
         unsafe { (self.api.libvlc_media_player_set_nsobject)(self.mp, view) }
     }
 
+    /// Sets the window libVLC draws into (an `HWND` on Windows).
+    #[cfg(windows)]
+    pub fn set_hwnd(&self, hwnd: *mut c_void) {
+        unsafe { (self.api.libvlc_media_player_set_hwnd)(self.mp, hwnd) }
+    }
+
     /// Opens a local path or a URL and starts playback. `options` are
     /// per-media libVLC options such as ":network-caching=1000".
     pub fn open(&self, uri: &str, options: &[String]) -> Result<(), String> {
         BUFFERING.store(0, Ordering::Relaxed);
-        let c = cstr(uri);
+        let c = if uri.contains("://") { cstr(uri) } else { path_cstr(uri) };
         unsafe {
             let media = if uri.contains("://") {
                 (self.api.libvlc_media_new_location)(self.inst, c.as_ptr())
@@ -741,7 +765,7 @@ impl Vlc {
         const FLAGS: c_int = 0x02;
         const PARSED_DONE: c_int = 4;
 
-        let c = cstr(path);
+        let c = path_cstr(path);
         unsafe {
             let media = (self.api.libvlc_media_new_path)(self.inst, c.as_ptr());
             if media.is_null() {
@@ -897,7 +921,7 @@ impl Vlc {
         let api = &self.api;
         unsafe {
             let mp = (api.libvlc_media_player_new)(self.inst);
-            let c = cstr(path);
+            let c = path_cstr(path);
             let media = (api.libvlc_media_new_path)(self.inst, c.as_ptr());
             if mp.is_null() || media.is_null() {
                 drop(Box::from_raw(grab));

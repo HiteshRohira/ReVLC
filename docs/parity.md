@@ -109,5 +109,6 @@ Main features come first. Ship, get feedback, then keep ticking boxes.
 ## Platforms
 - [x] macOS (Apple Silicon), libVLC bundled in the app
 - [ ] Signed and notarised macOS builds
-- [ ] Windows
+- [x] Windows 10 and 11 (x64), libVLC bundled in the installer
+- [ ] Signed Windows builds
 - [ ] Linux
