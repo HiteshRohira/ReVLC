@@ -1,0 +1,65 @@
+# Builds the macOS release on GitHub's Apple Silicon runners and attaches
+# it to the GitHub release for the current version (create the release,
+# draft or not, first). The update manifest with the Mac entry added is
+# kept as the run's "latest-json" artifact: download it into site/, commit
+# it, and deploy the site once the release is public.
+#
+# Needs the updater key in the TAURI_SIGNING_PRIVATE_KEY secret:
+#   tr -d '\r\n' < ~/.tauri/revlc-updater.key | gh secret set TAURI_SIGNING_PRIVATE_KEY
+# (without the trailing newline, which the key must not have).
+name: Release (macOS)
+
+on:
+  workflow_dispatch:
+    inputs:
+      notes:
+        description: Release notes for the update manifest
+        required: false
+
+permissions:
+  contents: write
+
+jobs:
+  mac:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - run: npm ci
+
+      - name: Download libVLC
+        run: bash scripts/prepare-libvlc.sh
+
+      - name: Build
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ""
+        run: bash scripts/build-app.sh
+
+      - name: Collect release files
+        env:
+          NOTES: ${{ inputs.notes }}
+        run: bash scripts/release-files.sh "$NOTES"
+
+      - name: Upload to the GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="v$(node -p "require('./package.json').version")-alpha"
+          gh release upload "$tag" release/* --clobber
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: latest-json
+          path: site/latest.json
