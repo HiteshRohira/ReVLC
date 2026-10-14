@@ -8,7 +8,38 @@ ReVLC aims for full VLC feature parity with a cleaner, faster UI. It is early:
 see the [feature parity checklist](docs/parity.md) for what works today and
 what's next.
 
-![ReVLC playing a video with subtitles](docs/screenshot.jpg)
+![ReVLC paused on an episode of Suits](docs/screenshot.jpg)
+
+## Screenshots
+
+Click any screenshot for the full size.
+
+<table>
+  <tr>
+    <td width="50%"><a href="docs/screenshots/home.jpg"><img src="docs/screenshots/home.jpg" alt="Home: Continue watching and Recently added"></a><br><b>Home</b>: continue watching and recently added</td>
+    <td width="50%"><a href="docs/screenshots/library.jpg"><img src="docs/screenshots/library.jpg" alt="Videos: a show's episodes with titles and durations"></a><br><b>Library</b>: shows grouped by season, with episode titles</td>
+  </tr>
+  <tr>
+    <td><a href="docs/screenshots/menu.jpg"><img src="docs/screenshots/menu.jpg" alt="The player menu"></a><br><b>Player menu</b>: speed, audio, crop, chapters, A–B loop, bookmarks, sleep timer</td>
+    <td><a href="docs/screenshots/chapters.jpg"><img src="docs/screenshots/chapters.jpg" alt="The chapters page of the player menu"></a><br><b>Chapters</b></td>
+  </tr>
+  <tr>
+    <td><a href="docs/screenshots/subtitles-menu.jpg"><img src="docs/screenshots/subtitles-menu.jpg" alt="The subtitles menu"></a><br><b>Subtitles</b>: tracks, external files, delay</td>
+    <td><a href="docs/screenshots/queue.jpg"><img src="docs/screenshots/queue.jpg" alt="The Up next queue"></a><br><b>Up next</b>: search, sort, save as M3U, PLS or XSPF</td>
+  </tr>
+  <tr>
+    <td><a href="docs/screenshots/jump.jpg"><img src="docs/screenshots/jump.jpg" alt="The Jump to time dialog"></a><br><b>Jump to time</b> (⌘T)</td>
+    <td><a href="docs/screenshots/disc.jpg"><img src="docs/screenshots/disc.jpg" alt="The Open disc dialog"></a><br><b>Open disc</b>: DVD, Blu-ray, audio CD, VCD, ISO</td>
+  </tr>
+  <tr>
+    <td><a href="docs/screenshots/settings-general.jpg"><img src="docs/screenshots/settings-general.jpg" alt="Settings: General"></a><br><b>Settings</b>: General</td>
+    <td><a href="docs/screenshots/settings-subtitles.jpg"><img src="docs/screenshots/settings-subtitles.jpg" alt="Settings: Subtitles with a live preview"></a><br><b>Settings</b>: subtitle styling with a live preview</td>
+  </tr>
+  <tr>
+    <td><a href="docs/screenshots/settings-shortcuts.jpg"><img src="docs/screenshots/settings-shortcuts.jpg" alt="Settings: Shortcuts"></a><br><b>Settings</b>: editable, VLC-style shortcuts</td>
+    <td></td>
+  </tr>
+</table>
 
 ## Stack
 

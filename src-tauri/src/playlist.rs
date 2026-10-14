@@ -14,7 +14,8 @@ pub struct Item {
 impl Item {
     pub fn new(uri: impl Into<String>) -> Self {
         let uri = uri.into();
-        Self { title: title_for(&uri), uri, options: Vec::new() }
+        let title = if uri.contains("://") { title_for(&uri) } else { crate::meta::display_title(std::path::Path::new(&uri)) };
+        Self { title, uri, options: Vec::new() }
     }
 }
 
