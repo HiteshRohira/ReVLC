@@ -37,6 +37,12 @@ pub fn file_uri(path: &str) -> String {
     uri
 }
 
+/// A local path written the platform's way, so the same file always has
+/// the same history and bookmark key (`C:/a.mkv` is `C:a.mkv` on Windows).
+pub fn native_path(uri: String) -> String {
+    if cfg!(windows) && !uri.contains("://") { uri.replace('/', "\\") } else { uri }
+}
+
 /// Whether a path starts with a Windows drive letter, like `C:/`.
 fn has_drive(path: &str) -> bool {
     let b = path.as_bytes();
@@ -50,16 +56,16 @@ fn resolve(entry: &str, dir: &Path) -> String {
     if let Some(rest) = entry.strip_prefix("file://") {
         let path = percent_decode(rest.strip_prefix("localhost").unwrap_or(rest));
         // file:///C:/a.mkv is the path C:/a.mkv.
-        return match path.strip_prefix('/') {
+        return native_path(match path.strip_prefix('/') {
             Some(p) if has_drive(p) => p.to_string(),
             _ => path,
-        };
+        });
     }
     if entry.contains("://") {
         return entry.to_string();
     }
     let path = Path::new(entry);
-    if path.is_absolute() { entry.to_string() } else { dir.join(entry).to_string_lossy().into_owned() }
+    native_path(if path.is_absolute() { entry.to_string() } else { dir.join(entry).to_string_lossy().into_owned() })
 }
 
 fn item(entry: &str, title: Option<String>, options: Vec<String>, dir: &Path) -> Item {
@@ -252,11 +258,11 @@ mod tests {
     use super::*;
 
     /// An absolute path on this platform.
-    const MOVIE: &str = if cfg!(windows) { "C:/Movies/A & B.mkv" } else { "/Movies/A & B.mkv" };
+    const MOVIE: &str = if cfg!(windows) { r"C:\Movies\A & B.mkv" } else { "/Movies/A & B.mkv" };
 
-    /// `name` in `dir`, joined the way this platform does.
+    /// `name` in `dir`, written the way this platform does.
     fn joined(dir: &str, name: &str) -> String {
-        Path::new(dir).join(name).to_string_lossy().into_owned()
+        native_path(Path::new(dir).join(name).to_string_lossy().into_owned())
     }
 
     fn items() -> Vec<Item> {
@@ -293,14 +299,18 @@ mod tests {
         let list = read_m3u("#EXTM3U\n01 Intro.mp3\n#EXTINF:12,Second\nfile:///Music/Other%20Song.flac\n", dir);
         assert_eq!(list[0].uri, joined("/Music/Album", "01 Intro.mp3"));
         assert_eq!(list[0].title, "01 Intro.mp3");
-        assert_eq!(list[1].uri, "/Music/Other Song.flac");
+        assert_eq!(list[1].uri, native_path("/Music/Other Song.flac".into()));
         assert_eq!(list[1].title, "Second");
     }
 
     #[test]
     fn windows_paths() {
         assert_eq!(file_uri(r"C:\My Videos\a.mkv"), "file:///C:/My%20Videos/a.mkv");
-        assert_eq!(resolve("file:///C:/My%20Videos/a.mkv", Path::new("/x")), "C:/My Videos/a.mkv");
+        let expected = native_path("C:/My Videos/a.mkv".into());
+        assert_eq!(resolve("file:///C:/My%20Videos/a.mkv", Path::new("/x")), expected);
+        if cfg!(windows) {
+            assert_eq!(expected, r"C:\My Videos\a.mkv");
+        }
     }
 
     #[test]
@@ -313,7 +323,7 @@ mod tests {
             <track><location>b.mp4</location></track></trackList></playlist>"#;
         let list = read_xspf(xspf, Path::new("/x"));
         assert_eq!(list[0].title, "It's A");
-        assert_eq!(list[0].uri, "/a/It's.mp4");
+        assert_eq!(list[0].uri, native_path("/a/It's.mp4".into()));
         assert_eq!(list[1].uri, joined("/x", "b.mp4"));
     }
 }

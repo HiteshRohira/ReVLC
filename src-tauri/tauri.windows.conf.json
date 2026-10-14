@@ -24,7 +24,6 @@
     "targets": [
       "nsis"
     ],
-    "createUpdaterArtifacts": false,
     "windows": {
       "nsis": {
         "installMode": "currentUser",

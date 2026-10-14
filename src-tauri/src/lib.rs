@@ -525,7 +525,7 @@ impl Core {
     /// files add their entries.
     fn add(&self, uris: Vec<String>, play: bool) -> Result<(), String> {
         let mut items = Vec::new();
-        for uri in uris {
+        for uri in uris.into_iter().map(playlist_file::native_path) {
             let path = Path::new(&uri);
             if uri.contains("://") {
                 items.push(Item::new(uri));

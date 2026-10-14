@@ -84,13 +84,21 @@ Windows, VLC's own layout with the DLLs next to `plugins/` and `lua/`).
 
 ### Releasing
 
-`build:app` signs the updater archive with `~/.tauri/revlc-updater.key`;
-installed copies only accept updates signed with that key. Then:
+`build:app` signs the update (the macOS updater archive, the Windows
+installer) with `~/.tauri/revlc-updater.key`; installed copies only accept
+updates signed with that key. Then, on each platform:
 
 ```sh
-scripts/release-files.sh "What changed"   # release/ files + site/latest.json
-gh release create v<version>-alpha release/* --prerelease
-cd site && vercel deploy --prod            # publishes latest.json; apps see the update
+scripts/release-files.sh "What changed"   # release/ files; adds this platform to site/latest.json
+gh release create v<version>-alpha release/* --prerelease   # or `gh release upload` for the second platform
+```
+
+`site/latest.json` lists every platform, and only moves to the new version
+once each one has it, so commit it between platforms. Once the release is
+public, publish the manifest; apps see the update:
+
+```sh
+cd site && vercel deploy --prod
 ```
 
 ## Known issues
@@ -98,7 +106,7 @@ cd site && vercel deploy --prod            # publishes latest.json; apps see the
 - Subtitles can overlap the control bar while it's visible (Settings → Subtitles → "Raise subtitles by" moves them up).
 - HDR is tone-mapped to SDR by libVLC 3 (true HDR on XDR displays is milestone M2).
 - Linux isn't supported yet.
-- Windows: the installer isn't code-signed yet, and Windows copies don't update themselves yet.
+- Windows: the installer isn't code-signed yet.
 
 ## Contributing
 
