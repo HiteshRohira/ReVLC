@@ -1,0 +1,110 @@
+# Builds a release on GitHub's runners, for the version in package.json:
+# makes a draft pre-release (if there isn't one), builds macOS (Apple
+# Silicon) and Windows side by side, attaches their files, and writes the
+# update manifest with both platforms. The manifest is kept as the run's
+# "latest-json" artifact: download it into site/, commit it, publish the
+# release, then deploy the site.
+#
+# Needs the updater key in the TAURI_SIGNING_PRIVATE_KEY secret, without
+# the trailing newline (the key must not have one):
+#   tr -d '\r\n' < ~/.tauri/revlc-updater.key | gh secret set TAURI_SIGNING_PRIVATE_KEY
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      notes:
+        description: Release notes for the update manifest
+        required: false
+
+permissions:
+  contents: write
+
+jobs:
+  draft:
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.tag.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: tag
+        run: echo "tag=v$(node -p "require('./package.json').version")-alpha" >> "$GITHUB_OUTPUT"
+      - name: Make the draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.tag.outputs.tag }}
+        # Rebuilding a published release would replace its files with ones
+        # the live manifest's signatures don't match, breaking updates.
+        run: |
+          if draft="$(gh release view "$TAG" --json isDraft --jq .isDraft 2>/dev/null)"; then
+            [[ "$draft" == "true" ]] || { echo "$TAG is already published; bump the version in package.json first." >&2; exit 1; }
+          else
+            gh release create "$TAG" --draft --prerelease --target "$GITHUB_SHA" --title "ReVLC ${TAG#v}" --notes "Release notes to come."
+          fi
+
+  build:
+    needs: draft
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-14, windows-latest]
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - run: npm ci
+
+      - name: Download libVLC
+        run: bash scripts/prepare-libvlc.sh
+
+      - name: Build
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ""
+        run: bash scripts/build-app.sh
+
+      - name: Collect release files
+        env:
+          NOTES: ${{ inputs.notes }}
+        run: bash scripts/release-files.sh "$NOTES"
+
+      - name: Upload to the GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "${{ needs.draft.outputs.tag }}" release/* --clobber
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: manifest-${{ matrix.os }}
+          path: site/latest.json
+
+  manifest:
+    needs: [draft, build]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: manifest-*
+      - name: Merge the platforms
+        env:
+          NOTES: ${{ inputs.notes }}
+        run: node scripts/merge-manifests.js site/latest.json manifest-*/latest.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: latest-json
+          path: site/latest.json
