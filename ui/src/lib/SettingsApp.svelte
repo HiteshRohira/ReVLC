@@ -58,6 +58,13 @@
 
   const v = $derived(settings.value);
   const info = $derived(settings.info);
+  // Whether this tab differs from the defaults, so "Restore defaults" has something to do.
+  const tabChanged = $derived.by(() => {
+    if (!v || !info) return false;
+    if (tab === "shortcuts") return Object.keys(v.shortcuts).length > 0;
+    return TAB_KEYS[tab].some((k) => JSON.stringify(v[k]) !== JSON.stringify(info.defaults[k]));
+  });
+  const tabLabel = $derived(TABS.find((t) => t.id === tab)!.label);
   const pct = (n: number) => `${Math.round((n / 255) * 100)}%`;
   const hex = (n: number) => `#${n.toString(16).padStart(6, "0")}`;
 
@@ -320,11 +327,10 @@
       </div>
     {/if}
 
-    {#if v}
+    {#if tabChanged}
       <footer>
-        <span class="muted">Changes apply right away.</span>
         <button class="btn" onclick={() => (tab === "shortcuts" ? settings.set({ shortcuts: {} }) : settings.reset(TAB_KEYS[tab]))}>
-          <RotateCcw size={14} /> Restore defaults
+          <RotateCcw size={14} /> Restore {tabLabel} defaults
         </button>
       </footer>
     {/if}
@@ -543,10 +549,8 @@
   }
   footer {
     display: flex;
-    align-items: center;
-    justify-content: space-between;
+    justify-content: flex-end;
     margin-top: 22px;
-    font-size: 12px;
   }
   .muted {
     color: var(--muted);

@@ -307,7 +307,7 @@ impl Core {
             // libVLC reports the file name as the title when there's no tag.
             let tag_title = tags.title.filter(|t| {
                 let file = path.file_name().map(|f| f.to_string_lossy()).unwrap_or_default();
-                *t != file && *t != item.title
+                *t != file && *t != item.title && !meta::is_release_name(t)
             });
             item.show = tags.show.or(name.show);
             item.season = tags.season.or(name.season);

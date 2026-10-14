@@ -185,7 +185,8 @@ pub fn parse_path(path: &Path) -> NameInfo {
     .filter(|s| !s.is_empty());
 
     if let Some((start, end, season, episode)) = find_episode(&name) {
-        let show = tidy(cut_junk(&name[..start]));
+        // "Suits (2011) - S01E09": the year belongs to the show, not its name.
+        let show = folder_title(&name[..start]);
         let show = if show.is_empty() { folder_show } else { Some(show) };
         let title = tidy(cut_junk(&name[end..]));
         return NameInfo { title, year: None, show, season: Some(season), episode: Some(episode) };
@@ -209,6 +210,30 @@ pub fn parse_path(path: &Path) -> NameInfo {
         (folder_title(&folder).eq_ignore_ascii_case(&title)).then_some(y)
     });
     NameInfo { title: if title.is_empty() { stem } else { title }, year, ..Default::default() }
+}
+
+/// Whether a title tag is just a release name ("Suits (2011) - S01E10") rather
+/// than an episode or movie title.
+pub fn is_release_name(title: &str) -> bool {
+    find_episode(&words(title)).is_some()
+}
+
+/// A short title for a local file until it reports its own: "Show - S01E02 - Title",
+/// "Movie (1999)", or the file name.
+pub fn display_title(path: &Path) -> String {
+    let file = path.file_name().map(|f| f.to_string_lossy().into_owned()).unwrap_or_default();
+    let info = parse_path(path);
+    match (info.show, info.season, info.episode) {
+        (Some(show), Some(s), Some(e)) if info.title.is_empty() => format!("{show} - S{s:02}E{e:02}"),
+        (Some(show), Some(s), Some(e)) => format!("{show} - S{s:02}E{e:02} - {}", info.title),
+        _ if info.title.is_empty() => file,
+        _ => match info.year {
+            Some(y) => format!("{} ({y})", info.title),
+            // Unchanged names keep their extension, as before.
+            None if path.file_stem().is_some_and(|s| s.to_string_lossy() == info.title) => file,
+            None => info.title,
+        },
+    }
 }
 
 const IMAGE_EXTENSIONS: &[&str] = &["jpg", "jpeg", "png"];
@@ -367,6 +392,8 @@ mod tests {
         assert_eq!(e, NameInfo { title: "Lies".into(), year: None, show: Some("Dark".into()), season: Some(1), episode: Some(2) });
         let e = parse("/tv/The Office - 2x05 - Halloween.avi");
         assert_eq!((e.show.as_deref(), e.season, e.episode, e.title.as_str()), (Some("The Office"), Some(2), Some(5), "Halloween"));
+        let e = parse("/tv/Suits/Season 01/Suits (2011) - S01E09 - Undefeated (1080p BluRay x265 ImE).mkv");
+        assert_eq!((e.show.as_deref(), e.season, e.episode, e.title.as_str()), (Some("Suits"), Some(1), Some(9), "Undefeated"));
         let e = parse("/tv/Dark (2017)/Season 1/S01E03.mkv");
         assert_eq!((e.show.as_deref(), e.season, e.episode, e.title.as_str()), (Some("Dark"), Some(1), Some(3), ""));
     }
@@ -377,6 +404,20 @@ mod tests {
         assert_eq!((e.show.as_deref(), e.season, e.episode, e.title.as_str()), (Some("Planet Earth"), Some(2), Some(3), "Jungles"));
         let e = parse("/tv/Show/Series 1/Episode 4.mkv");
         assert_eq!((e.season, e.episode), (Some(1), Some(4)));
+    }
+
+    #[test]
+    fn release_names() {
+        assert!(is_release_name("Suits (2011) - S01E10"));
+        assert!(!is_release_name("Shelf Life"));
+    }
+
+    #[test]
+    fn display_titles() {
+        let t = |p: &str| display_title(Path::new(p));
+        assert_eq!(t("/s/Suits (2011) - S01E10 - Shelf Life (1080p BluRay x265 ImE).mkv"), "Suits - S01E10 - Shelf Life");
+        assert_eq!(t("/m/The.Matrix.1999.1080p.BluRay.x264.mkv"), "The Matrix (1999)");
+        assert_eq!(t("/m/Big Buck Bunny.mp4"), "Big Buck Bunny.mp4");
     }
 
     #[test]
