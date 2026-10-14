@@ -1,9 +1,29 @@
 use serde::{Deserialize, Serialize};
 
-#[derive(Clone, Debug, Serialize)]
+use crate::library::natural_cmp;
+
+#[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct Item {
     pub uri: String,
     pub title: String,
+    /// Per-item libVLC options, such as ":cdda-track=3".
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub options: Vec<String>,
+}
+
+impl Item {
+    pub fn new(uri: impl Into<String>) -> Self {
+        let uri = uri.into();
+        Self { title: title_for(&uri), uri, options: Vec::new() }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SortKey {
+    Title,
+    Path,
+    Reverse,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -31,7 +51,7 @@ pub fn title_for(uri: &str) -> String {
     if last.is_empty() { uri.to_string() } else { percent_decode(last) }
 }
 
-fn percent_decode(s: &str) -> String {
+pub fn percent_decode(s: &str) -> String {
     let bytes = s.as_bytes();
     let mut out = Vec::with_capacity(bytes.len());
     let mut i = 0;
@@ -51,10 +71,22 @@ fn percent_decode(s: &str) -> String {
 
 impl Playlist {
     /// Appends items and returns the index of the first one added.
-    pub fn add(&mut self, uris: &[String]) -> usize {
+    pub fn add(&mut self, items: Vec<Item>) -> usize {
         let first = self.items.len();
-        self.items.extend(uris.iter().map(|uri| Item { uri: uri.clone(), title: title_for(uri) }));
+        self.items.extend(items);
         first
+    }
+
+    /// Sorts the items, keeping the current one current.
+    pub fn sort(&mut self, key: SortKey) {
+        let mut items: Vec<(usize, Item)> = std::mem::take(&mut self.items).into_iter().enumerate().collect();
+        match key {
+            SortKey::Title => items.sort_by(|a, b| natural_cmp(&a.1.title, &b.1.title)),
+            SortKey::Path => items.sort_by(|a, b| natural_cmp(&a.1.uri, &b.1.uri)),
+            SortKey::Reverse => items.reverse(),
+        }
+        self.current = self.current.and_then(|c| items.iter().position(|(i, _)| *i == c));
+        self.items = items.into_iter().map(|(_, item)| item).collect();
     }
 
     pub fn remove(&mut self, index: usize) -> bool {
@@ -144,8 +176,25 @@ mod tests {
 
     fn list(n: usize) -> Playlist {
         let mut p = Playlist::default();
-        p.add(&(0..n).map(|i| format!("/m/{i}.mkv")).collect::<Vec<_>>());
+        p.add((0..n).map(|i| Item::new(format!("/m/{i}.mkv"))).collect());
         p
+    }
+
+    #[test]
+    fn sort_keeps_current() {
+        let mut p = Playlist::default();
+        p.add(["/b/Episode 10.mkv", "/a/Episode 2.mkv", "/c/Episode 1.mkv"].map(Item::new).to_vec());
+        p.current = Some(0);
+        p.sort(SortKey::Title);
+        let titles: Vec<_> = p.items.iter().map(|i| i.title.as_str()).collect();
+        assert_eq!(titles, ["Episode 1.mkv", "Episode 2.mkv", "Episode 10.mkv"]);
+        assert_eq!(p.current, Some(2));
+        p.sort(SortKey::Path);
+        assert_eq!(p.items[0].uri, "/a/Episode 2.mkv");
+        assert_eq!(p.current, Some(1));
+        p.sort(SortKey::Reverse);
+        assert_eq!(p.current, Some(1));
+        assert_eq!(p.items[0].uri, "/c/Episode 1.mkv");
     }
 
     #[test]

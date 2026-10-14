@@ -13,31 +13,31 @@ Main features come first. Ship, get feedback, then keep ticking boxes.
 - [x] Playback speed (0.25×–4×)
 - [x] Frame step
 - [x] Previous / next, restart on "previous" after 3 s
-- [ ] Jump to time…
-- [ ] A–B loop
+- [x] Jump to time…
+- [x] A–B loop
 - [x] Chapters on the seek bar *(engine)*
-- [ ] Chapter and title menu
-- [ ] Bookmarks
+- [x] Chapter and title menu
+- [x] Bookmarks
 - [x] Resume where you left off
 - [x] Recent media and "continue watching" with thumbnails
-- [ ] Sleep timer
+- [x] Sleep timer
 
 ## Opening media
 - [x] Open files (dialog, multiple), drag and drop, command line, Finder "Open With"
 - [x] Open network URL: HTTP(S), HLS, DASH, RTSP, RTMP, UDP *(engine)*
 - [x] YouTube and similar via VLC's Lua scripts *(engine)*
 - [x] Open folder (recursive, natural sort)
-- [ ] Open disc: DVD with menus, Blu-ray, audio CD, VCD, ISO *(engine)*
-- [ ] Capture devices: webcam, microphone, screen *(engine)*
+- [x] Open disc: DVD with menus, Blu-ray, audio CD, VCD, ISO *(engine)*
+- [x] Capture devices: webcam, microphone, screen *(engine)*
 
 ## Playlist
 - [x] Queue, double-click to play, remove, clear
 - [x] Drag to reorder
 - [x] Repeat (off / all / one), shuffle
-- [ ] Save / load M3U, XSPF, PLS
-- [ ] Search and sort
+- [x] Save / load M3U, XSPF, PLS
+- [x] Search and sort
 - [x] Library folders with thumbnails, grouped by subfolder
-- [ ] Library metadata and artwork (titles, posters, seasons)
+- [x] Library metadata and artwork (titles, posters, seasons)
 
 ## Subtitles
 - [x] Embedded track selection (SRT, ASS/SSA, PGS, VobSub, WebVTT, DVB…) *(engine)*

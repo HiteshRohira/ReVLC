@@ -1,7 +1,12 @@
+mod bookmarks;
+mod capture;
+mod disc;
 mod history;
 mod library;
 mod menu;
+mod meta;
 mod playlist;
+mod playlist_file;
 mod settings;
 #[cfg(target_os = "macos")]
 mod surface_macos;
@@ -11,19 +16,24 @@ mod vlc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver};
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager, RunEvent, WebviewUrl, WebviewWindowBuilder};
 
+use bookmarks::{Bookmark, Bookmarks};
+use capture::{Capture, Devices};
+use disc::{Disc, DiscKind};
 use history::{History, UiEntry};
 use library::{Library, LibraryItem};
-use playlist::{Playlist, Repeat};
+use meta::MetaCache;
+use playlist::{Item, Playlist, Repeat, SortKey};
+use playlist_file::file_uri;
 use settings::{Resume, Settings};
-use vlc::{Chapter, State, Track, Vlc, event};
+use vlc::{Chapter, Navigate, State, Title, Track, Vlc, event};
 
 struct Core {
     vlc: Vlc,
@@ -32,7 +42,7 @@ struct Core {
     /// Set once the video view exists; opens before that are queued so
     /// libVLC never falls back to its own window.
     ready: AtomicBool,
-    pending: Mutex<Vec<String>>,
+    pending: Mutex<Vec<Item>>,
     history: Mutex<History>,
     /// What to do once the current item starts playing.
     resume: Mutex<Option<PendingSeek>>,
@@ -46,6 +56,32 @@ struct Core {
     user_snapshot: AtomicBool,
     library: Mutex<Library>,
     thumbs: Thumbnails,
+    /// Where cached thumbnails and artwork go.
+    thumbs_dir: PathBuf,
+    meta: Mutex<MetaCache>,
+    bookmarks: Mutex<Bookmarks>,
+    /// A–B loop points in ms.
+    ab_loop: Mutex<(Option<i64>, Option<i64>)>,
+    sleep: Mutex<SleepTimer>,
+}
+
+#[derive(Default)]
+struct SleepTimer {
+    /// When to pause, in Unix ms.
+    at: Option<u64>,
+    /// Stop once the current item ends instead of playing the next.
+    after_item: bool,
+    /// Bumped on every change so an old timer thread knows to give up.
+    generation: u64,
+}
+
+fn unix_ms() -> u64 {
+    SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_millis() as u64)
+}
+
+/// Inputs that are live devices rather than media, kept out of the history.
+fn is_capture(uri: &str) -> bool {
+    ["avcapture://", "avaudiocapture://", "screen://"].iter().any(|s| uri.starts_with(s))
 }
 
 #[derive(Clone, Copy)]
@@ -66,20 +102,39 @@ struct SettingsInfo {
     fonts: Vec<String>,
 }
 
-/// Thumbnails waiting to be generated, handled by one background thread.
+/// Thumbnails, artwork and metadata waiting to be made, handled by one
+/// background thread.
 #[derive(Default)]
 struct Thumbnails {
     queue: Mutex<VecDeque<ThumbJob>>,
     wake: Condvar,
-    /// Library files already attempted this session, so failures aren't retried forever.
-    tried: Mutex<HashSet<PathBuf>>,
+    /// Jobs already attempted this session, so failures aren't retried forever.
+    tried: Mutex<HashSet<String>>,
 }
 
 struct ThumbJob {
     uri: String,
+    /// The file to write (unused for metadata).
     out: PathBuf,
-    /// How far into the media to grab the frame (0–1).
-    at: f64,
+    kind: JobKind,
+}
+
+enum JobKind {
+    /// A video frame, this far into the media (0–1).
+    Frame(f64),
+    /// Read the file's tags, duration and embedded artwork.
+    Meta,
+    /// A resized copy of a poster or cover image.
+    Art(PathBuf),
+}
+
+impl ThumbJob {
+    fn key(&self) -> String {
+        match self.kind {
+            JobKind::Meta => format!("meta:{}", self.uri),
+            _ => self.out.to_string_lossy().into_owned(),
+        }
+    }
 }
 
 #[derive(Clone, Serialize)]
@@ -112,6 +167,14 @@ struct PlayerState {
     buffering: f32,
     audio_delay: i64,
     subtitle_delay: i64,
+    /// Index of the current title and chapter, or -1.
+    title: i32,
+    chapter: i32,
+    loop_a: Option<i64>,
+    loop_b: Option<i64>,
+    /// When the sleep timer pauses playback, in Unix ms.
+    sleep_at: Option<u64>,
+    sleep_after_item: bool,
 }
 
 #[derive(Clone, Serialize)]
@@ -136,6 +199,8 @@ struct Snapshot {
     tracks: Option<Tracks>,
     playlist: Option<Playlist>,
     chapters: Vec<Chapter>,
+    titles: Vec<Title>,
+    bookmarks: Vec<Bookmark>,
     engine: Result<String, String>,
 }
 
@@ -177,14 +242,14 @@ impl Core {
     /// Reopens the current item at the same position, so settings that
     /// only apply when a video starts take effect now.
     fn reload(&self) {
-        let Some(uri) = self.current_uri() else { return };
+        let Some(item) = self.current_item() else { return };
         let state = self.vlc.state();
         if !matches!(state, State::Playing | State::Paused) {
             return;
         }
         *self.resume.lock().unwrap_or_else(|e| e.into_inner()) =
             Some(PendingSeek::Seek { ms: self.vlc.time(), announce: false });
-        let _ = self.vlc.open(&uri, &[]);
+        let _ = self.vlc.open(&item.uri, &item.options);
         if state == State::Paused {
             // Let it show a frame at the old position, then pause again.
             thread::sleep(Duration::from_millis(400));
@@ -199,31 +264,73 @@ impl Core {
     fn library_list(&self) -> LibraryList {
         let library = self.library();
         let history = self.history();
-        let items = library.items(|uri| {
+        let mut items = library.items(|uri| {
             let p = history.library_thumb_path(uri);
             p.exists().then(|| p.to_string_lossy().into_owned())
         });
         // Queue thumbnails for anything that doesn't have one yet.
-        let missing: Vec<_> = items
+        let mut jobs: Vec<_> = items
             .iter()
             .filter(|i| i.thumb.is_none())
-            .map(|i| ThumbJob { uri: i.uri.clone(), out: history.library_thumb_path(&i.uri), at: 0.3 })
+            .map(|i| ThumbJob { uri: i.uri.clone(), out: history.library_thumb_path(&i.uri), kind: JobKind::Frame(0.3) })
             .collect();
         drop(history);
-        self.queue_thumbnails(missing, true);
+        self.add_metadata(&mut items, &mut jobs);
+        self.queue_thumbnails(jobs, true);
         LibraryList { folders: library.folders.clone(), items }
     }
 
-    /// Queues thumbnail jobs. With `once`, files already attempted are skipped;
-    /// otherwise a job replaces any queued one for the same output file.
+    /// Fills in titles, episode numbers, durations and artwork, queueing
+    /// jobs for whatever hasn't been read or cached yet.
+    fn add_metadata(&self, items: &mut [LibraryItem], jobs: &mut Vec<ThumbJob>) {
+        let cache = self.meta.lock().unwrap_or_else(|e| e.into_inner());
+        let mut images = meta::Images::default();
+        let art = |src: Option<PathBuf>, jobs: &mut Vec<ThumbJob>| {
+            let src = src?;
+            let out = meta::art_cache_path(&self.thumbs_dir, &src);
+            if out.exists() {
+                return Some(out.to_string_lossy().into_owned());
+            }
+            jobs.push(ThumbJob { uri: src.to_string_lossy().into_owned(), out, kind: JobKind::Art(src) });
+            None
+        };
+        for item in items {
+            let path = Path::new(&item.uri);
+            let name = meta::parse_path(path);
+            let tags = match cache.get(&item.uri) {
+                Some(m) => m.clone(),
+                None => {
+                    jobs.push(ThumbJob { uri: item.uri.clone(), out: PathBuf::new(), kind: JobKind::Meta });
+                    Default::default()
+                }
+            };
+            // libVLC reports the file name as the title when there's no tag.
+            let tag_title = tags.title.filter(|t| {
+                let file = path.file_name().map(|f| f.to_string_lossy()).unwrap_or_default();
+                *t != file && *t != item.title
+            });
+            item.show = tags.show.or(name.show);
+            item.season = tags.season.or(name.season);
+            item.episode = tags.episode.or(name.episode);
+            item.name = tag_title.unwrap_or(name.title);
+            item.year = name.year.or_else(|| tags.date.as_deref().and_then(|d| d.get(..4)).and_then(|y| y.parse().ok()));
+            item.duration = tags.duration;
+            item.art = art(images.file_poster(path).or(tags.artwork.map(PathBuf::from)), jobs);
+            item.group_art = art(images.group_poster(path), jobs);
+        }
+    }
+
+    /// Queues thumbnail jobs. With `once`, jobs already attempted are skipped;
+    /// otherwise a job replaces any queued one for the same output.
     fn queue_thumbnails(&self, jobs: Vec<ThumbJob>, once: bool) {
         let tried = self.thumbs.tried.lock().unwrap_or_else(|e| e.into_inner());
         let mut queue = self.thumbs.queue.lock().unwrap_or_else(|e| e.into_inner());
         for job in jobs {
-            if once && tried.contains(&job.out) {
+            let key = job.key();
+            if once && tried.contains(&key) {
                 continue;
             }
-            queue.retain(|j| j.out != job.out);
+            queue.retain(|j| j.key() != key);
             // Resume-point thumbnails go first: they're what the home screen shows.
             if once { queue.push_back(job) } else { queue.push_front(job) }
         }
@@ -235,19 +342,24 @@ impl Core {
         let (time, length) = (self.vlc.time(), self.vlc.length());
         if length > 0 && self.vlc.has_video() {
             let out = self.history().thumb_path(uri);
-            self.queue_thumbnails(vec![ThumbJob { uri: uri.to_string(), out, at: time as f64 / length as f64 }], false);
+            let kind = JobKind::Frame(time as f64 / length as f64);
+            self.queue_thumbnails(vec![ThumbJob { uri: uri.to_string(), out, kind }], false);
         }
     }
 
-    fn current_uri(&self) -> Option<String> {
+    fn current_item(&self) -> Option<Item> {
         let playlist = self.playlist();
-        playlist.current.and_then(|i| playlist.items.get(i)).map(|it| it.uri.clone())
+        playlist.current.and_then(|i| playlist.items.get(i)).cloned()
+    }
+
+    fn current_uri(&self) -> Option<String> {
+        self.current_item().map(|it| it.uri)
     }
 
     /// Records the current position, and grabs a thumbnail if there's video.
     fn save_progress(&self, thumbnail: bool) {
         let Some(uri) = self.current_uri() else { return };
-        if !matches!(self.vlc.state(), State::Playing | State::Paused) {
+        if !matches!(self.vlc.state(), State::Playing | State::Paused) || is_capture(&uri) {
             return;
         }
         if thumbnail {
@@ -260,10 +372,67 @@ impl Core {
 
     fn emit_chapters(&self) {
         let _ = self.app.emit("player://chapters", self.vlc.chapters());
+        let _ = self.app.emit("player://titles", self.vlc.titles());
+    }
+
+    fn bookmarks(&self) -> MutexGuard<'_, Bookmarks> {
+        self.bookmarks.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    fn current_bookmarks(&self) -> Vec<Bookmark> {
+        self.current_uri().map(|uri| self.bookmarks().list(&uri)).unwrap_or_default()
+    }
+
+    fn emit_bookmarks(&self) {
+        let _ = self.app.emit("player://bookmarks", self.current_bookmarks());
+    }
+
+    fn ab_loop(&self) -> MutexGuard<'_, (Option<i64>, Option<i64>)> {
+        self.ab_loop.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    fn sleep(&self) -> MutexGuard<'_, SleepTimer> {
+        self.sleep.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Pauses after `minutes`, or stops after the current item, or (with
+    /// neither) cancels the timer.
+    fn set_sleep_timer(self: &Arc<Self>, minutes: Option<u32>, after_item: bool) {
+        let generation = {
+            let mut sleep = self.sleep();
+            sleep.generation += 1;
+            sleep.at = minutes.map(|m| unix_ms() + m as u64 * 60_000);
+            sleep.after_item = after_item && minutes.is_none();
+            sleep.generation
+        };
+        if let Some(m) = minutes {
+            let core = self.clone();
+            thread::spawn(move || {
+                let deadline = Instant::now() + Duration::from_secs(m as u64 * 60);
+                while Instant::now() < deadline {
+                    thread::sleep(Duration::from_millis(500));
+                    if core.sleep().generation != generation {
+                        return;
+                    }
+                }
+                *core.sleep() = SleepTimer { generation: generation + 1, ..Default::default() };
+                if matches!(core.vlc.state(), State::Playing | State::Buffering | State::Opening) {
+                    core.vlc.set_pause(true);
+                    core.notice("info", "Sleep timer: playback paused");
+                }
+                core.emit_state();
+            });
+        }
+        self.emit_state();
     }
 
     fn state(&self) -> PlayerState {
         let v = &self.vlc;
+        let (loop_a, loop_b) = *self.ab_loop();
+        let (sleep_at, sleep_after_item) = {
+            let sleep = self.sleep();
+            (sleep.at, sleep.after_item)
+        };
         PlayerState {
             state: v.state(),
             time: v.time(),
@@ -276,6 +445,12 @@ impl Core {
             buffering: v.buffering(),
             audio_delay: v.audio_delay(),
             subtitle_delay: v.subtitle_delay(),
+            title: v.title(),
+            chapter: v.chapter(),
+            loop_a,
+            loop_b,
+            sleep_at,
+            sleep_after_item,
         }
     }
 
@@ -308,26 +483,30 @@ impl Core {
 
     fn play_index(&self, index: usize) -> Result<(), String> {
         self.save_progress(true);
-        let (uri, title) = {
+        let item = {
             let mut playlist = self.playlist();
             let item = playlist.items.get(index).ok_or("no such playlist item")?.clone();
             playlist.current = Some(index);
-            (item.uri, item.title)
+            item
         };
-        {
+        let (uri, title) = (&item.uri, &item.title);
+        *self.ab_loop() = (None, None);
+        *self.resume.lock().unwrap_or_else(|e| e.into_inner()) = None;
+        if !is_capture(uri) {
             let mut history = self.history();
-            let point = history.resume_point(&uri);
+            let point = history.resume_point(uri);
             let pending = match (self.settings().resume, point) {
                 (Resume::Always, Some(ms)) => Some(PendingSeek::Seek { ms, announce: true }),
                 (Resume::Ask, Some(ms)) => Some(PendingSeek::Ask(ms)),
                 _ => None,
             };
             *self.resume.lock().unwrap_or_else(|e| e.into_inner()) = pending;
-            history.touch(&uri, &title);
+            history.touch(uri, title);
             history.save(true);
         }
         self.emit_playlist();
-        self.vlc.open(&uri, &[])
+        self.emit_bookmarks();
+        self.vlc.open(uri, &item.options)
     }
 
     /// Stops playback, remembering where we were.
@@ -337,23 +516,42 @@ impl Core {
         self.emit_state();
     }
 
-    /// Adds to the playlist, optionally starting the first new item.
+    /// Adds paths or URLs to the playlist, optionally starting the first
+    /// new item. Folders add their media (and join the library); playlist
+    /// files add their entries.
     fn add(&self, uris: Vec<String>, play: bool) -> Result<(), String> {
-        // Opening a folder plays its contents and adds it to the library.
-        for uri in &uris {
-            if !uri.contains("://") && std::path::Path::new(uri).is_dir() {
-                self.library().add(uri);
+        let mut items = Vec::new();
+        for uri in uris {
+            let path = Path::new(&uri);
+            if uri.contains("://") {
+                items.push(Item::new(uri));
+            } else if path.is_dir() {
+                // A disc's folder plays as a disc, not as a folder of files.
+                match disc::kind_of(path) {
+                    Some(kind) => items.extend(disc::items(kind, &uri, true)?),
+                    None => {
+                        self.library().add(&uri);
+                        items.extend(library::expand(vec![uri]).into_iter().map(Item::new));
+                    }
+                }
+            } else if playlist_file::is_playlist(path) {
+                items.extend(playlist_file::read(path)?);
+            } else {
+                items.push(Item::new(uri));
             }
         }
-        let uris = library::expand(uris);
-        if uris.is_empty() {
+        self.add_items(items, play)
+    }
+
+    fn add_items(&self, items: Vec<Item>, play: bool) -> Result<(), String> {
+        if items.is_empty() {
             return Ok(());
         }
         if !self.ready.load(Ordering::Acquire) {
-            self.pending.lock().unwrap_or_else(|e| e.into_inner()).extend(uris);
+            self.pending.lock().unwrap_or_else(|e| e.into_inner()).extend(items);
             return Ok(());
         }
-        let first = self.playlist().add(&uris);
+        let first = self.playlist().add(items);
         self.emit_playlist();
         if play { self.play_index(first) } else { Ok(()) }
     }
@@ -361,7 +559,7 @@ impl Core {
     fn mark_ready(&self) {
         self.ready.store(true, Ordering::Release);
         let pending = std::mem::take(&mut *self.pending.lock().unwrap_or_else(|e| e.into_inner()));
-        if let Err(e) = self.add(pending, true) {
+        if let Err(e) = self.add_items(pending, true) {
             self.notice("error", e);
         }
     }
@@ -387,22 +585,36 @@ fn make_thumbnails(core: Arc<Core>) {
                 if let Some(job) = queue.pop_front() {
                     break job;
                 }
+                // Idle: write out what was read.
+                core.meta.lock().unwrap_or_else(|e| e.into_inner()).save();
                 queue = core.thumbs.wake.wait(queue).unwrap_or_else(|e| e.into_inner());
             }
         };
-        while core.vlc.state() == State::Playing {
-            thread::sleep(Duration::from_secs(1));
-        }
-        // Only real files can be thumbnailed by the second player.
+        // Only real files can be read by the second player.
         if job.uri.contains("://") {
             continue;
         }
-        core.thumbs.tried.lock().unwrap_or_else(|e| e.into_inner()).insert(job.out.clone());
-        match core.vlc.thumbnail(&job.uri, &job.out, job.at, 480) {
+        core.thumbs.tried.lock().unwrap_or_else(|e| e.into_inner()).insert(job.key());
+        let result = match job.kind {
+            JobKind::Frame(at) => {
+                while core.vlc.state() == State::Playing {
+                    thread::sleep(Duration::from_secs(1));
+                }
+                core.vlc.thumbnail(&job.uri, &job.out, at, 480)
+            }
+            JobKind::Meta => {
+                // Remember failures too, so unreadable files aren't parsed on every scan.
+                let tags = core.vlc.parse(&job.uri, 5000);
+                core.meta.lock().unwrap_or_else(|e| e.into_inner()).insert(&job.uri, tags.clone().unwrap_or_default());
+                tags.map(|_| ())
+            }
+            JobKind::Art(src) => meta::resize_art(&src, &job.out, 360),
+        };
+        match result {
             Ok(()) => {
                 let _ = core.app.emit("library://thumb", job.uri);
             }
-            Err(e) => eprintln!("revlc: thumbnail failed: {e}"),
+            Err(e) => eprintln!("revlc: library job failed: {e}"),
         }
     }
 }
@@ -415,6 +627,7 @@ fn pump_events(core: Arc<Core>, rx: Receiver<i32>) {
 
     let mut last_time_emit = Instant::now() - TIME_INTERVAL;
     let mut last_progress = Instant::now();
+    let mut loop_jump: Option<Instant> = None;
     while let Ok(first) = rx.recv() {
         // Let bursts of events (e.g. opening a file) arrive, then handle them together.
         thread::sleep(Duration::from_millis(20));
@@ -428,7 +641,10 @@ fn pump_events(core: Arc<Core>, rx: Receiver<i32>) {
                 history.save(true);
             }
             let stop_after_each = core.settings().stop_after_each;
-            if !stop_after_each {
+            let sleep_now = std::mem::take(&mut core.sleep().after_item);
+            if sleep_now {
+                core.notice("info", "Sleep timer: stopped after this item");
+            } else if !stop_after_each {
                 if let Err(e) = core.advance(true) {
                     core.notice("error", e);
                 }
@@ -462,6 +678,19 @@ fn pump_events(core: Arc<Core>, rx: Receiver<i32>) {
         if has(event::PAUSED) {
             core.save_progress(true);
         }
+        if has(event::TIME_CHANGED) {
+            // A–B loop: back to A whenever playback passes B. Time events
+            // can lag a seek, so jump once until we're back before B.
+            if let (Some(a), Some(b)) = *core.ab_loop() {
+                let time = core.vlc.time();
+                if time < b {
+                    loop_jump = None;
+                } else if loop_jump.is_none_or(|at| at.elapsed() > Duration::from_secs(1)) {
+                    core.vlc.set_time(a);
+                    loop_jump = Some(Instant::now());
+                }
+            }
+        }
         if has(event::TIME_CHANGED) && last_progress.elapsed() >= PROGRESS_INTERVAL {
             last_progress = Instant::now();
             if let Some(uri) = core.current_uri() {
@@ -470,7 +699,7 @@ fn pump_events(core: Arc<Core>, rx: Receiver<i32>) {
                 history.save(false);
             }
         }
-        if [event::PLAYING, event::LENGTH_CHANGED, event::MEDIA_CHANGED].iter().any(|&e| has(e)) {
+        if [event::PLAYING, event::LENGTH_CHANGED, event::MEDIA_CHANGED, event::TITLE_CHANGED].iter().any(|&e| has(e)) {
             core.emit_chapters();
         }
         if has(event::PLAYING) {
@@ -524,30 +753,28 @@ fn format_time(ms: i64) -> String {
     }
 }
 
-/// `file://` URI for an absolute path, percent-encoding everything but
-/// unreserved characters and `/`.
-fn file_uri(path: &str) -> String {
-    let mut uri = String::from("file://");
-    for b in path.bytes() {
-        match b {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' | b'/' => uri.push(b as char),
-            _ => uri.push_str(&format!("%{b:02X}")),
-        }
-    }
-    uri
-}
-
 #[tauri::command]
 fn snapshot(player: tauri::State<Player>) -> Snapshot {
     match player.core() {
         Ok(core) => Snapshot {
+            // Before the playlist lock below, which lasts for this whole expression.
+            bookmarks: core.current_bookmarks(),
             state: Some(core.state()),
             tracks: Some(core.tracks()),
             playlist: Some(core.playlist().clone()),
             chapters: core.vlc.chapters(),
+            titles: core.vlc.titles(),
             engine: Ok(format!("libVLC {}", core.vlc.version)),
         },
-        Err(e) => Snapshot { state: None, tracks: None, playlist: None, chapters: Vec::new(), engine: Err(e) },
+        Err(e) => Snapshot {
+            state: None,
+            tracks: None,
+            playlist: None,
+            chapters: Vec::new(),
+            titles: Vec::new(),
+            bookmarks: Vec::new(),
+            engine: Err(e),
+        },
     }
 }
 
@@ -597,7 +824,7 @@ fn history_list(player: tauri::State<Player>) -> Result<Vec<UiEntry>, String> {
         .map(|e| ThumbJob {
             uri: e.entry.uri.clone(),
             out: core.history().thumb_path(&e.entry.uri),
-            at: if e.entry.position > 0 { e.entry.position as f64 / e.entry.length as f64 } else { 0.3 },
+            kind: JobKind::Frame(if e.entry.position > 0 { e.entry.position as f64 / e.entry.length as f64 } else { 0.3 }),
         })
         .collect();
     core.queue_thumbnails(missing, true);
@@ -906,6 +1133,116 @@ fn set_shuffle(player: tauri::State<Player>, shuffle: bool) -> Res {
     Ok(())
 }
 
+#[tauri::command]
+fn playlist_sort(player: tauri::State<Player>, by: SortKey) -> Res {
+    let core = player.core()?;
+    core.playlist().sort(by);
+    core.emit_playlist();
+    Ok(())
+}
+
+/// Saves the queue as M3U, PLS or XSPF (chosen by the file's extension).
+#[tauri::command]
+fn playlist_save(player: tauri::State<Player>, path: String) -> Res {
+    let core = player.core()?;
+    let items = core.playlist().items.clone();
+    playlist_file::write(Path::new(&path), &items)
+}
+
+/// Sets the A–B loop points (ms); `None` clears one.
+#[tauri::command]
+fn set_ab_loop(player: tauri::State<Player>, a: Option<i64>, b: Option<i64>) -> Res {
+    let core = player.core()?;
+    *core.ab_loop() = match (a, b) {
+        (Some(a), Some(b)) if b < a => (Some(b), Some(a)),
+        ab => ab,
+    };
+    core.emit_state();
+    Ok(())
+}
+
+#[tauri::command]
+fn set_sleep_timer(player: tauri::State<Player>, minutes: Option<u32>, after_item: bool) -> Res {
+    player.core()?.set_sleep_timer(minutes, after_item);
+    Ok(())
+}
+
+#[tauri::command]
+fn set_title(player: tauri::State<Player>, index: i32) -> Res {
+    let core = player.core()?;
+    core.vlc.set_title(index);
+    core.emit_state();
+    Ok(())
+}
+
+#[tauri::command]
+fn set_chapter(player: tauri::State<Player>, index: i32) -> Res {
+    let core = player.core()?;
+    core.vlc.set_chapter(index);
+    core.emit_state();
+    Ok(())
+}
+
+#[tauri::command]
+fn navigate(player: tauri::State<Player>, action: Navigate) -> Res {
+    player.core()?.vlc.navigate(action);
+    Ok(())
+}
+
+/// Bookmarks the current position.
+#[tauri::command]
+fn bookmark_add(player: tauri::State<Player>, name: Option<String>) -> Res {
+    let core = player.core()?;
+    let uri = core.current_uri().ok_or("Nothing is playing")?;
+    let time = core.vlc.time();
+    core.bookmarks().add(&uri, time, name);
+    core.emit_bookmarks();
+    core.notice("osd", format!("Bookmark added at {}", format_time(time)));
+    Ok(())
+}
+
+#[tauri::command]
+fn bookmark_remove(player: tauri::State<Player>, time: i64) -> Res {
+    let core = player.core()?;
+    let uri = core.current_uri().ok_or("Nothing is playing")?;
+    core.bookmarks().remove(&uri, time);
+    core.emit_bookmarks();
+    Ok(())
+}
+
+#[tauri::command]
+fn bookmark_rename(player: tauri::State<Player>, time: i64, name: String) -> Res {
+    let core = player.core()?;
+    let uri = core.current_uri().ok_or("Nothing is playing")?;
+    core.bookmarks().rename(&uri, time, &name);
+    core.emit_bookmarks();
+    Ok(())
+}
+
+#[tauri::command]
+fn disc_list() -> Vec<Disc> {
+    disc::detect()
+}
+
+/// Plays a disc: a mounted volume, a disc folder or a disc image.
+#[tauri::command]
+fn open_disc(player: tauri::State<Player>, kind: DiscKind, path: String, menus: bool) -> Res {
+    let core = player.core()?;
+    core.add_items(disc::items(kind, &path, menus)?, true)
+}
+
+/// Lists capture devices. Runs on the main thread (Tauri runs synchronous
+/// commands there), which AppKit needs for the screen list.
+#[tauri::command]
+fn capture_devices() -> Devices {
+    capture::devices()
+}
+
+#[tauri::command]
+fn open_capture(player: tauri::State<Player>, capture: Capture) -> Res {
+    player.core()?.add_items(vec![capture::item(&capture)], true)
+}
+
 /// The user's preferred languages as two-letter codes, most preferred first.
 fn preferred_languages() -> Vec<String> {
     #[cfg(target_os = "macos")]
@@ -939,13 +1276,14 @@ fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
             return Ok(());
         }
     };
+    let cache_dir = app.path().app_cache_dir()?;
     let core = Arc::new(Core {
         vlc,
         playlist: Mutex::default(),
         app: app.handle().clone(),
         ready: AtomicBool::new(false),
         pending: Mutex::default(),
-        history: Mutex::new(History::load(data_dir.clone(), app.path().app_cache_dir()?)),
+        history: Mutex::new(History::load(data_dir.clone(), cache_dir.clone())),
         resume: Mutex::default(),
         settings: Mutex::new(settings.clone()),
         languages,
@@ -953,6 +1291,11 @@ fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
         user_snapshot: AtomicBool::new(false),
         library: Mutex::new(Library::load(&data_dir)),
         thumbs: Thumbnails::default(),
+        thumbs_dir: cache_dir.join("thumbs"),
+        meta: Mutex::new(MetaCache::load(&cache_dir)),
+        bookmarks: Mutex::new(Bookmarks::load(&data_dir)),
+        ab_loop: Mutex::default(),
+        sleep: Mutex::default(),
         data_dir,
     });
 
@@ -1069,6 +1412,20 @@ pub fn run() {
             playlist_clear,
             set_repeat,
             set_shuffle,
+            playlist_sort,
+            playlist_save,
+            set_ab_loop,
+            set_sleep_timer,
+            set_title,
+            set_chapter,
+            navigate,
+            bookmark_add,
+            bookmark_remove,
+            bookmark_rename,
+            disc_list,
+            open_disc,
+            capture_devices,
+            open_capture,
         ])
         .build(tauri::generate_context!())
         .expect("error while building revlc");

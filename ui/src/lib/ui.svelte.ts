@@ -4,7 +4,8 @@ export const ui = $state({
   playlistOpen: false,
   /** The open player popover, if any. */
   menu: null as "settings" | "subtitles" | null,
-  urlOpen: false,
+  /** The open modal dialog, if any. */
+  dialog: null as "url" | "jump" | "disc" | "capture" | null,
   helpOpen: false,
   fullscreen: false,
 });

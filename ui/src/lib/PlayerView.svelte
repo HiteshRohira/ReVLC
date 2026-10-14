@@ -95,7 +95,9 @@
           <input type="range" min="0" max="150" value={s.muted ? 0 : s.volume} style="--progress: {((s.muted ? 0 : s.volume) / 150) * 100}%"
             aria-label="Volume" oninput={(e) => player.setVolume(Number(e.currentTarget.value))} />
         </div>
-        <span class="time tnum">{formatTime(s.time)} <span>/ {s.length > 0 ? formatTime(s.length) : "Live"}</span></span>
+        <button class="time tnum" title="Jump to time (⌘T)" disabled={!s.seekable} onclick={() => (ui.dialog = "jump")}>
+          {formatTime(s.time)}&nbsp;<span>/ {s.length > 0 ? formatTime(s.length) : "Live"}</span>
+        </button>
       </div>
       <div class="grp">
         <div class="menu-wrap" bind:this={menusEl}>
@@ -234,8 +236,17 @@
     margin: 0 8px 0 2px;
   }
   .time {
-    margin-left: 8px;
+    display: inline-flex;
+    margin-left: 4px;
+    padding: 4px 6px;
+    border-radius: 6px;
     font-size: 13px;
+  }
+  .time:disabled {
+    opacity: 1;
+  }
+  .time:hover:not(:disabled) {
+    background: rgb(255 255 255 / 0.1);
   }
   .time span {
     color: var(--muted);

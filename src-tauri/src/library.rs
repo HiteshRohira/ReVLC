@@ -3,7 +3,6 @@
 
 use std::cmp::Ordering;
 use std::path::{Path, PathBuf};
-use std::time::UNIX_EPOCH;
 
 use serde::Serialize;
 
@@ -123,6 +122,18 @@ pub struct LibraryItem {
     /// Modification time, Unix seconds.
     pub modified: u64,
     pub thumb: Option<String>,
+    /// A clean title: the movie's name, or the episode's title.
+    pub name: String,
+    pub year: Option<u32>,
+    pub show: Option<String>,
+    pub season: Option<u32>,
+    pub episode: Option<u32>,
+    /// Milliseconds, 0 until the file has been read.
+    pub duration: i64,
+    /// This video's poster or embedded cover (a cached copy).
+    pub art: Option<String>,
+    /// The poster of its show, season or folder (a cached copy).
+    pub group_art: Option<String>,
 }
 
 pub struct Library {
@@ -173,18 +184,22 @@ impl Library {
                         .and_then(|p| p.strip_prefix(root_path).ok())
                         .map(|p| p.to_string_lossy().into_owned())
                         .unwrap_or_default();
-                    let modified = std::fs::metadata(&path)
-                        .and_then(|m| m.modified())
-                        .ok()
-                        .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
-                        .map_or(0, |d| d.as_secs());
+                    let title = path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
                     LibraryItem {
-                        title: path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default(),
+                        name: title.clone(),
+                        title,
                         root: root.clone(),
                         folder,
-                        modified,
+                        modified: crate::meta::modified(&path),
                         thumb: None,
                         uri,
+                        year: None,
+                        show: None,
+                        season: None,
+                        episode: None,
+                        duration: 0,
+                        art: None,
+                        group_art: None,
                     }
                 })
             })

@@ -30,6 +30,13 @@ struct ChapterDescription {
 }
 
 #[repr(C)]
+struct TitleDescription {
+    duration: i64,
+    name: *mut c_char,
+    flags: c_uint,
+}
+
+#[repr(C)]
 struct AudioDevice {
     next: *mut AudioDevice,
     device: *mut c_char,
@@ -117,6 +124,16 @@ api! {
     libvlc_media_player_get_full_chapter_descriptions: fn(*mut Player, c_int, *mut *mut *mut ChapterDescription) -> c_int;
     libvlc_chapter_descriptions_release: fn(*mut *mut ChapterDescription, c_uint);
     libvlc_video_set_mouse_input: fn(*mut Player, c_uint);
+    libvlc_media_player_get_full_title_descriptions: fn(*mut Player, *mut *mut *mut TitleDescription) -> c_int;
+    libvlc_title_descriptions_release: fn(*mut *mut TitleDescription, c_uint);
+    libvlc_media_player_get_title: fn(*mut Player) -> c_int;
+    libvlc_media_player_set_title: fn(*mut Player, c_int);
+    libvlc_media_player_get_chapter: fn(*mut Player) -> c_int;
+    libvlc_media_player_set_chapter: fn(*mut Player, c_int);
+    libvlc_media_player_navigate: fn(*mut Player, c_uint);
+    libvlc_media_parse_with_options: fn(*mut Media, c_int, c_int) -> c_int;
+    libvlc_media_get_parsed_status: fn(*mut Media) -> c_int;
+    libvlc_media_get_duration: fn(*mut Media) -> i64;
 }
 
 /// libVLC media player events we listen to (values from libvlc_events.h).
@@ -131,6 +148,7 @@ pub mod event {
     pub const ERROR: i32 = 0x10a;
     pub const TIME_CHANGED: i32 = 0x10b;
     pub const SEEKABLE_CHANGED: i32 = 0x10d;
+    pub const TITLE_CHANGED: i32 = 0x10f;
     pub const SNAPSHOT_TAKEN: i32 = 0x110;
     pub const LENGTH_CHANGED: i32 = 0x111;
     pub const VOUT: i32 = 0x112;
@@ -144,7 +162,7 @@ pub mod event {
 
     pub const ALL: &[i32] = &[
         MEDIA_CHANGED, OPENING, BUFFERING, PLAYING, PAUSED, STOPPED, END_REACHED, ERROR,
-        TIME_CHANGED, SEEKABLE_CHANGED, SNAPSHOT_TAKEN, LENGTH_CHANGED, VOUT, ES_ADDED,
+        TIME_CHANGED, SEEKABLE_CHANGED, TITLE_CHANGED, SNAPSHOT_TAKEN, LENGTH_CHANGED, VOUT, ES_ADDED,
         ES_DELETED, ES_SELECTED, MUTED, UNMUTED, AUDIO_VOLUME, CHAPTER_CHANGED,
     ];
 }
@@ -167,6 +185,43 @@ pub struct Chapter {
     pub start: i64,
     pub duration: i64,
     pub name: String,
+}
+
+/// A title of the current media: a DVD or Blu-ray title, or the single
+/// title of a normal file.
+#[derive(Clone, Debug, Serialize)]
+pub struct Title {
+    pub duration: i64,
+    pub name: String,
+    /// A disc menu (navigated with the arrow keys and Enter).
+    pub menu: bool,
+}
+
+/// Disc menu navigation (libvlc_navigate_mode_t).
+#[derive(Clone, Copy, Debug, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Navigate {
+    Activate = 0,
+    Up = 1,
+    Down = 2,
+    Left = 3,
+    Right = 4,
+    Popup = 5,
+}
+
+/// Metadata libVLC reads from a file (tags, embedded artwork, duration).
+#[derive(Clone, Debug, Default, PartialEq, Serialize, serde::Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct MediaMeta {
+    pub title: Option<String>,
+    pub show: Option<String>,
+    pub season: Option<u32>,
+    pub episode: Option<u32>,
+    pub date: Option<String>,
+    /// A local file holding the artwork (libVLC extracts embedded covers to its cache).
+    pub artwork: Option<String>,
+    /// Milliseconds, 0 when unknown.
+    pub duration: i64,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -620,6 +675,120 @@ impl Vlc {
                 .collect();
             (self.api.libvlc_chapter_descriptions_release)(list, n as c_uint);
             chapters
+        }
+    }
+
+    /// Titles of the current media (DVD and Blu-ray titles; one for files).
+    pub fn titles(&self) -> Vec<Title> {
+        let mut list: *mut *mut TitleDescription = std::ptr::null_mut();
+        unsafe {
+            let n = (self.api.libvlc_media_player_get_full_title_descriptions)(self.mp, &mut list);
+            if n <= 0 || list.is_null() {
+                return Vec::new();
+            }
+            let titles = (0..n as usize)
+                .map(|i| {
+                    let t = &**list.add(i);
+                    let menu = t.flags & 0x03 != 0;
+                    let name = if t.name.is_null() {
+                        if menu { "Menu".to_string() } else { format!("Title {}", i + 1) }
+                    } else {
+                        CStr::from_ptr(t.name).to_string_lossy().into_owned()
+                    };
+                    Title { duration: t.duration, name, menu }
+                })
+                .collect();
+            (self.api.libvlc_title_descriptions_release)(list, n as c_uint);
+            titles
+        }
+    }
+
+    /// Index of the current title, or -1.
+    pub fn title(&self) -> i32 {
+        unsafe { (self.api.libvlc_media_player_get_title)(self.mp) }
+    }
+
+    pub fn set_title(&self, index: i32) {
+        unsafe { (self.api.libvlc_media_player_set_title)(self.mp, index) }
+    }
+
+    /// Index of the current chapter, or -1.
+    pub fn chapter(&self) -> i32 {
+        unsafe { (self.api.libvlc_media_player_get_chapter)(self.mp) }
+    }
+
+    pub fn set_chapter(&self, index: i32) {
+        unsafe { (self.api.libvlc_media_player_set_chapter)(self.mp, index) }
+    }
+
+    /// Moves around a DVD or Blu-ray menu.
+    pub fn navigate(&self, action: Navigate) {
+        unsafe { (self.api.libvlc_media_player_navigate)(self.mp, action as c_uint) }
+    }
+
+    /// Reads a local file's tags, embedded artwork and duration. Blocks for
+    /// up to `timeout_ms`; doesn't touch playback.
+    pub fn parse(&self, path: &str, timeout_ms: i32) -> Result<MediaMeta, String> {
+        use std::time::{Duration, Instant};
+        // libvlc_meta_t values.
+        const TITLE: c_int = 0;
+        const DATE: c_int = 8;
+        const ARTWORK_URL: c_int = 15;
+        const SEASON: c_int = 19;
+        const EPISODE: c_int = 20;
+        const SHOW_NAME: c_int = 21;
+        // libvlc_media_fetch_local (parsing local files is implied).
+        const FLAGS: c_int = 0x02;
+        const PARSED_DONE: c_int = 4;
+
+        let c = cstr(path);
+        unsafe {
+            let media = (self.api.libvlc_media_new_path)(self.inst, c.as_ptr());
+            if media.is_null() {
+                return Err(format!("could not open {path}"));
+            }
+            if (self.api.libvlc_media_parse_with_options)(media, FLAGS, timeout_ms) != 0 {
+                (self.api.libvlc_media_release)(media);
+                return Err(format!("could not parse {path}"));
+            }
+            let start = Instant::now();
+            let limit = Duration::from_millis(timeout_ms as u64 + 500);
+            let mut status = 0;
+            while start.elapsed() < limit {
+                status = (self.api.libvlc_media_get_parsed_status)(media);
+                if status != 0 {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            let meta = |ty: c_int| {
+                let raw = (self.api.libvlc_media_get_meta)(media, ty);
+                if raw.is_null() {
+                    return None;
+                }
+                let s = CStr::from_ptr(raw).to_string_lossy().trim().to_string();
+                (self.api.libvlc_free)(raw as *mut c_void);
+                Some(s).filter(|s| !s.is_empty())
+            };
+            let number = |ty: c_int| meta(ty).and_then(|s| s.parse::<u32>().ok());
+            let result = if status == PARSED_DONE {
+                let artwork = meta(ARTWORK_URL)
+                    .and_then(|url| url.strip_prefix("file://").map(crate::playlist::percent_decode))
+                    .filter(|p| Path::new(p).is_file());
+                Ok(MediaMeta {
+                    title: meta(TITLE),
+                    show: meta(SHOW_NAME),
+                    season: number(SEASON),
+                    episode: number(EPISODE),
+                    date: meta(DATE),
+                    artwork,
+                    duration: (self.api.libvlc_media_get_duration)(media).max(0),
+                })
+            } else {
+                Err(format!("could not parse {path}"))
+            };
+            (self.api.libvlc_media_release)(media);
+            result
         }
     }
 
