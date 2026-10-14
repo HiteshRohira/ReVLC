@@ -1,13 +1,13 @@
 <script lang="ts">
   import { invoke } from "@tauri-apps/api/core";
   import { open as openDialog } from "@tauri-apps/plugin-dialog";
-  import { AudioLines, Camera, Check, ChevronLeft, ChevronRight, Crop, FileUp, Gauge, Rows3, Settings2 } from "@lucide/svelte";
-  import { player, trackName, ASPECT_RATIOS, CROPS, SPEEDS, SUBTITLE_EXTENSIONS, type Track } from "./player.svelte";
+  import { AudioLines, Bookmark, BookmarkPlus, Camera, Check, ChevronLeft, ChevronRight, Crop, FileUp, Gauge, ListTree, Moon, Repeat, Rows3, Settings2, X } from "@lucide/svelte";
+  import { player, trackName, formatTime, ASPECT_RATIOS, CROPS, SLEEP_PRESETS, SPEEDS, SUBTITLE_EXTENSIONS, type Track } from "./player.svelte";
 
   // "subtitles" is the subtitle button's menu; "settings" is the gear menu.
   let { kind = "settings", onclose }: { kind?: "settings" | "subtitles"; onclose: () => void } = $props();
 
-  type Page = "root" | "speed" | "audio" | "subtitles" | "crop";
+  type Page = "root" | "speed" | "audio" | "subtitles" | "crop" | "chapters" | "loop" | "bookmarks" | "sleep";
   // svelte-ignore state_referenced_locally
   let page = $state<Page>(kind === "subtitles" ? "subtitles" : "root");
 
@@ -24,6 +24,25 @@
     if (typeof file === "string") player.addSubtitle(file);
   }
   const fmtDelay = (ms: number) => `${ms > 0 ? "+" : ""}${(ms / 1000).toFixed(2)} s`;
+
+  const hasChapters = $derived(player.chapters.length > 1 || player.titles.length > 1);
+  const chapterLabel = $derived(
+    player.chapters.length > 1 && s.chapter >= 0 ? `${s.chapter + 1} of ${player.chapters.length}` : player.titles[s.title]?.name ?? "",
+  );
+  const loopLabel = $derived(
+    s.loopA === null ? "Off" : s.loopB === null ? `From ${formatTime(s.loopA)}` : `${formatTime(s.loopA)}–${formatTime(s.loopB)}`,
+  );
+  const sleepLabel = $derived(
+    s.sleepAfterItem ? "End of item" : s.sleepAt !== null ? `${Math.max(1, Math.ceil((s.sleepAt - Date.now()) / 60000))} min left` : "Off",
+  );
+  const sleepName = (p: number | "end" | null) => (p === null ? "Off" : p === "end" ? "End of this item" : `${p} minutes`);
+  const sleepOn = (p: number | "end" | null) => (p === null ? s.sleepAt === null && !s.sleepAfterItem : p === "end" ? s.sleepAfterItem : false);
+
+  let editing = $state<number | null>(null);
+  function rename(time: number, name: string) {
+    if (name.trim()) player.renameBookmark(time, name);
+    editing = null;
+  }
 </script>
 
 {#snippet item(label: string, value: string, go: Page, Icon: typeof Gauge)}
@@ -57,6 +76,11 @@
     {@render item("Playback speed", speedLabel, "speed", Gauge)}
     {@render item("Audio", name(t.audio, t.audioCurrent), "audio", AudioLines)}
     {@render item("Crop & aspect", cropLabel, "crop", Crop)}
+    <hr />
+    {#if hasChapters}{@render item("Chapters", chapterLabel, "chapters", ListTree)}{/if}
+    {@render item("A–B loop", loopLabel, "loop", Repeat)}
+    {@render item("Bookmarks", player.bookmarks.length ? String(player.bookmarks.length) : "None", "bookmarks", Bookmark)}
+    {@render item("Sleep timer", sleepLabel, "sleep", Moon)}
     <hr />
     <button class="it" role="menuitemcheckbox" aria-checked={player.deinterlace} onclick={() => player.setDeinterlace(!player.deinterlace)}>
       <Rows3 size={18} /><span class="lab">Deinterlace</span><span class="tog" class:on={player.deinterlace}></span>
@@ -95,6 +119,74 @@
     <button class="it" onclick={loadSubtitle}><FileUp size={18} /><span class="lab">Add from file…</span></button>
     <hr />
     {@render delay("Subtitle delay", s.subtitleDelay, (v) => player.setSubtitleDelay(v))}
+  {:else if page === "chapters"}
+    {@render header("Chapters")}
+    <div class="scroll tall">
+      {#if player.titles.length > 1}
+        <h6>Titles</h6>
+        {#each player.titles as t, i}
+          {@render choice(t.name, i === s.title, () => player.setTitle(i), t.duration > 0 ? formatTime(t.duration) : undefined)}
+        {/each}
+        {#if player.chapters.length > 1}<hr />{/if}
+      {/if}
+      {#if player.chapters.length > 1}
+        {#if player.titles.length > 1}<h6>Chapters</h6>{/if}
+        {#each player.chapters as c, i}
+          {@render choice(c.name, i === s.chapter, () => player.setChapter(i), formatTime(c.start))}
+        {/each}
+      {/if}
+    </div>
+    {#if player.titles.some((t) => t.menu)}
+      <hr />
+      <button class="it" onclick={() => { player.navigate("popup"); onclose(); }}><ListTree size={18} /><span class="lab">Disc menu</span><em>⇧M</em></button>
+    {/if}
+  {:else if page === "loop"}
+    {@render header("A–B loop")}
+    <p class="note">Repeats the part between A and B.</p>
+    {#each [["A", s.loopA], ["B", s.loopB]] as const as [point, at]}
+      <div class="it static">
+        <span class="pt">{point}</span><span class="lab tnum">{at === null ? "Not set" : formatTime(at)}</span>
+        <button class="mini" disabled={!s.seekable || (point === "B" && s.loopA !== null && s.time <= s.loopA)}
+          onclick={() => (point === "A" ? player.setAbLoop(s.time, s.loopB !== null && s.loopB > s.time ? s.loopB : null) : player.setAbLoop(s.loopA ?? 0, s.time))}>
+          Set to {formatTime(s.time)}
+        </button>
+      </div>
+    {/each}
+    <hr />
+    <button class="it" disabled={s.loopA === null && s.loopB === null} onclick={() => player.setAbLoop(null, null)}>
+      <X size={18} /><span class="lab">Clear loop</span><em>⇧L</em>
+    </button>
+  {:else if page === "bookmarks"}
+    {@render header("Bookmarks")}
+    <button class="it" disabled={!player.active} onclick={() => player.addBookmark()}>
+      <BookmarkPlus size={18} /><span class="lab">Add at {formatTime(s.time)}</span><em>⌘B</em>
+    </button>
+    <hr />
+    <div class="scroll">
+      {#each player.bookmarks as b (b.time)}
+        <div class="bm">
+          {#if editing === b.time}
+            <!-- svelte-ignore a11y_autofocus -->
+            <input class="rename" value={b.name} autofocus aria-label="Bookmark name"
+              onkeydown={(e) => { e.stopPropagation(); if (e.key === "Enter") rename(b.time, e.currentTarget.value); if (e.key === "Escape") editing = null; }}
+              onblur={(e) => rename(b.time, e.currentTarget.value)} />
+          {:else}
+            <button class="it" title="Jump here · double-click to rename" onclick={() => player.seek(b.time)} ondblclick={() => (editing = b.time)}>
+              <span class="lab">{b.name}</span><em class="tnum">{formatTime(b.time)}</em>
+            </button>
+          {/if}
+          <button class="rm" title="Remove" aria-label="Remove {b.name}" onclick={() => player.removeBookmark(b.time)}><X size={14} /></button>
+        </div>
+      {:else}
+        <p class="empty">No bookmarks in this file</p>
+      {/each}
+    </div>
+  {:else if page === "sleep"}
+    {@render header("Sleep timer")}
+    {#each SLEEP_PRESETS as p}
+      {@render choice(sleepName(p), sleepOn(p), () => player.setSleepTimer(p))}
+    {/each}
+    {#if s.sleepAt !== null}<p class="note">Pauses in {sleepLabel.replace(" left", "")}.</p>{/if}
   {:else if page === "crop"}
     {@render header("Crop & aspect")}
     <div class="cols">
@@ -229,6 +321,69 @@
   .scroll {
     max-height: 220px;
     overflow-y: auto;
+  }
+  .tall {
+    max-height: 340px;
+  }
+  .note {
+    margin: 2px 16px 8px;
+    font-size: 12px;
+    color: var(--muted);
+  }
+  .static:hover {
+    background: none;
+  }
+  .pt {
+    width: 18px;
+    font-weight: 700;
+    text-align: center;
+    color: var(--acc);
+  }
+  .mini {
+    height: 26px;
+    padding: 0 10px;
+    border-radius: 7px;
+    background: var(--hover-strong);
+    font-size: 12px;
+    font-weight: 600;
+  }
+  .mini:hover:not(:disabled) {
+    background: rgb(255 255 255 / 0.18);
+  }
+  .bm {
+    position: relative;
+    display: flex;
+    align-items: center;
+  }
+  .bm .it {
+    padding-right: 40px;
+  }
+  .rm {
+    position: absolute;
+    right: 10px;
+    width: 24px;
+    height: 24px;
+    border-radius: 6px;
+    color: var(--muted);
+    opacity: 0;
+  }
+  .bm:hover .rm,
+  .rm:focus-visible {
+    opacity: 1;
+  }
+  .rm:hover {
+    background: var(--hover-strong);
+  }
+  .rename {
+    flex: 1;
+    margin: 4px 44px 4px 12px;
+    padding: 5px 8px;
+    border-radius: 6px;
+    border: 1px solid var(--acc);
+    background: rgb(0 0 0 / 0.3);
+    color: var(--text);
+    font: inherit;
+    outline: none;
   }
   .cols {
     display: grid;

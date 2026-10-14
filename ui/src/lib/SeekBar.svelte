@@ -21,6 +21,12 @@
       : [{ start: 0, end: Math.max(length, 1) }],
   );
 
+  const pct = (ms: number) => `${Math.min(100, Math.max(0, (ms / length) * 100))}%`;
+  // A bookmark near the pointer (within ~1% of the bar), for the tooltip.
+  const nearBookmark = $derived(
+    hover === null ? null : (player.bookmarks.find((b) => Math.abs(b.time - hover!) < length / 100) ?? null),
+  );
+
   function msAt(e: PointerEvent) {
     const r = el.getBoundingClientRect();
     return Math.min(1, Math.max(0, (e.clientX - r.left) / r.width)) * length;
@@ -70,7 +76,7 @@
   {#if hover !== null && enabled}
     {@const ch = player.chapters.length > 1 ? chapterAt(player.chapters, hover) : null}
     <div class="tip" style="left: clamp(60px, {(hover / length) * 100}%, calc(100% - 60px))">
-      <span class="tnum">{formatTime(hover)}</span>{#if ch && !genericChapter(ch.name)}<span class="ch"> · {ch.name}</span>{/if}
+      <span class="tnum">{formatTime(hover)}</span>{#if nearBookmark}<span class="ch"> · {nearBookmark.name}</span>{:else if ch && !genericChapter(ch.name)}<span class="ch"> · {ch.name}</span>{/if}
     </div>
   {/if}
   <div class="segs">
@@ -81,6 +87,12 @@
       </div>
     {/each}
   </div>
+  {#if enabled}
+    {#if s.loopA !== null}
+      <div class="ab" class:open={s.loopB === null} style="left: {pct(s.loopA)}; width: {s.loopB !== null ? `calc(${pct(s.loopB)} - ${pct(s.loopA)})` : '2px'}"></div>
+    {/if}
+    {#each player.bookmarks as b (b.time)}<div class="bm" style="left: {pct(b.time)}"></div>{/each}
+  {/if}
   {#if enabled}<div class="knob" style="left: {(position / length) * 100}%"></div>{/if}
 </div>
 
@@ -123,6 +135,32 @@
   }
   .done {
     background: var(--acc);
+  }
+  /* The A–B loop range, drawn just above the bar. */
+  .ab {
+    position: absolute;
+    top: 50%;
+    height: 12px;
+    margin-top: -6px;
+    border-radius: 3px;
+    border: 1.5px solid var(--acc);
+    box-sizing: border-box;
+    pointer-events: none;
+  }
+  .ab.open {
+    border-width: 0 0 0 2px;
+    border-radius: 0;
+  }
+  .bm {
+    position: absolute;
+    top: 50%;
+    width: 3px;
+    height: 10px;
+    margin: -5px 0 0 -1.5px;
+    border-radius: 1.5px;
+    background: #fff;
+    box-shadow: 0 0 2px rgb(0 0 0 / 0.6);
+    pointer-events: none;
   }
   .knob {
     position: absolute;

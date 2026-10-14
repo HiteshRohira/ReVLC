@@ -17,6 +17,14 @@ export interface PlayerState {
   buffering: number;
   audioDelay: number;
   subtitleDelay: number;
+  /** Index of the current title and chapter, or -1. */
+  title: number;
+  chapter: number;
+  loopA: number | null;
+  loopB: number | null;
+  /** When the sleep timer pauses playback, in Unix ms. */
+  sleepAt: number | null;
+  sleepAfterItem: boolean;
 }
 
 export interface Track {
@@ -37,6 +45,47 @@ export interface Chapter {
   name: string;
 }
 
+/** A DVD or Blu-ray title (files have one). */
+export interface Title {
+  duration: number;
+  name: string;
+  /** A disc menu, navigated with the arrow keys and Enter. */
+  menu: boolean;
+}
+
+export interface Bookmark {
+  time: number;
+  name: string;
+}
+
+export type DiscKind = "dvd" | "bluray" | "cd" | "vcd";
+
+export interface Disc {
+  kind: DiscKind;
+  name: string;
+  path: string;
+}
+
+export interface Device {
+  id: string;
+  name: string;
+}
+
+export interface Devices {
+  video: Device[];
+  audio: Device[];
+  screens: Device[];
+}
+
+export interface Capture {
+  kind: "camera" | "microphone" | "screen";
+  device: string;
+  audio: string | null;
+  fps: number | null;
+}
+
+export type SortKey = "title" | "path" | "reverse";
+
 export interface HistoryEntry {
   uri: string;
   title: string;
@@ -54,6 +103,15 @@ export interface LibraryItem {
   folder: string;
   modified: number;
   thumb: string | null;
+  /** Clean title: the movie's name or the episode's title. */
+  name: string;
+  year: number | null;
+  show: string | null;
+  season: number | null;
+  episode: number | null;
+  duration: number;
+  art: string | null;
+  groupArt: string | null;
 }
 
 export interface Library {
@@ -64,6 +122,7 @@ export interface Library {
 export interface Item {
   uri: string;
   title: string;
+  options?: string[];
 }
 
 export interface Playlist {
@@ -78,6 +137,8 @@ interface Snapshot {
   tracks: Tracks | null;
   playlist: Playlist | null;
   chapters: Chapter[];
+  titles: Title[];
+  bookmarks: Bookmark[];
   engine: { Ok: string } | { Err: string };
 }
 
@@ -91,6 +152,9 @@ export const SUBTITLE_EXTENSIONS = ["srt", "ass", "ssa", "vtt", "sub", "idx", "s
 export const ASPECT_RATIOS = [null, "16:9", "4:3", "1:1", "16:10", "2.21:1", "2.35:1", "2.39:1", "5:4"];
 export const CROPS = [null, "16:9", "4:3", "1:1", "16:10", "2.21:1", "2.35:1", "2.39:1", "5:4"];
 export const SPEEDS = [0.25, 0.5, 0.75, 1, 1.25, 1.5, 1.75, 2, 3, 4];
+/** Sleep timer choices in minutes; "end" stops after the current item. */
+export const SLEEP_PRESETS: (number | "end" | null)[] = [null, 15, 30, 45, 60, 90, "end"];
+export const PLAYLIST_EXTENSIONS = ["m3u", "m3u8", "pls", "xspf"];
 
 const ACTIVE: PlayState[] = ["opening", "buffering", "playing", "paused"];
 
@@ -107,10 +171,18 @@ class Player {
     buffering: 100,
     audioDelay: 0,
     subtitleDelay: 0,
+    title: -1,
+    chapter: -1,
+    loopA: null,
+    loopB: null,
+    sleepAt: null,
+    sleepAfterItem: false,
   });
   tracks = $state<Tracks>({ audio: [], audioCurrent: -1, subtitles: [], subtitleCurrent: -1 });
   playlist = $state<Playlist>({ items: [], current: null, repeat: "off", shuffle: false });
   chapters = $state<Chapter[]>([]);
+  titles = $state<Title[]>([]);
+  bookmarks = $state<Bookmark[]>([]);
   history = $state<HistoryEntry[]>([]);
   library = $state<Library>({ folders: [], items: [] });
   /** Bumped when a thumbnail file changes, to bust the web view's image cache. */
@@ -132,6 +204,8 @@ class Player {
   );
   current = $derived(this.playlist.current != null ? (this.playlist.items[this.playlist.current] ?? null) : null);
   chapter = $derived(chapterAt(this.chapters, this.state.time));
+  /** In a DVD or Blu-ray menu: arrow keys and Enter move around it. */
+  inMenu = $derived(this.titles[this.state.title]?.menu ?? false);
 
   #noticeId = 0;
 
@@ -141,6 +215,8 @@ class Player {
       listen<Tracks>("player://tracks", (e) => (this.tracks = e.payload)),
       listen<Playlist>("player://playlist", (e) => (this.playlist = e.payload)),
       listen<Chapter[]>("player://chapters", (e) => (this.chapters = e.payload)),
+      listen<Title[]>("player://titles", (e) => (this.titles = e.payload)),
+      listen<Bookmark[]>("player://bookmarks", (e) => (this.bookmarks = e.payload)),
       listen<string>("library://thumb", () => {
         this.thumbVersion++;
         this.#refreshLibrarySoon();
@@ -159,6 +235,8 @@ class Player {
     if (snap.tracks) this.tracks = snap.tracks;
     if (snap.playlist) this.playlist = snap.playlist;
     this.chapters = snap.chapters;
+    this.titles = snap.titles;
+    this.bookmarks = snap.bookmarks;
     await Promise.all([this.loadHistory(), this.loadLibrary()]);
   }
 
@@ -283,6 +361,76 @@ class Player {
   clear = () => this.#call("playlist_clear");
   setRepeat = (repeat: Repeat) => this.#call("set_repeat", { repeat });
   setShuffle = (shuffle: boolean) => this.#call("set_shuffle", { shuffle });
+  sort = (by: SortKey) => this.#call("playlist_sort", { by });
+  savePlaylist = async (path: string) => {
+    await this.#call("playlist_save", { path });
+    this.notify("info", "Playlist saved");
+  };
+
+  openDisc = (kind: DiscKind, path: string, menus: boolean) => this.#call("open_disc", { kind, path, menus });
+  openCapture = (capture: Capture) => this.#call("open_capture", { capture });
+
+  setTitle = (index: number) => this.#call("set_title", { index });
+  setChapter = (index: number) => this.#call("set_chapter", { index });
+  navigate = (action: "activate" | "up" | "down" | "left" | "right" | "popup") => this.#call("navigate", { action });
+
+  /** Moves by one chapter; with no chapters, by one title. */
+  stepChapter(delta: 1 | -1) {
+    const { chapter } = this.state;
+    const target = chapter + delta;
+    if (this.chapters.length > 1 && chapter >= 0) {
+      if (target < 0 || target >= this.chapters.length) return;
+      this.notify("osd", this.chapters[target].name);
+      return this.setChapter(target);
+    }
+    return this.stepTitle(delta);
+  }
+
+  stepTitle(delta: 1 | -1) {
+    const target = this.state.title + delta;
+    if (this.state.title < 0 || target < 0 || target >= this.titles.length) return;
+    this.notify("osd", this.titles[target].name);
+    return this.setTitle(target);
+  }
+
+  setAbLoop(a: number | null, b: number | null) {
+    return this.#call("set_ab_loop", { a, b });
+  }
+
+  /** VLC's A–B button: set A, then B, then clear. */
+  abLoopStep() {
+    const { loopA, loopB, time } = this.state;
+    if (loopA === null) {
+      this.notify("osd", `Loop from ${formatTime(time)}…`);
+      return this.setAbLoop(time, null);
+    }
+    if (loopB === null) {
+      if (time <= loopA) return this.notify("osd", "Loop end must be after its start");
+      this.notify("osd", `Looping ${formatTime(loopA)} – ${formatTime(time)}`);
+      return this.setAbLoop(loopA, time);
+    }
+    this.notify("osd", "Loop off");
+    return this.setAbLoop(null, null);
+  }
+
+  setSleepTimer(preset: number | "end" | null) {
+    this.notify("osd", preset === null ? "Sleep timer off" : preset === "end" ? "Sleep timer: end of this item" : `Sleep timer: ${preset} min`);
+    return this.#call("set_sleep_timer", { minutes: typeof preset === "number" ? preset : null, afterItem: preset === "end" });
+  }
+
+  #sleepPreset: number | "end" | null = null;
+
+  /** Steps through the sleep timer presets. */
+  cycleSleepTimer() {
+    const { sleepAt, sleepAfterItem } = this.state;
+    const current = sleepAfterItem ? "end" : sleepAt !== null ? this.#sleepPreset : null;
+    this.#sleepPreset = SLEEP_PRESETS[(SLEEP_PRESETS.indexOf(current) + 1) % SLEEP_PRESETS.length];
+    return this.setSleepTimer(this.#sleepPreset);
+  }
+
+  addBookmark = (name?: string) => this.#call("bookmark_add", { name: name ?? null });
+  removeBookmark = (time: number) => this.#call("bookmark_remove", { time });
+  renameBookmark = (time: number, name: string) => this.#call("bookmark_rename", { time, name });
 
   #lastSubtitle = -1;
 
@@ -349,6 +497,13 @@ export function chapterAt(chapters: Chapter[], ms: number): Chapter | null {
 /** Whether a history entry was left part-way through (mirrors the backend's rule). */
 export function resumable(e: HistoryEntry) {
   return !e.finished && e.position > 15_000 && (e.length === 0 || e.position < e.length - 15_000);
+}
+
+/** Parses "1:02:03", "2:03" or "123" (seconds) into ms; null if invalid. */
+export function parseTime(text: string): number | null {
+  const parts = text.trim().split(":");
+  if (parts.length > 3 || parts.some((p) => !/^\d+(\.\d+)?$/.test(p.trim()))) return null;
+  return Math.round(parts.reduce((total, p) => total * 60 + Number(p), 0) * 1000);
 }
 
 export function formatTime(ms: number) {

@@ -1,6 +1,6 @@
 <script lang="ts">
   import { invoke } from "@tauri-apps/api/core";
-  import { Clapperboard, Disc3, Film, FolderOpen, FolderPlus, HardDrive, House, Link, ListMusic, Music2, Play, Radio, Settings, X } from "@lucide/svelte";
+  import { Clapperboard, Disc3, Film, FolderOpen, FolderPlus, HardDrive, House, Link, ListMusic, Music2, Play, Radio, Settings, Webcam, X } from "@lucide/svelte";
   import { player, resumable, formatTime, thumbUrl, cleanTitle, type HistoryEntry, type LibraryItem } from "./player.svelte";
   import { ui } from "./ui.svelte";
 
@@ -13,15 +13,48 @@
   const recentlyAdded = $derived([...player.library.items].sort((a, b) => b.modified - a.modified).slice(0, 8));
   const isEmpty = $derived(player.history.length === 0 && player.library.items.length === 0);
 
-  // Library grouped by folder ("Season 01", …), in scan order.
+  interface Group {
+    key: string;
+    root: string;
+    /** Show name or folder ("" for files directly in the library folder). */
+    title: string;
+    detail: string;
+    art: string | null;
+    sections: { label: string | null; items: LibraryItem[] }[];
+    /** Every item, in display order. */
+    items: LibraryItem[];
+  }
+
+  // Library grouped into shows (by season) and folders, in scan order.
   const groups = $derived.by(() => {
-    const map = new Map<string, { root: string; folder: string; items: LibraryItem[] }>();
+    const map = new Map<string, { root: string; show: string | null; folder: string; items: LibraryItem[] }>();
     for (const item of player.library.items) {
-      const key = `${item.root}\u0000${item.folder}`;
-      if (!map.has(key)) map.set(key, { root: item.root, folder: item.folder, items: [] });
+      const key = item.show ? `${item.root}\u0000show\u0000${item.show.toLowerCase()}` : `${item.root}\u0000${item.folder}`;
+      if (!map.has(key)) map.set(key, { root: item.root, show: item.show, folder: item.folder, items: [] });
       map.get(key)!.items.push(item);
     }
-    return [...map.values()];
+    return [...map.entries()].map(([key, g]): Group => {
+      const art = g.items.find((i) => i.groupArt)?.groupArt ?? null;
+      if (!g.show) {
+        return { key, root: g.root, title: g.folder, detail: "", art, sections: [{ label: null, items: g.items }], items: g.items };
+      }
+      const seasons = new Map<number | null, LibraryItem[]>();
+      const sorted = [...g.items].sort((a, b) => (a.season ?? 0) - (b.season ?? 0) || (a.episode ?? 0) - (b.episode ?? 0));
+      for (const item of sorted) {
+        if (!seasons.has(item.season)) seasons.set(item.season, []);
+        seasons.get(item.season)!.push(item);
+      }
+      const n = seasons.size;
+      return {
+        key,
+        root: g.root,
+        title: g.show,
+        detail: `${n > 1 ? `${n} seasons · ` : ""}${sorted.length} episode${sorted.length === 1 ? "" : "s"}`,
+        art,
+        sections: [...seasons.entries()].map(([season, items]) => ({ label: season === null ? "Episodes" : season === 0 ? "Specials" : `Season ${season}`, items })),
+        items: sorted,
+      };
+    });
   });
 
   // Planned sections from the parity checklist; shown so the roadmap is visible.
@@ -32,18 +65,23 @@
   const SOON_BROWSE = [
     { label: "Network shares", icon: HardDrive },
     { label: "Internet radio", icon: Radio },
-    { label: "Discs", icon: Disc3 },
   ];
 
   const base = (path: string) => path.split("/").filter(Boolean).pop() ?? path;
   const left = (e: HistoryEntry) => `${Math.max(1, Math.round((e.length - e.position) / 60000))} min left`;
 
-  /** Plays a library file and the rest of its folder after it. */
+  /** Plays a library file and the rest of its show or folder after it. */
   function playFromFolder(item: LibraryItem) {
-    const group = groups.find((g) => g.root === item.root && g.folder === item.folder);
-    const items = group?.items ?? [item];
+    const items = groups.find((g) => g.items.includes(item))?.items ?? [item];
     player.open(items.slice(items.indexOf(item)).map((i) => i.uri));
   }
+
+  const episodeCode = (i: LibraryItem) => (i.season !== null && i.episode !== null ? `S${i.season}·E${i.episode}` : i.episode !== null ? `E${i.episode}` : "");
+  /** Tile title: the episode's number and title, or the movie's name. */
+  const tileName = (i: LibraryItem, inShow: boolean) =>
+    i.show && inShow ? (i.episode !== null ? `${i.episode}. ${i.name || `Episode ${i.episode}`}` : i.name || i.title) : i.name || i.title;
+  /** Tile subtitle outside a show's own section: where it's from. */
+  const tileFrom = (i: LibraryItem) => (i.show ? `${i.show} · ${episodeCode(i)}` : [i.year, i.folder || base(i.root)].filter(Boolean).join(" · "));
 </script>
 
 {#snippet thumb(src: string | null, length: number, progress: number | null, onclick: () => void, title: string)}
@@ -64,10 +102,10 @@
   </div>
 {/snippet}
 
-{#snippet libraryTile(item: LibraryItem, sub: string)}
+{#snippet libraryTile(item: LibraryItem, name: string, sub: string)}
   <div class="tile">
-    {@render thumb(thumbUrl(item.thumb, player.thumbVersion), 0, null, () => playFromFolder(item), item.uri)}
-    <div class="n" title={item.title}>{item.title}</div>
+    {@render thumb(thumbUrl(item.thumb ?? item.art, player.thumbVersion), item.duration, null, () => playFromFolder(item), item.uri)}
+    <div class="n" title={name}>{name}</div>
     <div class="m">{sub}</div>
   </div>
 {/snippet}
@@ -80,7 +118,8 @@
     <div class="row">
       <button class="btn pri" onclick={onopen}><FolderOpen size={16} />Open…</button>
       <button class="btn" onclick={onopenfolder}><FolderPlus size={16} />Add folder</button>
-      <button class="btn" onclick={() => (ui.urlOpen = true)}><Link size={16} />Open URL</button>
+      <button class="btn" onclick={() => (ui.dialog = "url")}><Link size={16} />Open URL</button>
+      <button class="btn" onclick={() => (ui.dialog = "disc")}><Disc3 size={16} />Open disc</button>
     </div>
     <button class="hint" onclick={() => (ui.helpOpen = true)}>Keyboard shortcuts <kbd>?</kbd></button>
   </div>
@@ -95,9 +134,11 @@
       </button>
       {#each SOON as s}<div class="nv soon"><s.icon size={17} />{s.label}<span>Soon</span></div>{/each}
       <h6>Browse</h6>
+      <button class="nv" onclick={() => (ui.dialog = "disc")}><Disc3 size={17} />Discs…</button>
       {#each SOON_BROWSE as s}<div class="nv soon"><s.icon size={17} />{s.label}<span>Soon</span></div>{/each}
       <h6>Streams</h6>
-      <button class="nv" onclick={() => (ui.urlOpen = true)}><Link size={17} />Open URL…</button>
+      <button class="nv" onclick={() => (ui.dialog = "url")}><Link size={17} />Open URL…</button>
+      <button class="nv" onclick={() => (ui.dialog = "capture")}><Webcam size={17} />Capture device…</button>
     </nav>
     <div class="appearance">
       <button class="nv" onclick={() => invoke("open_settings")}><Settings size={17} />Settings</button>
@@ -108,7 +149,7 @@
     <div class="top" data-tauri-drag-region>
       <h1 data-tauri-drag-region>{view === "home" ? "Home" : "Videos"}</h1>
       <span class="sp" data-tauri-drag-region></span>
-      <button class="btn" onclick={() => (ui.urlOpen = true)}><Link size={16} />Open URL</button>
+      <button class="btn" onclick={() => (ui.dialog = "url")}><Link size={16} />Open URL</button>
       <button class="btn" onclick={onopenfolder}><FolderPlus size={16} />Add folder</button>
       <button class="btn pri" onclick={onopen}><FolderOpen size={16} />Open…</button>
     </div>
@@ -126,7 +167,7 @@
           {/if}
           {#if recentlyAdded.length}
             <h2>Recently added</h2>
-            <div class="grid">{#each recentlyAdded as item (item.uri)}{@render libraryTile(item, item.folder || base(item.root))}{/each}</div>
+            <div class="grid">{#each recentlyAdded as item (item.uri)}{@render libraryTile(item, item.show ? item.show : tileName(item, false), item.show ? `${episodeCode(item)}${item.name ? ` · ${item.name}` : ""}` : tileFrom(item))}{/each}</div>
           {/if}
           {#if recent.length}
             <h2>Recent</h2>
@@ -148,9 +189,21 @@
             </div>
             <button class="btn small" title="Remove from library (files are not deleted)" onclick={() => player.removeFolder(root)}><X size={14} />Remove</button>
           </div>
-          {#each rootGroups as g (g.folder)}
-            {#if g.folder}<h3>{g.folder}</h3>{/if}
-            <div class="grid">{#each g.items as item (item.uri)}{@render libraryTile(item, "")}{/each}</div>
+          {#each rootGroups as g (g.key)}
+            {#if g.art}
+              <div class="ghead">
+                <img class="poster" src={thumbUrl(g.art, player.thumbVersion)} alt="" />
+                <div><h3>{g.title || base(g.root)}</h3>{#if g.detail}<p>{g.detail}</p>{/if}</div>
+              </div>
+            {:else if g.title}
+              <h3>{g.title}{#if g.detail}<span class="detail">&nbsp;· {g.detail}</span>{/if}</h3>
+            {/if}
+            {#each g.sections as sec (sec.label)}
+              {#if sec.label && g.sections.length > 1}<h4>{sec.label}</h4>{/if}
+              <div class="grid">
+                {#each sec.items as item (item.uri)}{@render libraryTile(item, tileName(item, true), item.show ? "" : item.year ? String(item.year) : "")}{/each}
+              </div>
+            {/each}
           {:else}
             <p class="empty">No videos found in this folder.</p>
           {/each}
@@ -328,6 +381,40 @@
     font-size: 14px;
     font-weight: 600;
     color: var(--muted);
+  }
+  h3 .detail {
+    font-weight: 400;
+    color: var(--faint);
+  }
+  h4 {
+    margin: 2px 0 10px;
+    font-size: 12.5px;
+    font-weight: 600;
+    color: var(--faint);
+  }
+  .ghead {
+    display: flex;
+    align-items: flex-end;
+    gap: 14px;
+    margin-bottom: 14px;
+  }
+  .ghead h3 {
+    margin: 0;
+    font-size: 16px;
+    color: var(--text);
+  }
+  .ghead p {
+    margin: 3px 0 0;
+    font-size: 12.5px;
+    color: var(--muted);
+  }
+  .poster {
+    width: 72px;
+    aspect-ratio: 2 / 3;
+    object-fit: cover;
+    border-radius: 7px;
+    background: #1f1f23;
+    box-shadow: 0 4px 14px rgb(0 0 0 / 0.4);
   }
   .empty {
     color: var(--muted);

@@ -1,6 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
-import { open as openDialog } from "@tauri-apps/plugin-dialog";
-import { player, ASPECT_RATIOS, CROPS, SUBTITLE_EXTENSIONS } from "./player.svelte";
+import { open as openDialog, save as saveDialog } from "@tauri-apps/plugin-dialog";
+import { player, ASPECT_RATIOS, CROPS, PLAYLIST_EXTENSIONS, SUBTITLE_EXTENSIONS } from "./player.svelte";
 import { ui } from "./ui.svelte";
 
 /** App-level operations the actions need (provided by the main window). */
@@ -39,6 +39,15 @@ export const ACTIONS: Action[] = [
   { id: "seekForwardLong", label: "Jump forward 30 s", group: "Playback", keys: "Shift+ArrowRight", run: () => player.seekBy(30_000) },
   { id: "seekBackLong", label: "Jump back 30 s", group: "Playback", keys: "Shift+ArrowLeft", run: () => player.seekBy(-30_000) },
   { id: "nextFrame", label: "Next frame", group: "Playback", keys: "E", run: () => player.nextFrame() },
+  { id: "jumpToTime", label: "Jump to time…", group: "Playback", keys: "Cmd+T", run: () => player.active && (ui.dialog = "jump") },
+  { id: "abLoop", label: "A–B loop", group: "Playback", keys: "Shift+L", run: () => player.abLoopStep() },
+  { id: "nextChapter", label: "Next chapter", group: "Playback", keys: "Shift+N", run: () => player.stepChapter(1) },
+  { id: "previousChapter", label: "Previous chapter", group: "Playback", keys: "Shift+P", run: () => player.stepChapter(-1) },
+  { id: "nextTitle", label: "Next title", group: "Playback", keys: "", run: () => player.stepTitle(1) },
+  { id: "previousTitle", label: "Previous title", group: "Playback", keys: "", run: () => player.stepTitle(-1) },
+  { id: "discMenu", label: "Disc menu", group: "Playback", keys: "Shift+M", run: () => player.navigate("popup") },
+  { id: "addBookmark", label: "Add bookmark", group: "Playback", keys: "Cmd+B", run: () => player.addBookmark() },
+  { id: "sleepTimer", label: "Sleep timer", group: "Playback", keys: "", run: () => player.cycleSleepTimer() },
   { id: "faster", label: "Faster", group: "Playback", keys: "]", run: () => player.setRate(s().rate + 0.25) },
   { id: "slower", label: "Slower", group: "Playback", keys: "[", run: () => player.setRate(s().rate - 0.25) },
   { id: "normalSpeed", label: "Normal speed", group: "Playback", keys: "=", run: () => player.setRate(1) },
@@ -78,10 +87,24 @@ export const ACTIONS: Action[] = [
 
   { id: "open", label: "Open files", group: "App", keys: "Cmd+O", run: (h) => h.openFiles() },
   { id: "openFolder", label: "Add folder", group: "App", keys: "Shift+Cmd+O", run: (h) => h.openFolder() },
-  { id: "openUrl", label: "Open network stream", group: "App", keys: "Cmd+N", run: () => (ui.urlOpen = true) },
+  { id: "openUrl", label: "Open network stream", group: "App", keys: "Cmd+N", run: () => (ui.dialog = "url") },
+  { id: "openDisc", label: "Open disc", group: "App", keys: "Cmd+D", run: () => (ui.dialog = "disc") },
+  { id: "openCapture", label: "Open capture device", group: "App", keys: "", run: () => (ui.dialog = "capture") },
+  { id: "savePlaylist", label: "Save playlist", group: "App", keys: "Cmd+S", run: () => savePlaylist() },
   { id: "queue", label: "Up next", group: "App", keys: "Cmd+L", run: () => (ui.playlistOpen = !ui.playlistOpen) },
   { id: "help", label: "Keyboard shortcuts", group: "App", keys: "?", run: () => (ui.helpOpen = !ui.helpOpen) },
 ];
+
+/** Asks where to save the queue, as M3U, PLS or XSPF. */
+export async function savePlaylist() {
+  if (!player.playlist.items.length) return player.notify("info", "The queue is empty");
+  const path = await saveDialog({
+    title: "Save playlist",
+    defaultPath: "Playlist.m3u8",
+    filters: [{ name: "Playlist", extensions: PLAYLIST_EXTENSIONS }],
+  });
+  if (path) player.savePlaylist(path);
+}
 
 export const ACTION_BY_ID = new Map(ACTIONS.map((a) => [a.id, a]));
 
@@ -90,6 +113,7 @@ export const FIXED_SHORTCUTS: [string, string][] = [
   ["Cmd+,", "Settings"],
   ["Escape", "Close panel / exit fullscreen"],
   ["0–9", "Jump to 0–90%"],
+  ["Arrows, Return", "Move around DVD and Blu-ray menus"],
   ["Double-click", "Toggle fullscreen"],
 ];
 

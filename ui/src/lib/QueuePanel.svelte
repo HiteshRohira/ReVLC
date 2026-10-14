@@ -1,6 +1,7 @@
 <script lang="ts">
-  import { Plus, Repeat, Repeat1, Shuffle, Trash2, X } from "@lucide/svelte";
-  import { player, cleanTitle, type Repeat as RepeatMode } from "./player.svelte";
+  import { ArrowUpDown, Plus, Repeat, Repeat1, Save, Search, Shuffle, Trash2, X } from "@lucide/svelte";
+  import { savePlaylist } from "./actions";
+  import { player, cleanTitle, type Repeat as RepeatMode, type SortKey } from "./player.svelte";
   import { ui } from "./ui.svelte";
 
   let { onadd }: { onadd: () => void } = $props();
@@ -11,11 +12,30 @@
   const NEXT: Record<RepeatMode, RepeatMode> = { off: "all", all: "one", one: "off" };
   const LABEL: Record<RepeatMode, string> = { off: "Repeat off", all: "Repeat all", one: "Repeat one" };
 
+  const SORTS: [SortKey, string][] = [["title", "Title"], ["path", "File path"], ["reverse", "Reverse order"]];
+
+  let query = $state("");
+  let sortOpen = $state(false);
+  let sortEl = $state<HTMLDivElement>();
+  // Items matching the search, with their real queue positions.
+  const visible = $derived.by(() => {
+    const q = query.trim().toLowerCase();
+    const all = player.playlist.items.map((item, i) => ({ item, i }));
+    return q ? all.filter(({ item }) => item.title.toLowerCase().includes(q) || item.uri.toLowerCase().includes(q)) : all;
+  });
+
+  function sort(by: SortKey) {
+    player.sort(by);
+    sortOpen = false;
+  }
+
   function onDrop(index: number) {
     if (dragFrom !== null && dragFrom !== index) player.move(dragFrom, index);
     dragFrom = dropAt = null;
   }
 </script>
+
+<svelte:window onpointerdown={(e) => sortOpen && !sortEl?.contains(e.target as Node) && (sortOpen = false)} />
 
 <aside class="queue" aria-label="Up next">
   <header>
@@ -25,6 +45,17 @@
   <div class="tools">
     <button class="tool" onclick={onadd}><Plus size={15} /> Add</button>
     <span class="sp"></span>
+    <div class="sort" bind:this={sortEl}>
+      <button class="icon sm" class:on={sortOpen} title="Sort" aria-label="Sort" aria-expanded={sortOpen} disabled={player.playlist.items.length < 2}
+        onclick={() => (sortOpen = !sortOpen)}><ArrowUpDown size={16} /></button>
+      {#if sortOpen}
+        <div class="drop" role="menu">
+          {#each SORTS as [key, label]}<button role="menuitem" onclick={() => sort(key)}>{key === "reverse" ? label : `Sort by ${label.toLowerCase()}`}</button>{/each}
+        </div>
+      {/if}
+    </div>
+    <button class="icon sm" title="Save playlist (⌘S)" aria-label="Save playlist" disabled={!player.playlist.items.length}
+      onclick={savePlaylist}><Save size={16} /></button>
     <button class="icon sm" class:on={player.playlist.shuffle} title={player.playlist.shuffle ? "Shuffle on" : "Shuffle off"}
       aria-pressed={player.playlist.shuffle} onclick={() => player.setShuffle(!player.playlist.shuffle)}><Shuffle size={16} /></button>
     <button class="icon sm" class:on={player.playlist.repeat !== "off"} title={LABEL[player.playlist.repeat]} aria-label={LABEL[player.playlist.repeat]}
@@ -33,9 +64,17 @@
     </button>
     <button class="icon sm" title="Clear" aria-label="Clear queue" disabled={!player.playlist.items.length} onclick={player.clear}><Trash2 size={16} /></button>
   </div>
+  {#if player.playlist.items.length > 1}
+    <div class="search">
+      <Search size={14} />
+      <input type="text" bind:value={query} placeholder="Search" spellcheck="false" aria-label="Search the queue"
+        onkeydown={(e) => e.key === "Escape" && (query ? (query = "", e.stopPropagation()) : e.currentTarget.blur())} />
+      {#if query}<button class="clear" aria-label="Clear search" onclick={() => (query = "")}><X size={13} /></button>{/if}
+    </div>
+  {/if}
   <ol>
-    {#each player.playlist.items as item, i (i + item.uri)}
-      <li class:current={i === player.playlist.current} class:target={dropAt === i && dragFrom !== i} draggable="true"
+    {#each visible as { item, i } (i + item.uri)}
+      <li class:current={i === player.playlist.current} class:target={dropAt === i && dragFrom !== i} draggable={!query}
         ondragstart={() => (dragFrom = i)} ondragover={(e) => { e.preventDefault(); dropAt = i; }} ondrop={() => onDrop(i)}
         ondragend={() => (dragFrom = dropAt = null)}>
         <button class="entry" title={item.uri} ondblclick={() => player.playIndex(i)} onkeydown={(e) => e.key === "Enter" && player.playIndex(i)}>
@@ -45,7 +84,7 @@
         <button class="rm" aria-label="Remove {item.title}" title="Remove" onclick={() => player.remove(i)}><X size={14} /></button>
       </li>
     {:else}
-      <p class="empty">Drop files here or click Add.</p>
+      <p class="empty">{query ? "Nothing matches your search." : "Drop files or playlists here, or click Add."}</p>
     {/each}
   </ol>
 </aside>
@@ -112,6 +151,65 @@
   }
   .icon.on {
     color: var(--acc);
+  }
+  .sort {
+    position: relative;
+  }
+  .drop {
+    position: absolute;
+    top: 36px;
+    right: 0;
+    z-index: 2;
+    width: 170px;
+    padding: 5px;
+    border-radius: 10px;
+    background: var(--panel);
+    border: 1px solid var(--border);
+    box-shadow: 0 12px 32px rgb(0 0 0 / 0.5);
+  }
+  .drop button {
+    display: block;
+    width: 100%;
+    padding: 7px 10px;
+    border-radius: 6px;
+    text-align: left;
+    font-size: 13px;
+  }
+  .drop button:hover {
+    background: var(--hover);
+  }
+  .search {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin: 10px 12px 0;
+    padding: 0 10px;
+    height: 32px;
+    border-radius: 8px;
+    background: rgb(0 0 0 / 0.25);
+    border: 1px solid var(--border);
+    color: var(--muted);
+  }
+  .search:focus-within {
+    border-color: var(--acc);
+  }
+  .search input {
+    flex: 1;
+    min-width: 0;
+    border: 0;
+    background: none;
+    color: var(--text);
+    font: inherit;
+    font-size: 13px;
+    outline: none;
+  }
+  .clear {
+    width: 20px;
+    height: 20px;
+    border-radius: 50%;
+  }
+  .clear:hover {
+    background: var(--hover-strong);
   }
   ol {
     flex: 1;
