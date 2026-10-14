@@ -1,11 +1,11 @@
 {
-  "version": "0.2.0",
-  "notes": "Chapters and titles, A–B loop, bookmarks, sleep timer, jump to time; DVD, Blu-ray, CD and VCD discs; capture devices; M3U, PLS and XSPF playlists; queue search and sort; library shows with seasons and posters.",
-  "pub_date": "2026-10-14T11:39:59Z",
+  "version": "0.2.1",
+  "notes": "ReVLC for Windows, and the same version on every platform.",
+  "pub_date": "2026-10-14T18:19:21Z",
   "platforms": {
     "darwin-aarch64": {
-      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSVlR1Wml6L0lBejc2czZvc0gvazNhYUR2d0NJaDc3ZWJ3aXM5MmlaS3d1T29iS1JlQ2VOcXNob1BlYzJkOEVTQlpSRnJ2RlVOc1liTDdoSS9TTEtSK1FmSVlWMDYrR0FjPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkxOTc3NTM2CWZpbGU6UmVWTEMuYXBwLnRhci5negl2ZXJzaW9uOjAuMi4wCkI1UDNlM0RxenAxaXVML2ZTOERLM0t3bDJZeStaKzRwTkN3Y0twY1dXQ0xqUFpZQndjamlnZjN3RXhzWHpyaCtJTHlqRFFxUjd1N3VQK3c4NlJocERBPT0K",
-      "url": "https://github.com/HiteshRohira/ReVLC/releases/download/v0.2.0-alpha/ReVLC-0.2.0-alpha-arm64.app.tar.gz"
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSVlR1Wml6L0lBejFwYzJWRHo0WDZ2Y2ZreE4vSWJZTnZUaElJc1I3MlJpSFlGR0UrQXVpOTRkM3NkQklyM2VBUXM4R0paWmJTbytTWHBaaTB6ckQ2SnZIbDBabXRobmc4PQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkyMDAxOTUyCWZpbGU6UmVWTEMuYXBwLnRhci5negl2ZXJzaW9uOjAuMi4xCm1sUTdNTUUwemc2bmlsL3JSUG5kZnBmZ1kvK0pNVDlhZCtQc05BMHAycEp6UDdUVzI4TmxJUWVsTTVTeEpQOFBSNVpSc28zRm5KZ2lTTlo5OHVlekRnPT0K",
+      "url": "https://github.com/HiteshRohira/ReVLC/releases/download/v0.2.1-alpha/ReVLC-0.2.1-alpha-arm64.app.tar.gz"
     },
     "windows-x86_64": {
       "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSVlR1Wml6L0lBei9ieGIyTTNIem4zVFB6aUNXMmcrV1QvTXlZaXhUSFRseEkvYXB2a2NFS3c1WmdkWVEyenJSUnVhR0FJeU9WcFFPYXkyNlpDK0dLa0pDVTJxcmU1T2dnPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkyMDAwNzI2CWZpbGU6UmVWTENfMC4yLjFfeDY0LXNldHVwLmV4ZQl2ZXJzaW9uOjAuMi4xCmd5T3ZSQzROS2srSVRDUzZ5TmlhaVNKbXNvNm1PdmJEa2tyblkwS0pJRlN1QzVGbHZxUFJ6eks0cllpUWtPR3dXZ2Y4UnA5VTEvTkRwZHVkYkJHZUN3PT0K",
