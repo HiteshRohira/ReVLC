@@ -1,11 +1,11 @@
 {
-  "version": "0.1.2",
-  "notes": "Self-updates: ReVLC now keeps itself up to date (Settings → General → Updates).",
-  "pub_date": "2026-10-13T16:19:20Z",
+  "version": "0.2.0",
+  "notes": "Chapters and titles, A–B loop, bookmarks, sleep timer, jump to time; DVD, Blu-ray, CD and VCD discs; capture devices; M3U, PLS and XSPF playlists; queue search and sort; library shows with seasons and posters.",
+  "pub_date": "2026-10-14T11:39:59Z",
   "platforms": {
     "darwin-aarch64": {
-      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSVlR1Wml6L0lBenlRUFZGbmtQR2hzbEI2dzhlWHVSUDV6bHRBcy9qamt0WThHbEJPWVlYTHVtYzl3OVQ1TjdkWVhNSlBDbjVFUUpLMmpzaFFmN1dFVEk0VEQzMWpQRHdFPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkxOTA4MzQ3CWZpbGU6UmVWTEMuYXBwLnRhci5negl2ZXJzaW9uOjAuMS4yClU0bzlqRHZCQmFhRGEvd2wxRzdacitiT3B0QTVTRmRYZjZ5VWtWb0ZvclZXZGJVT2lGQTl0dnFmdC9wWjJDc2dUaVowYmpqcm9NVklGUWpsWFlPMkJRPT0K",
-      "url": "https://github.com/HiteshRohira/ReVLC/releases/download/v0.1.2-alpha/ReVLC-0.1.2-alpha-arm64.app.tar.gz"
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSVlR1Wml6L0lBejc2czZvc0gvazNhYUR2d0NJaDc3ZWJ3aXM5MmlaS3d1T29iS1JlQ2VOcXNob1BlYzJkOEVTQlpSRnJ2RlVOc1liTDdoSS9TTEtSK1FmSVlWMDYrR0FjPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkxOTc3NTM2CWZpbGU6UmVWTEMuYXBwLnRhci5negl2ZXJzaW9uOjAuMi4wCkI1UDNlM0RxenAxaXVML2ZTOERLM0t3bDJZeStaKzRwTkN3Y0twY1dXQ0xqUFpZQndjamlnZjN3RXhzWHpyaCtJTHlqRFFxUjd1N3VQK3c4NlJocERBPT0K",
+      "url": "https://github.com/HiteshRohira/ReVLC/releases/download/v0.2.0-alpha/ReVLC-0.2.0-alpha-arm64.app.tar.gz"
     }
   }
 }
