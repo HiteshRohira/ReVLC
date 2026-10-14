@@ -2,6 +2,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { open as openDialog, save as saveDialog } from "@tauri-apps/plugin-dialog";
 import { player, ASPECT_RATIOS, CROPS, PLAYLIST_EXTENSIONS, SUBTITLE_EXTENSIONS } from "./player.svelte";
 import { ui } from "./ui.svelte";
+import { isMac } from "./platform";
 
 /** App-level operations the actions need (provided by the main window). */
 export interface Host {
@@ -122,7 +123,11 @@ export function effectiveBindings(overrides: Record<string, string>): Record<str
   return Object.fromEntries(ACTIONS.map((a) => [a.id, overrides[a.id] ?? a.keys]));
 }
 
-/** Converts a key event to a binding string like "Shift+Cmd+O", or null for bare modifiers. */
+/**
+ * Converts a key event to a binding string like "Shift+Cmd+O", or null for
+ * bare modifiers. "Cmd" is the primary modifier: ⌘ on macOS, Ctrl elsewhere,
+ * so bindings carry over between platforms.
+ */
 export function eventBinding(e: KeyboardEvent): string | null {
   if (["Meta", "Shift", "Alt", "Control", "CapsLock"].includes(e.key)) return null;
   const letter = /^Key[A-Z]$/.test(e.code);
@@ -133,11 +138,11 @@ export function eventBinding(e: KeyboardEvent): string | null {
   else if (e.key === " ") key = "Space";
   else key = e.key.length === 1 ? e.key.toUpperCase() : e.key;
   const mods: string[] = [];
-  if (e.ctrlKey) mods.push("Ctrl");
+  if (e.ctrlKey && isMac) mods.push("Ctrl");
   if (e.altKey) mods.push("Alt");
   // For symbols, Shift is already reflected in the character ("?" not "Shift+/").
   if (e.shiftKey && (letter || digit || key.length > 1)) mods.push("Shift");
-  if (e.metaKey) mods.push("Cmd");
+  if (isMac ? e.metaKey : e.ctrlKey) mods.push("Cmd");
   return [...mods, key].join("+");
 }
 
@@ -146,11 +151,19 @@ const SYMBOLS: Record<string, string> = {
   ArrowLeft: "←", ArrowRight: "→", ArrowUp: "↑", ArrowDown: "↓", Escape: "Esc", Space: "Space",
 };
 
-/** "Shift+Cmd+O" → "⇧⌘O", the macOS way. */
+const WINDOWS_KEYS: Record<string, string> = {
+  ArrowLeft: "←", ArrowRight: "→", ArrowUp: "↑", ArrowDown: "↓", Escape: "Esc", Space: "Space",
+};
+
+/** Shown for "Shift+Cmd+O": "⇧⌘O" on macOS, "Ctrl+Shift+O" elsewhere. */
 export function formatBinding(binding: string) {
   if (!binding) return "";
   const parts = binding.split("+");
   const key = parts.pop()!;
+  if (!isMac) {
+    const mods = ["Cmd", "Alt", "Shift"].filter((m) => parts.includes(m)).map((m) => (m === "Cmd" ? "Ctrl" : m));
+    return [...mods, WINDOWS_KEYS[key] ?? key].join("+");
+  }
   return parts.map((p) => SYMBOLS[p] ?? p).join("") + (SYMBOLS[key] ?? key);
 }
 

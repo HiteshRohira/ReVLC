@@ -3,6 +3,7 @@
   import { open as openDialog } from "@tauri-apps/plugin-dialog";
   import { AudioLines, Bookmark, BookmarkPlus, Camera, Check, ChevronLeft, ChevronRight, Crop, FileUp, Gauge, ListTree, Moon, Repeat, Rows3, Settings2, X } from "@lucide/svelte";
   import { player, trackName, formatTime, ASPECT_RATIOS, CROPS, SLEEP_PRESETS, SPEEDS, SUBTITLE_EXTENSIONS, type Track } from "./player.svelte";
+  import { modKey } from "./platform";
 
   // "subtitles" is the subtitle button's menu; "settings" is the gear menu.
   let { kind = "settings", onclose }: { kind?: "settings" | "subtitles"; onclose: () => void } = $props();
@@ -90,7 +91,7 @@
     </button>
     <hr />
     <button class="it" onclick={() => { invoke("open_settings"); onclose(); }}>
-      <Settings2 size={18} /><span class="lab">More settings…</span><em>⌘,</em>
+      <Settings2 size={18} /><span class="lab">More settings…</span><em>{modKey},</em>
     </button>
   {:else if page === "speed"}
     {@render header("Playback speed")}
@@ -159,7 +160,7 @@
   {:else if page === "bookmarks"}
     {@render header("Bookmarks")}
     <button class="it" disabled={!player.active} onclick={() => player.addBookmark()}>
-      <BookmarkPlus size={18} /><span class="lab">Add at {formatTime(s.time)}</span><em>⌘B</em>
+      <BookmarkPlus size={18} /><span class="lab">Add at {formatTime(s.time)}</span><em>{modKey}B</em>
     </button>
     <hr />
     <div class="scroll">

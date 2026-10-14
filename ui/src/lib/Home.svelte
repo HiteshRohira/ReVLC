@@ -295,6 +295,10 @@
     height: 64px;
     padding: 0 24px 0 28px;
   }
+  /* Room for the window buttons. */
+  :global([data-platform="windows"]) .top {
+    padding-right: 150px;
+  }
   .top h1 {
     margin: 0;
     font-size: 22px;

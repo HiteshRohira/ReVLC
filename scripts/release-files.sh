@@ -10,13 +10,25 @@
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 BUNDLE="$ROOT/src-tauri/target/release/bundle"
-VERSION="$(node -p "require('$ROOT/package.json').version")"
+VERSION="$(cd "$ROOT" && node -p "require('./package.json').version")"
 TAG="v$VERSION-alpha"
 ARCH="$(uname -m)"
 NOTES="${1:-See https://github.com/HiteshRohira/ReVLC/releases/tag/$TAG}"
 
 OUT="$ROOT/release"
 rm -rf "$OUT" && mkdir -p "$OUT"
+
+# Windows: just the installer. It has no updater archive yet, so
+# site/latest.json (the macOS manifest) is left alone.
+case "$(uname -s)" in
+  MINGW* | MSYS* | CYGWIN*)
+    SETUP="ReVLC-$VERSION-alpha-x64-setup.exe"
+    cp "$BUNDLE/nsis/ReVLC_${VERSION}_x64-setup.exe" "$OUT/$SETUP"
+    (cd "$OUT" && sha256sum "$SETUP")
+    echo "Wrote $OUT for $TAG"
+    exit 0
+    ;;
+esac
 DMG="ReVLC-$VERSION-alpha-$ARCH.dmg"
 ARCHIVE="ReVLC-$VERSION-alpha-$ARCH.app.tar.gz"
 cp "$BUNDLE/dmg/ReVLC_${VERSION}_$ARCH.dmg" "$OUT/$DMG"

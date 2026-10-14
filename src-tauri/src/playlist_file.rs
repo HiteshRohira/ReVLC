@@ -18,16 +18,29 @@ fn ext(path: &Path) -> String {
 }
 
 /// `file://` URI for an absolute path, percent-encoding everything but
-/// unreserved characters and `/`.
+/// unreserved characters and `/`. Windows paths (`C:\Videos\a.mkv`) become
+/// `file:///C:/Videos/a.mkv`.
 pub fn file_uri(path: &str) -> String {
     let mut uri = String::from("file://");
-    for b in path.bytes() {
+    let path = path.replace('\\', "/");
+    let drive = has_drive(&path);
+    if drive {
+        uri.push('/');
+    }
+    for (i, b) in path.bytes().enumerate() {
         match b {
             b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' | b'/' => uri.push(b as char),
+            b':' if drive && i == 1 => uri.push(':'),
             _ => uri.push_str(&format!("%{b:02X}")),
         }
     }
     uri
+}
+
+/// Whether a path starts with a Windows drive letter, like `C:/`.
+fn has_drive(path: &str) -> bool {
+    let b = path.as_bytes();
+    b.len() >= 2 && b[0].is_ascii_alphabetic() && b[1] == b':'
 }
 
 /// Turns an entry into something we can open: a path for local files
@@ -35,7 +48,12 @@ pub fn file_uri(path: &str) -> String {
 fn resolve(entry: &str, dir: &Path) -> String {
     let entry = entry.trim();
     if let Some(rest) = entry.strip_prefix("file://") {
-        return percent_decode(rest.strip_prefix("localhost").unwrap_or(rest));
+        let path = percent_decode(rest.strip_prefix("localhost").unwrap_or(rest));
+        // file:///C:/a.mkv is the path C:/a.mkv.
+        return match path.strip_prefix('/') {
+            Some(p) if has_drive(p) => p.to_string(),
+            _ => path,
+        };
     }
     if entry.contains("://") {
         return entry.to_string();
@@ -233,9 +251,17 @@ fn write_xspf(items: &[Item]) -> String {
 mod tests {
     use super::*;
 
+    /// An absolute path on this platform.
+    const MOVIE: &str = if cfg!(windows) { "C:/Movies/A & B.mkv" } else { "/Movies/A & B.mkv" };
+
+    /// `name` in `dir`, joined the way this platform does.
+    fn joined(dir: &str, name: &str) -> String {
+        Path::new(dir).join(name).to_string_lossy().into_owned()
+    }
+
     fn items() -> Vec<Item> {
         vec![
-            Item { uri: "/Movies/A & B.mkv".into(), title: "A & B".into(), options: vec![] },
+            Item { uri: MOVIE.into(), title: "A & B".into(), options: vec![] },
             Item { uri: "https://example.com/live.m3u8".into(), title: "Live".into(), options: vec![] },
             Item { uri: "cdda:///dev/rdisk4".into(), title: "Track 3".into(), options: vec![":cdda-track=3".into()] },
         ]
@@ -265,23 +291,29 @@ mod tests {
     fn relative_entries_and_file_uris() {
         let dir = Path::new("/Music/Album");
         let list = read_m3u("#EXTM3U\n01 Intro.mp3\n#EXTINF:12,Second\nfile:///Music/Other%20Song.flac\n", dir);
-        assert_eq!(list[0].uri, "/Music/Album/01 Intro.mp3");
+        assert_eq!(list[0].uri, joined("/Music/Album", "01 Intro.mp3"));
         assert_eq!(list[0].title, "01 Intro.mp3");
         assert_eq!(list[1].uri, "/Music/Other Song.flac");
         assert_eq!(list[1].title, "Second");
     }
 
     #[test]
+    fn windows_paths() {
+        assert_eq!(file_uri(r"C:\My Videos\a.mkv"), "file:///C:/My%20Videos/a.mkv");
+        assert_eq!(resolve("file:///C:/My%20Videos/a.mkv", Path::new("/x")), "C:/My Videos/a.mkv");
+    }
+
+    #[test]
     fn pls_and_xspf_from_other_players() {
         let pls = "[playlist]\nNumberOfEntries=2\nFile2=b.mp3\nFile1=http://radio.example/stream\nTitle1=Radio\n";
         let list = read_pls(pls, Path::new("/x"));
-        assert_eq!(list.iter().map(|i| i.uri.as_str()).collect::<Vec<_>>(), ["http://radio.example/stream", "/x/b.mp3"]);
+        assert_eq!(list.iter().map(|i| i.uri.as_str()).collect::<Vec<_>>(), ["http://radio.example/stream".to_string(), joined("/x", "b.mp3")]);
         let xspf = r#"<?xml version="1.0"?><playlist><trackList>
             <track><title>It&apos;s &#x41;</title><location>file:///a/It%27s.mp4</location></track>
             <track><location>b.mp4</location></track></trackList></playlist>"#;
         let list = read_xspf(xspf, Path::new("/x"));
         assert_eq!(list[0].title, "It's A");
         assert_eq!(list[0].uri, "/a/It's.mp4");
-        assert_eq!(list[1].uri, "/x/b.mp4");
+        assert_eq!(list[1].uri, joined("/x", "b.mp4"));
     }
 }

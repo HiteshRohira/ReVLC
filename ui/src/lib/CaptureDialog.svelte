@@ -4,6 +4,7 @@
   import Dialog from "./Dialog.svelte";
   import { player, type Capture, type Devices } from "./player.svelte";
   import { ui } from "./ui.svelte";
+  import { isMac } from "./platform";
 
   type Kind = Capture["kind"];
   const KINDS: { kind: Kind; label: string }[] = [
@@ -39,7 +40,7 @@
 
 <Dialog
   title="Open capture device"
-  text="Play a camera, microphone or screen live. macOS asks for permission the first time."
+  text={isMac ? "Play a camera, microphone or screen live. macOS asks for permission the first time." : "Play a camera, microphone or screen live."}
   canSubmit={kind === "screen" || list.length > 0}
   onsubmit={submit}
 >

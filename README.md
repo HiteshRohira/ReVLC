@@ -58,21 +58,29 @@ Applications. Builds aren't notarised yet, so the first time, right-click
 ReVLC and choose **Open**, or run `xattr -cr /Applications/ReVLC.app`.
 After that, ReVLC updates itself (Settings → General → Updates).
 
+## Install (Windows 10 and 11, 64-bit)
+
+Download `ReVLC-<version>-alpha-x64-setup.exe` from [Releases](../../releases)
+and run it; it installs for the current user, no admin rights needed. The
+installer isn't code-signed yet, so if SmartScreen warns about it, choose
+**More info** → **Run anyway**.
+
 ## Building
 
-Requirements: Rust, Node 20+.
+Requirements: Rust, Node 20+. On Windows, run the scripts from Git Bash.
 
 ```sh
 npm install
-npm run prepare:vlc   # copies libVLC from /Applications/VLC.app, or downloads VLC 3
+npm run prepare:vlc   # macOS: copies libVLC from /Applications/VLC.app or downloads VLC 3; Windows: downloads VLC 3
 npm run tauri dev     # run in development
-npm run build:app     # ReVLC.app and a .dmg in src-tauri/target/release/bundle
+npm run build:app     # macOS: ReVLC.app and a .dmg; Windows: an NSIS installer (both in src-tauri/target/release/bundle)
 ```
 
 `prepare:vlc` puts libVLC (libraries, plugins and Lua scripts, about 80 MB)
 in `src-tauri/vlc`, which is bundled into the app. Without it, development
 builds fall back to an installed VLC.app. Set `REVLC_VLC_DIR` to use libVLC
-from somewhere else (a directory with `lib/`, `plugins/` and `share/`).
+from somewhere else (a directory with `lib/`, `plugins/` and `share/`; on
+Windows, VLC's own layout with the DLLs next to `plugins/` and `lua/`).
 
 ### Releasing
 
@@ -89,7 +97,8 @@ cd site && vercel deploy --prod            # publishes latest.json; apps see the
 
 - Subtitles can overlap the control bar while it's visible (Settings → Subtitles → "Raise subtitles by" moves them up).
 - HDR is tone-mapped to SDR by libVLC 3 (true HDR on XDR displays is milestone M2).
-- Only macOS so far; Windows and Linux are next.
+- Linux isn't supported yet.
+- Windows: the installer isn't code-signed yet, and Windows copies don't update themselves yet.
 
 ## Contributing
 

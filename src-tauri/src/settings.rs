@@ -37,7 +37,7 @@ pub struct Settings {
     /// -1 automatic, 0 off, 1 on.
     pub deinterlace: i64,
     pub deinterlace_mode: String,
-    /// Empty means the Desktop, like VLC on macOS.
+    /// Empty means VLC's default: the Desktop on macOS, Pictures on Windows.
     pub snapshot_path: String,
     pub snapshot_prefix: String,
     pub snapshot_format: String,
@@ -115,7 +115,7 @@ impl Default for Settings {
             sub_autodetect: true,
             sub_autodetect_fuzzy: 3,
             sub_encoding: String::new(),
-            font: "Helvetica Neue".into(),
+            font: if cfg!(target_os = "macos") { "Helvetica Neue" } else { "Arial" }.into(),
             font_size: 0,
             font_color: 0xFFFFFF,
             font_opacity: 255,
@@ -194,7 +194,11 @@ impl Settings {
             ("video-title-show", Bool(self.show_title)),
             ("video-title-timeout", Int(self.title_timeout)),
             ("video-title-position", Int(self.title_position)),
-            ("videotoolbox", Bool(self.hardware_decoding)),
+            if cfg!(target_os = "macos") {
+                ("videotoolbox", Bool(self.hardware_decoding))
+            } else {
+                ("avcodec-hw", Str(if self.hardware_decoding { "any" } else { "none" }.into()))
+            },
             ("file-caching", Int(self.file_caching)),
             ("network-caching", Int(self.network_caching)),
             ("avcodec-skiploopfilter", Int(self.skip_loop_filter)),

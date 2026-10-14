@@ -8,6 +8,11 @@
   import { settings, type Settings } from "./settings.svelte";
   import { ACCENTS, theme, type AccentId } from "./theme.svelte";
   import Row from "./Row.svelte";
+  import WindowControls from "./WindowControls.svelte";
+  import { isMac } from "./platform";
+
+  // VLC's default snapshot folder.
+  const SNAPSHOT_DEFAULT = isMac ? "Desktop" : "Pictures";
 
   const TABS = [
     { id: "general", label: "General", icon: SlidersHorizontal },
@@ -155,6 +160,7 @@
 {/snippet}
 
 <div class="settings">
+  {#if !isMac}<WindowControls />{/if}
   <header data-tauri-drag-region>
     <nav data-tauri-drag-region>
       {#each TABS as t}
@@ -220,7 +226,7 @@
       <h3>Snapshots</h3>
       <div class="group">
         <Row label="Folder">
-          <span class="path" title={v.snapshotPath || "Desktop"}>{v.snapshotPath ? v.snapshotPath.split("/").pop() : "Desktop"}</span>
+          <span class="path" title={v.snapshotPath || SNAPSHOT_DEFAULT}>{v.snapshotPath ? v.snapshotPath.split(/[\\/]/).pop() : SNAPSHOT_DEFAULT}</span>
           <button class="btn" onclick={chooseSnapshotFolder}>Choose…</button>
         </Row>
         <Row label="File name prefix">{@render text("snapshotPrefix", "vlcsnap-")}</Row>
@@ -295,7 +301,7 @@
     {:else if tab === "input"}
       <h3>Decoding</h3>
       <div class="group">
-        <Row label="Hardware-accelerated decoding" help="Uses the Mac's video decoder (VideoToolbox). Saves battery.">{@render toggle("hardwareDecoding")}</Row>
+        <Row label="Hardware-accelerated decoding" help={isMac ? "Uses the Mac's video decoder (VideoToolbox). Saves battery." : "Uses the graphics card's video decoder (Direct3D 11). Saves battery."}>{@render toggle("hardwareDecoding")}</Row>
         <Row label="Skip H.264 loop filter" help="Speeds up software decoding of H.264 at some cost in quality.">{@render choice("skipLoopFilter", LOOP_FILTER)}</Row>
       </div>
       <h3>Caching</h3>

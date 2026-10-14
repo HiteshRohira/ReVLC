@@ -12,6 +12,8 @@
   import DiscDialog from "./lib/DiscDialog.svelte";
   import JumpDialog from "./lib/JumpDialog.svelte";
   import UrlDialog from "./lib/UrlDialog.svelte";
+  import WindowControls from "./lib/WindowControls.svelte";
+  import { isMac } from "./lib/platform";
   import { player, isSubtitle, cleanTitle } from "./lib/player.svelte";
   import { ACTIONS, ACTION_BY_ID, FIXED_SHORTCUTS, effectiveBindings, eventBinding, formatBinding, syncMenu, type Host } from "./lib/actions";
   import { formatTime } from "./lib/player.svelte";
@@ -128,7 +130,8 @@
     const target = e.target as HTMLElement | null;
     if (target?.closest("input, select, textarea")) return;
     const menuKey = MENU_KEYS[e.key];
-    if (player.inMenu && menuKey && !e.metaKey && !e.shiftKey) {
+    const primary = isMac ? e.metaKey : e.ctrlKey;
+    if (player.inMenu && menuKey && !primary && !e.shiftKey) {
       // DVD and Blu-ray menus take the arrow keys and Return.
       player.navigate(menuKey);
     } else if (e.key === "Escape") {
@@ -136,15 +139,16 @@
       else if (ui.playlistOpen) ui.playlistOpen = false;
       else if (ui.helpOpen) ui.helpOpen = false;
       else exitFullscreen();
-    } else if (/^[0-9]$/.test(e.key) && !e.metaKey && player.state.length > 0 && player.state.seekable) {
+    } else if (/^[0-9]$/.test(e.key) && !primary && player.state.length > 0 && player.state.seekable) {
       player.seek((Number(e.key) / 10) * player.state.length);
     } else {
       const binding = eventBinding(e);
-      // ⌘ shortcuts belong to the menu bar, which runs them itself.
-      if (!binding || binding.includes("Cmd")) return;
+      // On macOS, ⌘ shortcuts belong to the menu bar, which runs them itself.
+      if (!binding || (isMac && binding.includes("Cmd"))) return;
       const action = ACTIONS.find((a) => bindings[a.id] === binding);
-      if (!action) return;
-      action.run(host);
+      if (action) action.run(host);
+      else if (binding === "Cmd+,") invoke("open_settings");
+      else return;
     }
     e.preventDefault();
     wake();
@@ -227,6 +231,8 @@
   {:else}
     <Home onopen={openFiles} onopenfolder={openFolder} />
   {/if}
+
+  {#if !isMac && !ui.fullscreen}<WindowControls hidden={controlsHidden} />{/if}
 
   {#if resumePrompt !== null && showPlayer}
     <div class="resume" role="alertdialog" aria-label="Continue where you left off">
