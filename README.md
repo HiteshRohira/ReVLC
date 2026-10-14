@@ -84,22 +84,26 @@ Windows, VLC's own layout with the DLLs next to `plugins/` and `lua/`).
 
 ### Releasing
 
-`build:app` signs the update (the macOS updater archive, the Windows
-installer) with `~/.tauri/revlc-updater.key`; installed copies only accept
-updates signed with that key. Then, on each platform:
+Releases are built on GitHub Actions, for free on this public repo:
 
-```sh
-scripts/release-files.sh "What changed"   # release/ files; adds this platform to site/latest.json
-gh release create v<version>-alpha release/* --prerelease   # or `gh release upload` for the second platform
-```
-
-`site/latest.json` lists every platform, and only moves to the new version
-once each one has it, so commit it between platforms. Once the release is
-public, publish the manifest; apps see the update:
+1. Bump the version in `package.json`, `src-tauri/tauri.conf.json` and
+   `src-tauri/Cargo.toml`, commit and push.
+2. Run the **Release** workflow (Actions → Release → Run workflow, or
+   `gh workflow run release.yml -f notes="What changed"`). It makes a draft
+   pre-release, builds macOS and Windows, attaches their files, and merges
+   both into the update manifest. It won't rebuild a published release.
+3. Download the run's `latest-json` artifact into `site/`
+   (`gh run download <run id> -n latest-json -D site`) and commit it.
+4. Publish the release, then deploy the site; installed copies see the update:
 
 ```sh
 cd site && vercel deploy --prod
 ```
+
+Updates are signed with the key in the `TAURI_SIGNING_PRIVATE_KEY` secret
+(a copy of `~/.tauri/revlc-updater.key`); installed copies only accept
+updates signed with it. `npm run build:app` and `scripts/release-files.sh`
+still build and collect a release locally, signed with that file.
 
 ## Known issues
 
