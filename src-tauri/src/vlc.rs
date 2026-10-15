@@ -76,6 +76,7 @@ api! {
     libvlc_media_release: fn(*mut Media);
     libvlc_media_add_option_flag: fn(*mut Media, *const c_char, c_uint);
     libvlc_media_subitems: fn(*mut Media) -> *mut MediaList;
+    libvlc_media_get_mrl: fn(*mut Media) -> *mut c_char;
     libvlc_media_list_lock: fn(*mut MediaList);
     libvlc_media_list_unlock: fn(*mut MediaList);
     libvlc_media_list_count: fn(*mut MediaList) -> c_int;
@@ -265,7 +266,9 @@ pub enum ConfigValue {
 static BUFFERING: AtomicU32 = AtomicU32::new(0);
 
 /// Bumped whenever the main player gets new media, and sent with each event,
-/// so a late event from the previous media can be told apart.
+/// so a late event from the previous media can be told apart. Bumped once
+/// the previous media has stopped: libVLC sends events from the input's
+/// thread, which stopping joins, so nothing from it can carry the new value.
 static GENERATION: AtomicU64 = AtomicU64::new(0);
 
 /// libVLC's audio output module on this platform.
@@ -524,44 +527,79 @@ impl Vlc {
     }
 
     unsafe fn play_media(&self, media: *mut Media) -> c_int {
-        GENERATION.fetch_add(1, Ordering::AcqRel);
         unsafe {
             (self.api.libvlc_media_player_set_media)(self.mp, media);
+            GENERATION.fetch_add(1, Ordering::AcqRel);
             (self.api.libvlc_media_player_play)(self.mp)
         }
     }
 
-    /// Plays the first item the current media expanded into, if it did:
-    /// web pages like YouTube's, and remote playlists, end without playing
-    /// anything and leave the real stream as a subitem. Returns whether
-    /// there was one.
-    pub fn play_subitem(&self) -> bool {
+    /// Calls `f` with the items the current media expanded into (each
+    /// retained, so `f` must release them). Web pages handled by VLC's Lua
+    /// scripts, and remote playlists, end without playing anything and
+    /// leave the real streams as subitems.
+    fn with_subitems<T>(&self, f: impl FnOnce(Vec<*mut Media>) -> T) -> T {
         unsafe {
+            let mut subs = Vec::new();
             let media = (self.api.libvlc_media_player_get_media)(self.mp);
-            if media.is_null() {
-                return false;
+            if !media.is_null() {
+                let list = (self.api.libvlc_media_subitems)(media);
+                (self.api.libvlc_media_release)(media);
+                if !list.is_null() {
+                    (self.api.libvlc_media_list_lock)(list);
+                    for i in 0..(self.api.libvlc_media_list_count)(list) {
+                        let sub = (self.api.libvlc_media_list_item_at_index)(list, i);
+                        if !sub.is_null() {
+                            subs.push(sub);
+                        }
+                    }
+                    (self.api.libvlc_media_list_unlock)(list);
+                    (self.api.libvlc_media_list_release)(list);
+                }
             }
-            let list = (self.api.libvlc_media_subitems)(media);
-            (self.api.libvlc_media_release)(media);
-            if list.is_null() {
-                return false;
-            }
-            (self.api.libvlc_media_list_lock)(list);
-            let sub = if (self.api.libvlc_media_list_count)(list) > 0 {
-                (self.api.libvlc_media_list_item_at_index)(list, 0)
-            } else {
-                std::ptr::null_mut()
-            };
-            (self.api.libvlc_media_list_unlock)(list);
-            (self.api.libvlc_media_list_release)(list);
-            if sub.is_null() {
-                return false;
-            }
-            BUFFERING.store(0, Ordering::Relaxed);
-            let result = self.play_media(sub);
-            (self.api.libvlc_media_release)(sub);
-            result == 0
+            f(subs)
         }
+    }
+
+    /// The locations and titles of what the current media expanded into.
+    pub fn subitems(&self) -> Vec<(String, Option<String>)> {
+        self.with_subitems(|subs| {
+            subs.into_iter()
+                .map(|sub| unsafe {
+                    let raw = (self.api.libvlc_media_get_mrl)(sub);
+                    let mrl = if raw.is_null() { String::new() } else { CStr::from_ptr(raw).to_string_lossy().into_owned() };
+                    if !raw.is_null() {
+                        (self.api.libvlc_free)(raw as *mut c_void);
+                    }
+                    let raw = (self.api.libvlc_media_get_meta)(sub, 0);
+                    let title = (!raw.is_null()).then(|| CStr::from_ptr(raw).to_string_lossy().trim().to_string());
+                    if !raw.is_null() {
+                        (self.api.libvlc_free)(raw as *mut c_void);
+                    }
+                    (self.api.libvlc_media_release)(sub);
+                    (mrl, title.filter(|t| !t.is_empty()))
+                })
+                .filter(|(mrl, _)| !mrl.is_empty())
+                .collect()
+        })
+    }
+
+    /// Plays the single item the current media expanded into, as is (with
+    /// any options the script gave it). Returns whether there was one.
+    pub fn play_subitem(&self) -> bool {
+        self.with_subitems(|subs| unsafe {
+            let result = match subs.as_slice() {
+                [sub] => {
+                    BUFFERING.store(0, Ordering::Relaxed);
+                    self.play_media(*sub) == 0
+                }
+                _ => false,
+            };
+            for sub in subs {
+                (self.api.libvlc_media_release)(sub);
+            }
+            result
+        })
     }
 
     pub fn set_pause(&self, pause: bool) {
@@ -569,9 +607,9 @@ impl Vlc {
     }
 
     pub fn stop(&self) {
+        unsafe { (self.api.libvlc_media_player_stop)(self.mp) }
         // Events from what was playing no longer count.
         GENERATION.fetch_add(1, Ordering::AcqRel);
-        unsafe { (self.api.libvlc_media_player_stop)(self.mp) }
     }
 
     /// How full the input cache is, 0–100. Drops after opening and seeking,

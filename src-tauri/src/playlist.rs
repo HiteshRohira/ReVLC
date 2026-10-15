@@ -108,6 +108,19 @@ impl Playlist {
         removed_current
     }
 
+    /// Puts `items` in place of the item at `index` (a playlist URL, by
+    /// what it lists).
+    pub fn replace(&mut self, index: usize, items: Vec<Item>) {
+        if index >= self.items.len() || items.is_empty() {
+            return;
+        }
+        let added = items.len();
+        self.items.splice(index..=index, items);
+        if let Some(c) = self.current.filter(|&c| c > index) {
+            self.current = Some(c + added - 1);
+        }
+    }
+
     pub fn move_item(&mut self, from: usize, to: usize) {
         if from >= self.items.len() || to >= self.items.len() || from == to {
             return;
@@ -178,6 +191,17 @@ fn random_index(len: usize) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn replace_keeps_current() {
+        let mut p = Playlist::default();
+        p.add(["/a.mkv", "http://x/list.m3u", "/b.mkv"].map(Item::new).to_vec());
+        p.current = Some(2);
+        p.replace(1, ["/1.mkv", "/2.mkv"].map(Item::new).to_vec());
+        let uris: Vec<_> = p.items.iter().map(|i| i.uri.as_str()).collect();
+        assert_eq!(uris, ["/a.mkv", "/1.mkv", "/2.mkv", "/b.mkv"]);
+        assert_eq!(p.current, Some(3));
+    }
 
     fn list(n: usize) -> Playlist {
         let mut p = Playlist::default();

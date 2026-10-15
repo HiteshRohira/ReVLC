@@ -166,15 +166,23 @@ impl Library {
         if self.folders.contains(&folder) {
             return Ok(());
         }
-        self.folders.push(folder);
-        self.folders.sort_by(|a, b| natural_cmp(a, b));
-        self.save()
+        let mut folders = self.folders.clone();
+        folders.push(folder);
+        folders.sort_by(|a, b| natural_cmp(a, b));
+        self.replace(folders)
     }
 
     pub fn remove(&mut self, folder: &str) -> Result<(), String> {
         let folder = normalize(folder);
-        self.folders.retain(|f| *f != folder);
-        self.save()
+        let folders = self.folders.iter().filter(|f| **f != folder).cloned().collect();
+        self.replace(folders)
+    }
+
+    /// Saves `folders` as the library, keeping the old list if that fails
+    /// (so trying again saves again).
+    fn replace(&mut self, folders: Vec<String>) -> Result<(), String> {
+        let old = std::mem::replace(&mut self.folders, folders);
+        self.save().inspect_err(|_| self.folders = old)
     }
 }
 
@@ -250,6 +258,21 @@ mod tests {
         let items = scan_folders(&[root.clone(), show.clone()]);
         let found: Vec<_> = items.iter().map(|i| (i.title.as_str(), i.root.as_str())).collect();
         assert_eq!(found, [("Movie", root.as_str()), ("Episode 1", show.as_str())]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn failed_saves_change_nothing() {
+        let dir = std::env::temp_dir().join(format!("revlc-library-save-{}", std::process::id()));
+        // A folder where library.json should go makes every save fail.
+        std::fs::create_dir_all(dir.join("library.json").join("x")).unwrap();
+        let mut library = Library::load(&dir);
+        assert!(library.add("/Movies").is_err());
+        assert!(library.folders.is_empty());
+        // Once saving works again, the same add saves.
+        std::fs::remove_dir_all(dir.join("library.json")).unwrap();
+        library.add("/Movies").unwrap();
+        assert_eq!(Library::load(&dir).folders, [normalize("/Movies")]);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
