@@ -25,7 +25,7 @@ Main features come first. Ship, get feedback, then keep ticking boxes.
 ## Opening media
 - [x] Open files (dialog, multiple), drag and drop, command line, Finder "Open With"
 - [x] Open network URL: HTTP(S), HLS, DASH, RTSP, RTMP, UDP *(engine)*
-- [x] YouTube and similar via VLC's Lua scripts *(engine)*
+- [x] Vimeo, Dailymotion and similar via VLC's Lua scripts *(engine)*. YouTube is out: VLC 3.0.24 removed its broken youtube.lua.
 - [x] Open folder (recursive, natural sort)
 - [x] Open disc: DVD with menus, Blu-ray, audio CD, VCD, ISO *(engine)*
 - [x] Capture devices: webcam, microphone, screen *(engine)*

@@ -68,7 +68,7 @@ pub fn item(capture: &Capture) -> Item {
             ("screen://".to_string(), "Screen")
         }
     };
-    Item { uri, title: title.to_string(), options }
+    Item { uri, title: title.to_string(), options, trusted: true }
 }
 
 /// The playlist item that opens `capture`.
@@ -91,7 +91,7 @@ pub fn item(capture: &Capture) -> Item {
             options.push(format!(":input-slave=avaudiocapture://{audio}"));
         }
     }
-    Item { uri, title: title.to_string(), options }
+    Item { uri, title: title.to_string(), options, trusted: true }
 }
 
 /// Lists cameras, microphones and screens. Must run on the main thread.

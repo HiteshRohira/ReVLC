@@ -18,7 +18,8 @@ if [[ -z "${TAURI_SIGNING_PRIVATE_KEY:-}" ]]; then
 fi
 
 cd "$ROOT"
-test -d src-tauri/vlc || bash scripts/prepare-libvlc.sh
+# Replaces src-tauri/vlc if it holds another libVLC version.
+bash scripts/prepare-libvlc.sh
 npx tauri build
 case "$(uname -s)" in
   MINGW* | MSYS* | CYGWIN*) ;;

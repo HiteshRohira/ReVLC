@@ -144,40 +144,60 @@ pub struct Library {
 impl Library {
     pub fn load(data_dir: &Path) -> Self {
         let file = data_dir.join("library.json");
-        let folders = std::fs::read(&file)
+        let saved: Vec<String> = std::fs::read(&file)
             .ok()
             .and_then(|b| serde_json::from_slice(&b).ok())
             .unwrap_or_default();
+        let mut folders: Vec<String> = Vec::new();
+        for folder in saved.iter().map(|f| normalize(f)) {
+            if !folders.contains(&folder) {
+                folders.push(folder);
+            }
+        }
         Self { file, folders }
     }
 
-    fn save(&self) {
-        if let Ok(json) = serde_json::to_vec(&self.folders) {
-            let _ = std::fs::write(&self.file, json);
+    fn save(&self) -> Result<(), String> {
+        crate::store::write_json(&self.file, &self.folders, false)
+    }
+
+    pub fn add(&mut self, folder: &str) -> Result<(), String> {
+        let folder = normalize(folder);
+        if self.folders.contains(&folder) {
+            return Ok(());
         }
+        self.folders.push(folder);
+        self.folders.sort_by(|a, b| natural_cmp(a, b));
+        self.save()
     }
 
-    pub fn add(&mut self, folder: &str) {
-        if !self.folders.iter().any(|f| f == folder) {
-            self.folders.push(folder.to_string());
-            self.folders.sort_by(|a, b| natural_cmp(a, b));
-            self.save();
-        }
+    pub fn remove(&mut self, folder: &str) -> Result<(), String> {
+        let folder = normalize(folder);
+        self.folders.retain(|f| *f != folder);
+        self.save()
     }
+}
 
-    pub fn remove(&mut self, folder: &str) {
-        self.folders.retain(|f| f != folder);
-        self.save();
-    }
+/// A folder path written one way: the platform's separators, and no
+/// trailing one (except for a drive's root).
+fn normalize(folder: &str) -> String {
+    let folder = crate::playlist_file::native_path(folder.trim().to_string());
+    let trimmed = folder.trim_end_matches(['/', '\\']);
+    if trimmed.is_empty() || trimmed.ends_with(':') { folder } else { trimmed.to_string() }
+}
 
-    /// Videos in every library folder. `thumb` maps a file to its cached
-    /// thumbnail path, if one exists.
-    pub fn items(&self, thumb: impl Fn(&str) -> Option<String>) -> Vec<LibraryItem> {
-        self.folders
-            .iter()
-            .flat_map(|root| {
-                let root_path = Path::new(root);
-                scan(root_path, is_video).into_iter().map(move |path| {
+/// Videos in the library `folders`. A file inside two of them (one inside
+/// the other) belongs to the innermost one.
+pub fn scan_folders(folders: &[String]) -> Vec<LibraryItem> {
+    folders
+        .iter()
+        .flat_map(|root| {
+            let root_path = Path::new(root);
+            let inner: Vec<&Path> = folders.iter().map(Path::new).filter(|f| *f != root_path && f.starts_with(root_path)).collect();
+            scan(root_path, is_video)
+                .into_iter()
+                .filter(move |path| !inner.iter().any(|f| path.starts_with(f)))
+                .map(move |path| {
                     let uri = path.to_string_lossy().into_owned();
                     let folder = path
                         .parent()
@@ -202,13 +222,8 @@ impl Library {
                         group_art: None,
                     }
                 })
-            })
-            .map(|mut item| {
-                item.thumb = thumb(&item.uri);
-                item
-            })
-            .collect()
-    }
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -222,6 +237,28 @@ mod tests {
         assert_eq!(v, ["Episode 1.mkv", "episode 2.mkv", "Episode 10.mkv", "Extras"]);
         assert_eq!(natural_cmp("S01E02", "S01E02"), Ordering::Equal);
         assert_eq!(natural_cmp("a007", "a7"), Ordering::Equal);
+    }
+
+    #[test]
+    fn nested_folders_list_files_once() {
+        let dir = std::env::temp_dir().join(format!("revlc-library-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("Show")).unwrap();
+        std::fs::write(dir.join("Movie.mkv"), b"").unwrap();
+        std::fs::write(dir.join("Show").join("Episode 1.mkv"), b"").unwrap();
+        let root = dir.to_string_lossy().into_owned();
+        let show = dir.join("Show").to_string_lossy().into_owned();
+        let items = scan_folders(&[root.clone(), show.clone()]);
+        let found: Vec<_> = items.iter().map(|i| (i.title.as_str(), i.root.as_str())).collect();
+        assert_eq!(found, [("Movie", root.as_str()), ("Episode 1", show.as_str())]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn folder_paths_are_normalized() {
+        let sep = std::path::MAIN_SEPARATOR;
+        assert_eq!(normalize("/Movies/"), format!("{sep}Movies"));
+        assert_eq!(normalize("/"), sep.to_string());
+        assert_eq!(normalize("C:\\"), "C:\\");
     }
 
     #[test]

@@ -30,13 +30,33 @@
     sortOpen = false;
   }
 
-  function onDrop(index: number) {
-    if (dragFrom !== null && dragFrom !== index) player.move(dragFrom, index);
+  // Reordering follows the pointer rather than using HTML drag and drop,
+  // which Windows turns off so files can be dropped in from Explorer.
+  let press: { index: number; y: number } | null = null;
+
+  function onPress(e: PointerEvent, index: number) {
+    if (query || e.button !== 0 || (e.target as Element).closest(".rm")) return;
+    press = { index, y: e.clientY };
+  }
+
+  function onPointerMove(e: PointerEvent) {
+    if (!press) return;
+    // A small movement is still a click.
+    if (dragFrom === null && Math.abs(e.clientY - press.y) < 5) return;
+    dragFrom = press.index;
+    const li = document.elementFromPoint(e.clientX, e.clientY)?.closest<HTMLElement>("li[data-index]");
+    if (li) dropAt = Number(li.dataset.index);
+  }
+
+  function onRelease() {
+    if (dragFrom !== null && dropAt !== null && dragFrom !== dropAt) player.move(dragFrom, dropAt);
+    press = null;
     dragFrom = dropAt = null;
   }
 </script>
 
-<svelte:window onpointerdown={(e) => sortOpen && !sortEl?.contains(e.target as Node) && (sortOpen = false)} />
+<svelte:window onpointerdown={(e) => sortOpen && !sortEl?.contains(e.target as Node) && (sortOpen = false)}
+  onpointermove={onPointerMove} onpointerup={onRelease} onpointercancel={onRelease} />
 
 <aside class="queue" aria-label="Up next">
   <header>
@@ -73,11 +93,10 @@
       {#if query}<button class="clear" aria-label="Clear search" onclick={() => (query = "")}><X size={13} /></button>{/if}
     </div>
   {/if}
-  <ol>
+  <ol class:dragging={dragFrom !== null}>
     {#each visible as { item, i } (i + item.uri)}
-      <li class:current={i === player.playlist.current} class:target={dropAt === i && dragFrom !== i} draggable={!query}
-        ondragstart={() => (dragFrom = i)} ondragover={(e) => { e.preventDefault(); dropAt = i; }} ondrop={() => onDrop(i)}
-        ondragend={() => (dragFrom = dropAt = null)}>
+      <li data-index={i} class:current={i === player.playlist.current} class:target={dropAt === i && dragFrom !== i}
+        onpointerdown={(e) => onPress(e, i)}>
         <button class="entry" title={item.uri} ondblclick={() => player.playIndex(i)} onkeydown={(e) => e.key === "Enter" && player.playIndex(i)}>
           <span class="n tnum">{i === player.playlist.current ? "▶" : i + 1}</span>
           <span class="t">{cleanTitle(item.title)}</span>
@@ -224,6 +243,11 @@
     align-items: center;
     border-radius: 9px;
     border-top: 2px solid transparent;
+    user-select: none;
+  }
+  ol.dragging,
+  ol.dragging :global(*) {
+    cursor: grabbing;
   }
   li:hover {
     background: var(--hover);

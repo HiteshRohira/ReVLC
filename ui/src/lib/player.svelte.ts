@@ -240,9 +240,10 @@ class Player {
     await Promise.all([this.loadHistory(), this.loadLibrary()]);
   }
 
-  async loadLibrary() {
+  /** Lists the library; `rescan` looks for new files instead of reusing the last scan. */
+  async loadLibrary(rescan = true) {
     try {
-      this.library = await invoke<Library>("library_list");
+      this.library = await invoke<Library>(rescan ? "library_rescan" : "library_list");
     } catch {
       this.library = { folders: [], items: [] };
     }
@@ -253,7 +254,7 @@ class Player {
   #refreshLibrarySoon() {
     this.#refreshTimer ??= setTimeout(() => {
       this.#refreshTimer = undefined;
-      this.loadLibrary();
+      this.loadLibrary(false);
       this.loadHistory();
     }, 1500);
   }
@@ -267,7 +268,11 @@ class Player {
   }
 
   async removeFolder(path: string) {
-    this.library = await invoke<Library>("library_remove", { path });
+    try {
+      this.library = await invoke<Library>("library_remove", { path });
+    } catch (e) {
+      this.notify("error", String(e));
+    }
   }
 
   async loadHistory() {
@@ -290,11 +295,14 @@ class Player {
     setTimeout(() => (this.notices = this.notices.filter((n) => n.id !== id)), kind === "error" ? 6000 : 1500);
   }
 
-  async #call(cmd: string, args?: Record<string, unknown>) {
+  /** Runs a command, showing any error. Returns whether it worked. */
+  async #call(cmd: string, args?: Record<string, unknown>): Promise<boolean> {
     try {
       await invoke(cmd, args);
+      return true;
     } catch (e) {
       this.notify("error", String(e));
+      return false;
     }
   }
 
@@ -363,8 +371,7 @@ class Player {
   setShuffle = (shuffle: boolean) => this.#call("set_shuffle", { shuffle });
   sort = (by: SortKey) => this.#call("playlist_sort", { by });
   savePlaylist = async (path: string) => {
-    await this.#call("playlist_save", { path });
-    this.notify("info", "Playlist saved");
+    if (await this.#call("playlist_save", { path })) this.notify("info", "Playlist saved");
   };
 
   openDisc = (kind: DiscKind, path: string, menus: boolean) => this.#call("open_disc", { kind, path, menus });

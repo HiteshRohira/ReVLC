@@ -148,10 +148,8 @@ impl Settings {
             .unwrap_or_default()
     }
 
-    pub fn save(&self, data_dir: &Path) {
-        if let Ok(json) = serde_json::to_vec_pretty(self) {
-            let _ = std::fs::write(file(data_dir), json);
-        }
+    pub fn save(&self, data_dir: &Path) -> Result<(), String> {
+        crate::store::write_json(&file(data_dir), self, true)
     }
 
     /// Where user snapshots go.

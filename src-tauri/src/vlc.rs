@@ -5,7 +5,7 @@
 
 use std::ffi::{CStr, CString, c_char, c_float, c_int, c_uint, c_void};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::mpsc::Sender;
 
 use libloading::Library;
@@ -14,6 +14,7 @@ use serde::Serialize;
 type Inst = c_void;
 type Player = c_void;
 type Media = c_void;
+type MediaList = c_void;
 type EventManager = c_void;
 type EventCallback = unsafe extern "C" fn(*const c_void, *mut c_void);
 type LockCb = unsafe extern "C" fn(*mut c_void, *mut *mut c_void) -> *mut c_void;
@@ -73,7 +74,13 @@ api! {
     libvlc_media_new_path: fn(*mut Inst, *const c_char) -> *mut Media;
     libvlc_media_new_location: fn(*mut Inst, *const c_char) -> *mut Media;
     libvlc_media_release: fn(*mut Media);
-    libvlc_media_add_option: fn(*mut Media, *const c_char);
+    libvlc_media_add_option_flag: fn(*mut Media, *const c_char, c_uint);
+    libvlc_media_subitems: fn(*mut Media) -> *mut MediaList;
+    libvlc_media_list_lock: fn(*mut MediaList);
+    libvlc_media_list_unlock: fn(*mut MediaList);
+    libvlc_media_list_count: fn(*mut MediaList) -> c_int;
+    libvlc_media_list_item_at_index: fn(*mut MediaList, c_int) -> *mut Media;
+    libvlc_media_list_release: fn(*mut MediaList);
     libvlc_media_player_release: fn(*mut Player);
     libvlc_video_set_callbacks: fn(*mut Player, LockCb, Option<UnlockCb>, Option<DisplayCb>, *mut c_void);
     libvlc_video_set_format_callbacks: fn(*mut Player, FormatCb, Option<CleanupCb>);
@@ -136,6 +143,12 @@ api! {
     libvlc_media_get_parsed_status: fn(*mut Media) -> c_int;
     libvlc_media_get_duration: fn(*mut Media) -> i64;
 }
+
+/// libvlc_media_option_t: an option the application chose, which libVLC
+/// applies even if it's unsafe (like stream output). Options from playlist
+/// files leave it out, so libVLC only applies the safe ones.
+const OPTION_TRUSTED: c_uint = 0x2;
+const OPTION_UNIQUE: c_uint = 0x100;
 
 /// libVLC media player events we listen to (values from libvlc_events.h).
 pub mod event {
@@ -250,6 +263,10 @@ pub enum ConfigValue {
 /// Percentage of the input cache filled, from the last Buffering event.
 /// Only the main player subscribes to events, so one value is enough.
 static BUFFERING: AtomicU32 = AtomicU32::new(0);
+
+/// Bumped whenever the main player gets new media, and sent with each event,
+/// so a late event from the previous media can be told apart.
+static GENERATION: AtomicU64 = AtomicU64::new(0);
 
 /// libVLC's audio output module on this platform.
 const AUDIO_MODULE: &str = if cfg!(target_os = "macos") { "auhal" } else if cfg!(windows) { "mmdevice" } else { "pulse" };
@@ -434,9 +451,10 @@ impl Vlc {
         unsafe { (self.api.libvlc_media_player_set_video_title_display)(self.mp, pos, timeout_ms.max(0) as c_uint) }
     }
 
-    /// Sends every player event type to `tx`. The callback runs on a libVLC
+    /// Sends every player event type to `tx`, with the media generation it
+    /// belongs to (see [`Vlc::generation`]). The callback runs on a libVLC
     /// thread, so it must not call back into libVLC.
-    pub fn subscribe(&self, tx: Sender<i32>) {
+    pub fn subscribe(&self, tx: Sender<(i32, u64)>) {
         unsafe extern "C" fn on_event(ev: *const c_void, data: *mut c_void) {
             unsafe {
                 let ty = *(ev as *const c_int);
@@ -446,8 +464,8 @@ impl Vlc {
                     let cache = *((ev as *const u8).add(2 * size_of::<*const c_void>()) as *const c_float);
                     BUFFERING.store(cache.to_bits(), Ordering::Relaxed);
                 }
-                let tx = &*(data as *const Sender<i32>);
-                let _ = tx.send(ty);
+                let tx = &*(data as *const Sender<(i32, u64)>);
+                let _ = tx.send((ty, GENERATION.load(Ordering::Acquire)));
             }
         }
         let data = Box::into_raw(Box::new(tx)) as *mut c_void;
@@ -471,9 +489,15 @@ impl Vlc {
         unsafe { (self.api.libvlc_media_player_set_hwnd)(self.mp, hwnd) }
     }
 
+    /// Identifies the media the player has: changes each time it opens one.
+    pub fn generation(&self) -> u64 {
+        GENERATION.load(Ordering::Acquire)
+    }
+
     /// Opens a local path or a URL and starts playback. `options` are
-    /// per-media libVLC options such as ":network-caching=1000".
-    pub fn open(&self, uri: &str, options: &[String]) -> Result<(), String> {
+    /// per-media libVLC options such as ":network-caching=1000"; unless
+    /// `trusted`, libVLC ignores the unsafe ones (use for playlist files).
+    pub fn open(&self, uri: &str, options: &[String], trusted: bool) -> Result<(), String> {
         BUFFERING.store(0, Ordering::Relaxed);
         let c = if uri.contains("://") { cstr(uri) } else { path_cstr(uri) };
         unsafe {
@@ -485,17 +509,59 @@ impl Vlc {
             if media.is_null() {
                 return Err(format!("could not open {uri}: {}", errmsg(&self.api)));
             }
+            let flags = if trusted { OPTION_TRUSTED | OPTION_UNIQUE } else { OPTION_UNIQUE };
             for opt in options {
                 let o = cstr(opt);
-                (self.api.libvlc_media_add_option)(media, o.as_ptr());
+                (self.api.libvlc_media_add_option_flag)(media, o.as_ptr(), flags);
             }
-            (self.api.libvlc_media_player_set_media)(self.mp, media);
+            let result = self.play_media(media);
             (self.api.libvlc_media_release)(media);
-            if (self.api.libvlc_media_player_play)(self.mp) != 0 {
+            if result != 0 {
                 return Err(format!("could not play {uri}: {}", errmsg(&self.api)));
             }
         }
         Ok(())
+    }
+
+    unsafe fn play_media(&self, media: *mut Media) -> c_int {
+        GENERATION.fetch_add(1, Ordering::AcqRel);
+        unsafe {
+            (self.api.libvlc_media_player_set_media)(self.mp, media);
+            (self.api.libvlc_media_player_play)(self.mp)
+        }
+    }
+
+    /// Plays the first item the current media expanded into, if it did:
+    /// web pages like YouTube's, and remote playlists, end without playing
+    /// anything and leave the real stream as a subitem. Returns whether
+    /// there was one.
+    pub fn play_subitem(&self) -> bool {
+        unsafe {
+            let media = (self.api.libvlc_media_player_get_media)(self.mp);
+            if media.is_null() {
+                return false;
+            }
+            let list = (self.api.libvlc_media_subitems)(media);
+            (self.api.libvlc_media_release)(media);
+            if list.is_null() {
+                return false;
+            }
+            (self.api.libvlc_media_list_lock)(list);
+            let sub = if (self.api.libvlc_media_list_count)(list) > 0 {
+                (self.api.libvlc_media_list_item_at_index)(list, 0)
+            } else {
+                std::ptr::null_mut()
+            };
+            (self.api.libvlc_media_list_unlock)(list);
+            (self.api.libvlc_media_list_release)(list);
+            if sub.is_null() {
+                return false;
+            }
+            BUFFERING.store(0, Ordering::Relaxed);
+            let result = self.play_media(sub);
+            (self.api.libvlc_media_release)(sub);
+            result == 0
+        }
     }
 
     pub fn set_pause(&self, pause: bool) {
@@ -503,6 +569,8 @@ impl Vlc {
     }
 
     pub fn stop(&self) {
+        // Events from what was playing no longer count.
+        GENERATION.fetch_add(1, Ordering::AcqRel);
         unsafe { (self.api.libvlc_media_player_stop)(self.mp) }
     }
 
@@ -797,7 +865,7 @@ impl Vlc {
             let number = |ty: c_int| meta(ty).and_then(|s| s.parse::<u32>().ok());
             let result = if status == PARSED_DONE {
                 let artwork = meta(ARTWORK_URL)
-                    .and_then(|url| url.strip_prefix("file://").map(crate::playlist::percent_decode))
+                    .and_then(|url| crate::playlist_file::file_uri_path(&url))
                     .filter(|p| Path::new(p).is_file());
                 Ok(MediaMeta {
                     title: meta(TITLE),
@@ -851,9 +919,35 @@ fn put_config(core: &CoreApi, inst: *mut Inst, name: &str, value: &ConfigValue) 
     }
 }
 
+/// Zeroed memory aligned the way libVLC wants picture planes.
+struct FrameBuf {
+    ptr: *mut u8,
+    layout: std::alloc::Layout,
+}
+
+impl FrameBuf {
+    const ALIGN: usize = 32;
+
+    fn new(len: usize) -> Option<Self> {
+        let layout = std::alloc::Layout::from_size_align(len, Self::ALIGN).ok().filter(|l| l.size() > 0)?;
+        let ptr = unsafe { std::alloc::alloc_zeroed(layout) };
+        (!ptr.is_null()).then_some(Self { ptr, layout })
+    }
+
+    fn as_slice(&self) -> &[u8] {
+        unsafe { std::slice::from_raw_parts(self.ptr, self.layout.size()) }
+    }
+}
+
+impl Drop for FrameBuf {
+    fn drop(&mut self) {
+        unsafe { std::alloc::dealloc(self.ptr, self.layout) }
+    }
+}
+
 /// A frame captured by [`Vlc::thumbnail`], in VLC's RV32 (BGRX) layout.
 struct Grab {
-    buf: Vec<u8>,
+    buf: Option<FrameBuf>,
     width: u32,
     height: u32,
     target_width: u32,
@@ -874,10 +968,14 @@ unsafe extern "C" fn grab_format(
             return 0;
         }
         let w = g.target_width;
-        let h = ((*height as u64 * w as u64 / *width as u64) as u32).max(2) & !1;
+        // The frame's shape comes from the file; nothing real is taller than 4:1.
+        let h = (*height as u64 * w as u64 / *width as u64).clamp(2, w as u64 * 4) as u32 & !1;
+        let Some(buf) = (w as usize).checked_mul(h as usize).and_then(|n| n.checked_mul(4)).and_then(FrameBuf::new) else {
+            return 0;
+        };
         std::ptr::copy_nonoverlapping(b"RV32".as_ptr() as *const c_char, chroma, 4);
         (*width, *height, *pitches, *lines) = (w, h, w * 4, h);
-        g.buf = vec![0; (w * h * 4) as usize];
+        g.buf = Some(buf);
         (g.width, g.height) = (w, h);
         1
     }
@@ -886,7 +984,7 @@ unsafe extern "C" fn grab_format(
 unsafe extern "C" fn grab_lock(opaque: *mut c_void, planes: *mut *mut c_void) -> *mut c_void {
     unsafe {
         let g = &mut *(opaque as *mut Grab);
-        *planes = g.buf.as_mut_ptr() as *mut c_void;
+        *planes = g.buf.as_ref().map_or(std::ptr::null_mut(), |b| b.ptr as *mut c_void);
     }
     std::ptr::null_mut()
 }
@@ -905,7 +1003,7 @@ impl Vlc {
         use std::time::{Duration, Instant};
 
         let grab = Box::into_raw(Box::new(Grab {
-            buf: Vec::new(),
+            buf: None,
             width: 0,
             height: 0,
             target_width: width,
@@ -929,7 +1027,7 @@ impl Vlc {
             }
             for opt in [":no-audio", ":no-spu", ":codec=avcodec", ":avcodec-hw=none", ":no-sub-autodetect-file"] {
                 let o = cstr(opt);
-                (api.libvlc_media_add_option)(media, o.as_ptr());
+                (api.libvlc_media_add_option_flag)(media, o.as_ptr(), OPTION_TRUSTED | OPTION_UNIQUE);
             }
             (api.libvlc_media_player_set_media)(mp, media);
             (api.libvlc_media_release)(media);
@@ -943,7 +1041,7 @@ impl Vlc {
             if started {
                 let length = (api.libvlc_media_player_get_length)(mp);
                 if length > 0 {
-                    let target = ((length as f64 * fraction) as i64).clamp(0, length - 1000);
+                    let target = ((length as f64 * fraction) as i64).clamp(0, (length - 1000).max(0));
                     (api.libvlc_media_player_set_time)(mp, target);
                     let before = g.frames.load(Acquire);
                     // A few frames after the seek, so we skip any stale one.
@@ -955,10 +1053,10 @@ impl Vlc {
             (api.libvlc_media_player_stop)(mp);
             (api.libvlc_media_player_release)(mp);
             let g = Box::from_raw(grab);
-            if !ok || g.width == 0 {
+            let Some(buf) = g.buf.as_ref().filter(|_| ok && g.width > 0) else {
                 return Err(format!("no frame decoded from {path}"));
-            }
-            let rgb: Vec<u8> = g.buf.chunks_exact(4).flat_map(|p| [p[2], p[1], p[0]]).collect();
+            };
+            let rgb: Vec<u8> = buf.as_slice().chunks_exact(4).flat_map(|p| [p[2], p[1], p[0]]).collect();
             let img = image::RgbImage::from_raw(g.width, g.height, rgb).ok_or("bad frame size")?;
             img.save_with_format(out, image::ImageFormat::Jpeg).map_err(|e| e.to_string())
         }

@@ -49,17 +49,30 @@ fn has_drive(path: &str) -> bool {
     b.len() >= 2 && b[0].is_ascii_alphabetic() && b[1] == b':'
 }
 
+/// The local path a `file://` URI names, written the platform's way:
+/// `file:///C:/a.mkv` is `C:\a.mkv`, and on Windows `file://nas/share/a.mkv`
+/// is the network path `\\nas\share\a.mkv`. `None` if it isn't a file URI,
+/// or names another computer where there are no such paths.
+pub fn file_uri_path(uri: &str) -> Option<String> {
+    let rest = uri.get(..7).filter(|s| s.eq_ignore_ascii_case("file://")).map(|_| &uri[7..])?;
+    let (host, path) = rest.split_at(rest.find('/').unwrap_or(rest.len()));
+    let path = percent_decode(path);
+    if host.is_empty() || host.eq_ignore_ascii_case("localhost") {
+        // file:///C:/a.mkv is the path C:/a.mkv.
+        return Some(native_path(match path.strip_prefix('/') {
+            Some(p) if has_drive(p) => p.to_string(),
+            _ => path,
+        }));
+    }
+    cfg!(windows).then(|| native_path(format!("//{host}{path}")))
+}
+
 /// Turns an entry into something we can open: a path for local files
 /// (relative ones are resolved against the playlist's folder), or a URL.
 fn resolve(entry: &str, dir: &Path) -> String {
     let entry = entry.trim();
-    if let Some(rest) = entry.strip_prefix("file://") {
-        let path = percent_decode(rest.strip_prefix("localhost").unwrap_or(rest));
-        // file:///C:/a.mkv is the path C:/a.mkv.
-        return native_path(match path.strip_prefix('/') {
-            Some(p) if has_drive(p) => p.to_string(),
-            _ => path,
-        });
+    if let Some(path) = file_uri_path(entry) {
+        return path;
     }
     if entry.contains("://") {
         return entry.to_string();
@@ -71,7 +84,8 @@ fn resolve(entry: &str, dir: &Path) -> String {
 fn item(entry: &str, title: Option<String>, options: Vec<String>, dir: &Path) -> Item {
     let uri = resolve(entry, dir);
     let title = title.filter(|t| !t.trim().is_empty()).unwrap_or_else(|| title_for(&uri));
-    Item { uri, title, options }
+    // Options from a file aren't the user's choice: libVLC only applies the safe ones.
+    Item { uri, title, options, trusted: false }
 }
 
 /// Reads a playlist file.
@@ -267,9 +281,9 @@ mod tests {
 
     fn items() -> Vec<Item> {
         vec![
-            Item { uri: MOVIE.into(), title: "A & B".into(), options: vec![] },
-            Item { uri: "https://example.com/live.m3u8".into(), title: "Live".into(), options: vec![] },
-            Item { uri: "cdda:///dev/rdisk4".into(), title: "Track 3".into(), options: vec![":cdda-track=3".into()] },
+            Item { uri: MOVIE.into(), title: "A & B".into(), options: vec![], trusted: false },
+            Item { uri: "https://example.com/live.m3u8".into(), title: "Live".into(), options: vec![], trusted: false },
+            Item { uri: "cdda:///dev/rdisk4".into(), title: "Track 3".into(), options: vec![":cdda-track=3".into()], trusted: false },
         ]
     }
 
@@ -291,6 +305,15 @@ mod tests {
         for ext in ["m3u", "m3u8", "pls", "xspf"] {
             round_trip(ext);
         }
+    }
+
+    #[test]
+    fn file_uri_paths() {
+        assert_eq!(file_uri_path("file:///Movies/A%20B.mkv"), Some(native_path("/Movies/A B.mkv".into())));
+        assert_eq!(file_uri_path("file://localhost/Movies/a.mkv"), Some(native_path("/Movies/a.mkv".into())));
+        assert_eq!(file_uri_path("FILE:///C:/Movies/a.mkv"), Some(native_path("C:/Movies/a.mkv".into())));
+        assert_eq!(file_uri_path("file://nas/share/a.mkv"), cfg!(windows).then(|| r"\\nas\share\a.mkv".to_string()));
+        assert_eq!(file_uri_path("https://example.com/a.mkv"), None);
     }
 
     #[test]

@@ -353,14 +353,22 @@ impl MetaCache {
         self.dirty = true;
     }
 
+    /// Forgets files not in `keep`.
+    pub fn retain(&mut self, keep: &std::collections::HashSet<&str>) {
+        let before = self.map.len();
+        self.map.retain(|path, _| keep.contains(path.as_str()));
+        self.dirty |= self.map.len() != before;
+    }
+
     pub fn save(&mut self) {
         if !self.dirty {
             return;
         }
-        if let Ok(json) = serde_json::to_vec(&self.map) {
-            let _ = std::fs::write(&self.file, json);
+        // Stays dirty on failure, so the next save tries again.
+        match crate::store::write_json(&self.file, &self.map, false) {
+            Ok(()) => self.dirty = false,
+            Err(e) => eprintln!("revlc: {e}"),
         }
-        self.dirty = false;
     }
 }
 

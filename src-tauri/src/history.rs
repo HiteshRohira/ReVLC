@@ -135,18 +135,16 @@ impl History {
         (!e.finished && e.position > RESUME_MARGIN && before_end).then_some(e.position)
     }
 
-    pub fn save(&mut self, force: bool) {
+    /// Writes the history if it changed (and, unless `force`, the last
+    /// write was a while ago). Stays dirty on failure, so it's retried.
+    pub fn save(&mut self, force: bool) -> Result<(), String> {
         if !self.dirty || (!force && self.last_save.elapsed() < SAVE_INTERVAL) {
-            return;
+            return Ok(());
         }
-        if let Ok(json) = serde_json::to_vec(&self.entries) {
-            let tmp = self.file.with_extension("json.tmp");
-            if std::fs::write(&tmp, json).is_ok() {
-                let _ = std::fs::rename(&tmp, &self.file);
-            }
-        }
-        self.dirty = false;
         self.last_save = Instant::now();
+        crate::store::write_json(&self.file, &self.entries, false).inspect_err(|e| eprintln!("revlc: {e}"))?;
+        self.dirty = false;
+        Ok(())
     }
 
     pub fn list(&self) -> Vec<UiEntry> {
