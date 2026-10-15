@@ -9,13 +9,17 @@ pub struct Item {
     /// Per-item libVLC options, such as ":cdda-track=3".
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub options: Vec<String>,
+    /// Whether ReVLC made `options` itself (a disc or capture device), so
+    /// libVLC should apply unsafe ones too. Not for options read from files.
+    #[serde(skip)]
+    pub trusted: bool,
 }
 
 impl Item {
     pub fn new(uri: impl Into<String>) -> Self {
         let uri = uri.into();
         let title = if uri.contains("://") { title_for(&uri) } else { crate::meta::display_title(std::path::Path::new(&uri)) };
-        Self { title, uri, options: Vec::new() }
+        Self { title, uri, options: Vec::new(), trusted: false }
     }
 }
 

@@ -65,6 +65,8 @@ interface Info {
 
 class SettingsStore {
   info = $state<Info | null>(null);
+  /** Why the last change couldn't be saved, if it couldn't. */
+  error = $state<string | null>(null);
   #timer: ReturnType<typeof setTimeout> | undefined;
 
   get value() {
@@ -91,7 +93,11 @@ class SettingsStore {
     if (!this.info) return;
     this.info.settings = { ...this.info.settings, ...patch };
     clearTimeout(this.#timer);
-    const save = () => invoke("settings_set", { settings: $state.snapshot(this.info!.settings) }).catch(console.error);
+    const save = () =>
+      invoke("settings_set", { settings: $state.snapshot(this.info!.settings) }).then(
+        () => (this.error = null),
+        (e) => (this.error = String(e)),
+      );
     if (debounce) this.#timer = setTimeout(save, 450);
     else save();
   }

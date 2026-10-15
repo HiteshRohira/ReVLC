@@ -26,7 +26,19 @@
       }
     ],
     "security": {
-      "csp": null,
+      "csp": {
+        "default-src": "'self'",
+        "script-src": "'self'",
+        "style-src": "'self' 'unsafe-inline'",
+        "img-src": "'self' asset: http://asset.localhost https://asset.localhost data:",
+        "font-src": "'self' data:",
+        "connect-src": "ipc: http://ipc.localhost https://ipc.localhost",
+        "object-src": "'none'",
+        "base-uri": "'none'",
+        "form-action": "'none'"
+      },
+      "devCsp": null,
+      "dangerousDisableAssetCspModification": ["style-src"],
       "assetProtocol": {
         "enable": true,
         "scope": [

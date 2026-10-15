@@ -17,6 +17,6 @@
   }
 </script>
 
-<Dialog title="Open network stream" text="HTTP(S), HLS, DASH, RTSP, RTMP, UDP, or a YouTube link." canSubmit={!!url.trim()} onsubmit={submit}>
+<Dialog title="Open network stream" text="HTTP(S), HLS, DASH, RTSP, RTMP or UDP." canSubmit={!!url.trim()} onsubmit={submit}>
   <input bind:this={input} bind:value={url} type="text" placeholder="https://example.com/video.m3u8" spellcheck="false" autocomplete="off" />
 </Dialog>

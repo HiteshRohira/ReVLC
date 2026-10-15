@@ -172,6 +172,7 @@
   </header>
 
   <main bind:this={mainEl}>
+    {#if settings.error}<p class="save-error" role="alert">{settings.error}</p>{/if}
     {#if !v || !info}
       <p class="muted">Loading…</p>
     {:else if tab === "general"}
@@ -526,6 +527,11 @@
     margin: 18px 4px 0;
     font-size: 13px;
     color: var(--muted);
+  }
+  .save-error {
+    margin: 0 4px 14px;
+    font-size: 12.5px;
+    color: #ff7b72;
   }
   .conflict {
     margin: 10px 4px 0;
