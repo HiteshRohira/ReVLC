@@ -353,11 +353,14 @@ impl MetaCache {
         self.dirty = true;
     }
 
-    /// Forgets files not in `keep`.
-    pub fn retain(&mut self, keep: &std::collections::HashSet<&str>) {
-        let before = self.map.len();
-        self.map.retain(|path, _| keep.contains(path.as_str()));
-        self.dirty |= self.map.len() != before;
+    /// Forgets files not in `keep`, returning them.
+    pub fn retain(&mut self, keep: &std::collections::HashSet<&str>) -> Vec<String> {
+        let gone: Vec<String> = self.map.keys().filter(|path| !keep.contains(path.as_str())).cloned().collect();
+        for path in &gone {
+            self.map.remove(path);
+        }
+        self.dirty |= !gone.is_empty();
+        gone
     }
 
     pub fn save(&mut self) {

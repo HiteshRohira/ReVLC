@@ -357,17 +357,23 @@ impl Core {
             keep.insert(self.library_thumb_path(&item.uri));
             keep.extend([&item.art, &item.group_art].into_iter().flatten().map(PathBuf::from));
         }
-        let Ok(entries) = std::fs::read_dir(&self.thumbs_dir) else { return };
-        for path in entries.flatten().map(|e| e.path()) {
-            let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-            if (name.starts_with("lib-") || name.starts_with("art-")) && !keep.contains(&path) {
-                let _ = std::fs::remove_file(&path);
+        // Job keys of what's deleted, so it's made again if the file comes back.
+        let mut forget: HashSet<String> = HashSet::new();
+        if let Ok(entries) = std::fs::read_dir(&self.thumbs_dir) {
+            for path in entries.flatten().map(|e| e.path()) {
+                let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                if (name.starts_with("lib-") || name.starts_with("art-")) && !keep.contains(&path) {
+                    let _ = std::fs::remove_file(&path);
+                    forget.insert(path.to_string_lossy().into_owned());
+                }
             }
         }
         let uris: HashSet<&str> = items.iter().map(|i| i.uri.as_str()).collect();
         let mut meta = self.meta.lock().unwrap_or_else(|e| e.into_inner());
-        meta.retain(&uris);
+        forget.extend(meta.retain(&uris).into_iter().map(|uri| format!("meta:{uri}")));
         meta.save();
+        drop(meta);
+        self.thumbs.tried.lock().unwrap_or_else(|e| e.into_inner()).retain(|key| !forget.contains(key));
     }
 
     /// Forgets the last library scan, so the next list sees new files.
@@ -624,6 +630,10 @@ impl Core {
     /// Stops playback, remembering where we were.
     fn stop(&self) {
         let _transition = self.transition();
+        self.stop_locked();
+    }
+
+    fn stop_locked(&self) {
         self.save_progress(true);
         self.vlc.stop();
         self.emit_state();
@@ -688,6 +698,30 @@ impl Core {
         if let Err(e) = self.add_items(pending, true) {
             self.notice("error", e);
         }
+    }
+
+    /// Replaces the current item (a playlist URL) with what it lists, and
+    /// plays the first. Transition lock held.
+    fn expand_current(&self, subitems: Vec<(String, Option<String>)>) -> Res {
+        let Some(index) = self.playlist().current else { return Ok(()) };
+        let uri = self.current_uri().unwrap_or_default();
+        let items = subitems
+            .into_iter()
+            .map(|(mrl, title)| {
+                // Without a title of its own, libVLC reports the location.
+                let title = title.filter(|t| *t != mrl && !t.contains("://"));
+                let mut item = Item::new(playlist_file::file_uri_path(&mrl).unwrap_or(mrl));
+                item.title = title.unwrap_or(item.title);
+                item
+            })
+            .collect();
+        self.playlist().replace(index, items);
+        // Its entries get their own history; the list itself wasn't watched.
+        let mut history = self.history();
+        history.remove(&uri);
+        let _ = history.save(true);
+        drop(history);
+        self.play_index_locked(index)
     }
 
     /// Moves to the next item; `auto` means the current one just finished.
@@ -774,10 +808,16 @@ fn pump_events(core: Arc<Core>, rx: Receiver<(i32, u64)>) {
         let generation = core.vlc.generation();
         let current = |ty: i32| batch.contains(&(ty, generation));
 
-        // Web pages (YouTube) and remote playlists end by expanding into the real stream.
-        if current(event::END_REACHED) && core.vlc.play_subitem() {
+        // Web pages and remote playlists end by expanding into what they hold:
+        // one stream plays in place, several replace the entry in the queue.
+        let subitems = if current(event::END_REACHED) { core.vlc.subitems() } else { Vec::new() };
+        if subitems.len() == 1 && core.vlc.play_subitem() {
             if let Some(uri) = core.current_uri() {
                 core.set_resume(&uri);
+            }
+        } else if subitems.len() > 1 {
+            if let Err(e) = core.expand_current(subitems) {
+                core.notice("error", e);
             }
         } else if current(event::END_REACHED) {
             if let Some(uri) = core.current_uri() {
@@ -1284,14 +1324,16 @@ fn hide_cursor(app: AppHandle) {
 }
 
 #[tauri::command]
-fn playlist_remove(player: tauri::State<Player>, index: usize) -> Res {
-    let core = player.core()?;
-    let was_current = core.playlist().remove(index);
-    if was_current {
-        core.vlc.stop();
-    }
-    core.emit_playlist();
-    Ok(())
+async fn playlist_remove(player: tauri::State<'_, Player>, index: usize) -> Res {
+    off_main(player, move |core| {
+        let _transition = core.transition();
+        let was_current = core.playlist().remove(index);
+        if was_current {
+            core.vlc.stop();
+        }
+        core.emit_playlist();
+    })
+    .await
 }
 
 #[tauri::command]
@@ -1308,7 +1350,8 @@ async fn playlist_clear(player: tauri::State<'_, Player>) -> Res {
 }
 
 fn playlist_clear_now(core: &Core) {
-    core.stop();
+    let _transition = core.transition();
+    core.stop_locked();
     core.playlist().clear();
     core.emit_playlist();
 }
