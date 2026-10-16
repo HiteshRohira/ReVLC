@@ -24,8 +24,8 @@ pub struct NameInfo {
 
 /// Release-name words that end a title ("Movie.2019.1080p.BluRay.x264").
 const JUNK: &[&str] = &[
-    "480p", "576p", "720p", "1080p", "1080i", "2160p", "4k", "uhd", "bluray", "blu-ray", "brrip", "bdrip", "webrip",
-    "web-dl", "webdl", "hdtv", "hdrip", "dvdrip", "remux", "x264", "x265", "h264", "h265", "hevc", "10bit", "hdr10",
+    "480p", "576p", "720p", "1080p", "1080i", "2160p", "4320p", "4k", "8k", "uhd", "bluray", "blu-ray", "brrip", "bdrip", "webrip",
+    "web-dl", "webdl", "hdtv", "hdrip", "dvdrip", "remux", "x264", "x265", "h264", "h265", "hevc", "av1", "vp9", "10bit", "hdr10",
     "proper", "repack", "aac", "ac3", "dts", "ddp5", "atmos", "xvid", "amzn", "subbed", "dubbed",
 ];
 
@@ -399,6 +399,7 @@ mod tests {
         assert_eq!(m.title, "Some Film");
         // All release words: spaced like other names, not left as the raw file name.
         assert_eq!(parse("/m/h264_4k_copy1.mp4").title, "h264 4k copy1");
+        assert_eq!(parse("/m/Test Jellyfin 8K AV1 10bit 100M.mp4").title, "Test Jellyfin");
     }
 
     #[test]

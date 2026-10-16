@@ -1045,14 +1045,16 @@ unsafe extern "C" fn grab_display(opaque: *mut c_void, _picture: *mut c_void) {
 impl Vlc {
     /// Decodes one frame about `fraction` of the way into `path` and saves it
     /// as a JPEG `width` pixels wide. Uses a separate, silent player so it
-    /// never disturbs playback. It decodes in hardware where it can: in
-    /// software, a 4K or 8K file costs gigabytes of frame buffers and
-    /// several cores. Formats without hardware support (AV1, VP9) get few
-    /// decoder threads, since one frame doesn't need many.
+    /// never disturbs playback. Playback starts at the keyframe nearest the
+    /// target rather than seeking there exactly, which would decode every
+    /// frame since the last keyframe: seconds of 4K or 8K AV1. Decoders get
+    /// few threads, since one frame doesn't need many.
     pub fn thumbnail(&self, path: &str, out: &Path, fraction: f64, width: u32) -> Result<(), String> {
         use std::sync::atomic::Ordering::Acquire;
         use std::time::{Duration, Instant};
 
+        let length = self.parse(path, 3000).map(|m| m.duration).unwrap_or(0);
+        let start = if length > 0 { ((length as f64 * fraction) as i64).clamp(0, (length - 1000).max(0)) } else { 0 };
         let grab = Box::into_raw(Box::new(Grab {
             buf: None,
             width: 0,
@@ -1061,8 +1063,8 @@ impl Vlc {
             frames: Default::default(),
         }));
         let wait = |deadline: Duration, done: &dyn Fn() -> bool| {
-            let start = Instant::now();
-            while !done() && start.elapsed() < deadline {
+            let begin = Instant::now();
+            while !done() && begin.elapsed() < deadline {
                 std::thread::sleep(Duration::from_millis(15));
             }
             done()
@@ -1077,14 +1079,16 @@ impl Vlc {
                 return Err("could not create the thumbnail player".into());
             }
             for opt in [
-                ":no-audio",
-                ":no-spu",
-                ":no-sub-autodetect-file",
-                ":avcodec-threads=2",
-                ":dav1d-thread-frames=1",
-                ":dav1d-thread-tiles=2",
+                ":no-audio".to_string(),
+                ":no-spu".to_string(),
+                ":no-sub-autodetect-file".to_string(),
+                ":avcodec-threads=2".to_string(),
+                // dav1d's thread count; its tile setting doesn't add any.
+                ":dav1d-thread-frames=2".to_string(),
+                ":input-fast-seek".to_string(),
+                format!(":start-time={:.3}", start as f64 / 1000.0),
             ] {
-                let o = cstr(opt);
+                let o = cstr(&opt);
                 (api.libvlc_media_add_option_flag)(media, o.as_ptr(), OPTION_TRUSTED | OPTION_UNIQUE);
             }
             (api.libvlc_media_player_set_media)(mp, media);
@@ -1093,21 +1097,9 @@ impl Vlc {
             (api.libvlc_video_set_format_callbacks)(mp, grab_format, None);
             (api.libvlc_media_player_play)(mp);
 
+            // A few frames in, past any grey first frame of an open GOP.
             let g = &*grab;
-            let started = wait(Duration::from_secs(5), &|| g.frames.load(Acquire) > 0);
-            let mut ok = started;
-            if started {
-                let length = (api.libvlc_media_player_get_length)(mp);
-                if length > 0 {
-                    let target = ((length as f64 * fraction) as i64).clamp(0, (length - 1000).max(0));
-                    (api.libvlc_media_player_set_time)(mp, target);
-                    let before = g.frames.load(Acquire);
-                    // A few frames after the seek, so we skip any stale one.
-                    ok = wait(Duration::from_secs(6), &|| {
-                        g.frames.load(Acquire) >= before + 3 && (api.libvlc_media_player_get_time)(mp) >= target - 2000
-                    });
-                }
-            }
+            let ok = wait(Duration::from_secs(10), &|| g.frames.load(Acquire) >= 3);
             (api.libvlc_media_player_stop)(mp);
             (api.libvlc_media_player_release)(mp);
             let g = Box::from_raw(grab);
