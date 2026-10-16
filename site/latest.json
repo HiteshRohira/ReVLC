@@ -1,15 +1,15 @@
 {
-  "version": "0.2.3",
-  "notes": "Windows: a title strip with Media, Playback, Audio, Video, Subtitles, Tools and Help menus. Fixes overlapping toolbar buttons, macOS key symbols on Windows, and the Settings window position.",
-  "pub_date": "2026-10-16T02:43:42Z",
+  "version": "0.2.4",
+  "notes": "Opens every file type VLC opens, including when ReVLC isn't running. Loads subtitle files into the playing video. Much faster, lighter thumbnails with hardware decoding (AV1 and 8K now work). Faster startup. Turning hardware decoding off in settings works again. Windows: offers ReVLC for media files instead of taking them over, app-drawn menus, dropdowns and tooltips, accessibility tools in the title strip.",
+  "pub_date": "2026-10-16T17:53:51Z",
   "platforms": {
     "darwin-aarch64": {
-      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSVlR1Wml6L0lBejdoemlJQnh0MHpDNUpYdmV4WjJ6bThHdDlxdnloUFJmMGVKTkUrM1FrdVhQZGJWWEpPeEpDbnpRa3lnVGx6Sm9HZXZtY3kyaGt3bmZYY0JXYzFoL0FjPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkyMTE4NDA0CWZpbGU6UmVWTEMuYXBwLnRhci5negl2ZXJzaW9uOjAuMi4zCjVoY3RvdDlIbno0K3Z0SzdMdkpBRHZuaDRhTmxtZHlTditsUHVhUG9oZ0U4YWdpTDIrd2J5ejltaWR4RDVPTVg0ZU1qTU9XYUVzRlNZWjdCK1VFL0FBPT0K",
-      "url": "https://github.com/HiteshRohira/ReVLC/releases/download/v0.2.3-alpha/ReVLC-0.2.3-alpha-arm64.app.tar.gz"
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSVlR1Wml6L0lBejBsQjJsZHVudVYxMWFhQVNCOEZVaTJZNWFyVUdjT0RTREJ5dUh3Z1k1bTB3MnphSTdnRnhzUVNOU29lZmlWQ2ZFS1l0bEx2bGJRc25Hc09rZEZUeHdFPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkyMTczMTY5CWZpbGU6UmVWTEMuYXBwLnRhci5negl2ZXJzaW9uOjAuMi40Cm9jTytrbEF0WFk0K3ZaSTNXVkpVeXVNeDFvSGlvdTU4cUdiVTBvT2ZnR0pyeGl1aVY4MUZZZFdleFRLNFBjU3c2QzVrVzJMNFhwZ2xPb3B0OUQ2bkNnPT0K",
+      "url": "https://github.com/HiteshRohira/ReVLC/releases/download/v0.2.4-alpha/ReVLC-0.2.4-alpha-arm64.app.tar.gz"
     },
     "windows-x86_64": {
-      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSVlR1Wml6L0lBejJrQ1MvaFVtYXNrd29oSlc3VXRabjBHMEU2dFdhVEIvVnBiU3NnTWVIWmtvZTdNNC9FUDgzTUJrRVI2cCttWENWWFhBREhkNkFkdzQ5aXQwKy9pcGdNPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkyMTE4NTYwCWZpbGU6UmVWTENfMC4yLjNfeDY0LXNldHVwLmV4ZQl2ZXJzaW9uOjAuMi4zCkJJbFd4cENNVWFFM1ZIa3dwcDRQZ042ZmtvM2tGRUJxbTJUVXFjTHhGTTdNVU92ZjBOT2VRaU1mMG11WlpJeW5PNmUzUmhsZmcxU1VSYUE0Vi9tY0JnPT0K",
-      "url": "https://github.com/HiteshRohira/ReVLC/releases/download/v0.2.3-alpha/ReVLC-0.2.3-alpha-x64-setup.exe"
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSVlR1Wml6L0lBenpKc21kWlBQaW0vbFhtSnJGYjdkRzJTSG9PZ1pMUVNINVgwOXhVK2orYi83QjhlZjNuYWcrSFVrYjlUM1ZzeFJxandXN2tHUWo1NjliQVVNYjdhQ2djPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkyMTczMjEwCWZpbGU6UmVWTENfMC4yLjRfeDY0LXNldHVwLmV4ZQl2ZXJzaW9uOjAuMi40CnJrVklHTlhndWk4aThCcjg2QTl4OTBVd0Q5R1B3a21zQkorL3ZyOWEwY2luaklhQ2ZHb0ErR3htVGoxWVJyQWV5SGVHVlRXWVlEYnhYWDJaNkd2Q0JBPT0K",
+      "url": "https://github.com/HiteshRohira/ReVLC/releases/download/v0.2.4-alpha/ReVLC-0.2.4-alpha-x64-setup.exe"
     }
   }
 }
