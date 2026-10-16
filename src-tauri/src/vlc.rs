@@ -5,7 +5,7 @@
 
 use std::ffi::{CStr, CString, c_char, c_float, c_int, c_uint, c_void};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::mpsc::Sender;
 
 use libloading::Library;
@@ -281,6 +281,8 @@ pub struct Vlc {
     core: CoreApi,
     inst: *mut Inst,
     mp: *mut Player,
+    /// Hardware decoding turned off; see [`Vlc::play_media`].
+    software_decoding: AtomicBool,
     pub version: String,
 }
 
@@ -411,7 +413,7 @@ impl Vlc {
             // The web UI handles all keyboard and mouse input.
             (api.libvlc_video_set_key_input)(mp, 0);
             (api.libvlc_video_set_mouse_input)(mp, 0);
-            Ok(Self { api, core, inst, mp, version })
+            Ok(Self { api, core, inst, mp, software_decoding: AtomicBool::new(false), version })
         }
     }
 
@@ -444,6 +446,11 @@ impl Vlc {
     /// Takes effect for the next video; reopen the current one to apply now.
     pub fn set_config(&self, name: &str, value: &ConfigValue) {
         put_config(&self.core, self.inst, name, value);
+    }
+
+    /// Turns hardware decoding on or off, from the next video.
+    pub fn set_hardware_decoding(&self, on: bool) {
+        self.software_decoding.store(!on, Ordering::Relaxed);
     }
 
     /// Shows the media title on the video when playback starts. `position`
@@ -538,6 +545,13 @@ impl Vlc {
 
     unsafe fn play_media(&self, media: *mut Media) -> c_int {
         unsafe {
+            // Attaching the video view gives the player its own "avcodec-hw",
+            // which hides the configured one from decoders. An option on the
+            // media comes before the player's.
+            if self.software_decoding.load(Ordering::Relaxed) {
+                let o = cstr(":avcodec-hw=none");
+                (self.api.libvlc_media_add_option_flag)(media, o.as_ptr(), OPTION_TRUSTED | OPTION_UNIQUE);
+            }
             (self.api.libvlc_media_player_set_media)(self.mp, media);
             GENERATION.fetch_add(1, Ordering::AcqRel);
             (self.api.libvlc_media_player_play)(self.mp)

@@ -268,6 +268,7 @@ impl Core {
         let new = settings.vlc_config(&self.languages);
         let old = previous.map(|p| p.vlc_config(&self.languages));
         let mut changed = false;
+        self.vlc.set_hardware_decoding(settings.hardware_decoding);
         for (i, (name, value)) in new.iter().enumerate() {
             if old.as_ref().is_none_or(|o| o[i].1 != *value) {
                 self.vlc.set_config(name, value);
@@ -1605,7 +1606,10 @@ fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     // Extra libVLC options for debugging, e.g. REVLC_VLC_ARGS="--verbose=2".
     let args: Vec<String> = std::env::var("REVLC_VLC_ARGS").unwrap_or_default().split_whitespace().map(String::from).collect();
     let vlc = match Vlc::load(resource_dir.as_deref(), &args, &settings.vlc_config(&languages)) {
-        Ok(vlc) => vlc,
+        Ok(vlc) => {
+            vlc.set_hardware_decoding(settings.hardware_decoding);
+            vlc
+        }
         Err(e) => {
             eprintln!("revlc: {e}");
             app.manage(Player(Err(e)));
