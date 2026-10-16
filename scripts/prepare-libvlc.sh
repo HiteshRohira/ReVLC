@@ -63,7 +63,13 @@ prepare_windows() {
   rm -rf "$DEST/plugins/gui"
   # Lua scripts (sites like Vimeo, playlist parsers) and HRTF data.
   cp -r "$src/lua" "$src/hrtfs" "$DEST/"
-  # A plugin cache makes libVLC start faster.
+  # A plugin cache makes libVLC start faster. libVLC checks each plugin's
+  # modification time against it, and the NSIS installer keeps times only
+  # to 2 seconds: a plugin copied in an odd second looks stale once
+  # installed, and libVLC loads it again on every launch. One even second
+  # for all of them survives the rounding.
+  local stamp=$(( $(date +%s) / 2 * 2 ))
+  find "$DEST/plugins" -type f -exec touch -d "@$stamp" {} +
   "$src/vlc-cache-gen.exe" "$DEST/plugins"
 }
 
