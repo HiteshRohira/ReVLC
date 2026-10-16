@@ -208,7 +208,7 @@
       <h3>Privacy</h3>
       <div class="group">
         <Row label="Share anonymous usage statistics"
-          help="Your app version and computer type, and how quickly videos start and seek. Never file names, titles or links.">
+          help="Your app version and computer type, and how quickly videos start and seek. Never what you watch.">
           {@render toggle("analytics")}
         </Row>
       </div>
