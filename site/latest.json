@@ -1,15 +1,15 @@
 {
-  "version": "0.2.2",
-  "notes": "Security and stability fixes: libVLC 3.0.24, safer playlist files, no crash on very short videos, faster library, remote playlists play every entry, queue reordering on Windows. YouTube links no longer play (VLC 3.0.24 removed them).",
-  "pub_date": "2026-10-15T17:27:35Z",
+  "version": "0.2.3",
+  "notes": "Windows: a title strip with Media, Playback, Audio, Video, Subtitles, Tools and Help menus. Fixes overlapping toolbar buttons, macOS key symbols on Windows, and the Settings window position.",
+  "pub_date": "2026-10-16T02:43:42Z",
   "platforms": {
     "darwin-aarch64": {
-      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSVlR1Wml6L0lBejBMRGJrTWJYU3IwMlhYcnEvQTdoZFlHZDhxU3E2WXdqcGk5Ris0MXozMnVBL2pDblhjbVB6VkZOU2RBeTRoTDFnd3p2UExoNXZCcmM0bC9OTm95VXd3PQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkyMDg0ODE4CWZpbGU6UmVWTEMuYXBwLnRhci5negl2ZXJzaW9uOjAuMi4yCk85Y0RNVnZDSk9QSFR6TThQWmQ3QjB6ZWsvd3RNSm9hQVl1VTNhMnRIdkYyb2F5aGc0NWJrS2VqaHZocE81Sm8rcW5NL2VDM2VTTW5tRzZhMWZUb0FBPT0K",
-      "url": "https://github.com/HiteshRohira/ReVLC/releases/download/v0.2.2-alpha/ReVLC-0.2.2-alpha-arm64.app.tar.gz"
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSVlR1Wml6L0lBejdoemlJQnh0MHpDNUpYdmV4WjJ6bThHdDlxdnloUFJmMGVKTkUrM1FrdVhQZGJWWEpPeEpDbnpRa3lnVGx6Sm9HZXZtY3kyaGt3bmZYY0JXYzFoL0FjPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkyMTE4NDA0CWZpbGU6UmVWTEMuYXBwLnRhci5negl2ZXJzaW9uOjAuMi4zCjVoY3RvdDlIbno0K3Z0SzdMdkpBRHZuaDRhTmxtZHlTditsUHVhUG9oZ0U4YWdpTDIrd2J5ejltaWR4RDVPTVg0ZU1qTU9XYUVzRlNZWjdCK1VFL0FBPT0K",
+      "url": "https://github.com/HiteshRohira/ReVLC/releases/download/v0.2.3-alpha/ReVLC-0.2.3-alpha-arm64.app.tar.gz"
     },
     "windows-x86_64": {
-      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSVlR1Wml6L0lBejRPdEdwS2JUVzltOFFpZHNuTldUYk5mY1BYblkwaVYwU0IzV3d0cThtOXMwZ2Q2N2QvY3F4U0JIKzhIT2JOcGJJeHVSeFY2Z2RxTG9JU1BrVThrZndZPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkyMDg1MTc0CWZpbGU6UmVWTENfMC4yLjJfeDY0LXNldHVwLmV4ZQl2ZXJzaW9uOjAuMi4yCmlXVGJ4REdiWGc2eGRnOXZrMzJ4dDFxUzU4OWVPayswajR1OU9FdFdVTUhyb2FjVllzZG5zRTA0K2g0K0NOa2FSSG81TDk5UEJtWjl2aGZNdHNNckNBPT0K",
-      "url": "https://github.com/HiteshRohira/ReVLC/releases/download/v0.2.2-alpha/ReVLC-0.2.2-alpha-x64-setup.exe"
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSVlR1Wml6L0lBejJrQ1MvaFVtYXNrd29oSlc3VXRabjBHMEU2dFdhVEIvVnBiU3NnTWVIWmtvZTdNNC9FUDgzTUJrRVI2cCttWENWWFhBREhkNkFkdzQ5aXQwKy9pcGdNPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkyMTE4NTYwCWZpbGU6UmVWTENfMC4yLjNfeDY0LXNldHVwLmV4ZQl2ZXJzaW9uOjAuMi4zCkJJbFd4cENNVWFFM1ZIa3dwcDRQZ042ZmtvM2tGRUJxbTJUVXFjTHhGTTdNVU92ZjBOT2VRaU1mMG11WlpJeW5PNmUzUmhsZmcxU1VSYUE0Vi9tY0JnPT0K",
+      "url": "https://github.com/HiteshRohira/ReVLC/releases/download/v0.2.3-alpha/ReVLC-0.2.3-alpha-x64-setup.exe"
     }
   }
 }
