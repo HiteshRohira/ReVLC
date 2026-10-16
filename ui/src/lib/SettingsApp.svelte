@@ -8,6 +8,7 @@
   import { settings, type Settings } from "./settings.svelte";
   import { ACCENTS, theme, type AccentId } from "./theme.svelte";
   import Row from "./Row.svelte";
+  import Select from "./Select.svelte";
   import WindowControls from "./WindowControls.svelte";
   import { isMac } from "./platform";
 
@@ -123,18 +124,12 @@
 <svelte:window onkeydowncapture={onKey} />
 
 {#snippet toggle(key: keyof Settings)}
-  <button class="switch" class:on={v![key]} role="switch" aria-checked={!!v![key]} aria-label={key}
+  <button class="switch" class:on={v![key]} role="switch" aria-checked={!!v![key]}
     onclick={() => settings.set({ [key]: !v![key] } as Partial<Settings>)}></button>
 {/snippet}
 
 {#snippet choice(key: keyof Settings, options: [number | string, string][], debounce = false)}
-  <select value={String(v![key])} onchange={(e) => {
-    const raw = e.currentTarget.value;
-    const val = typeof options[0][0] === "number" ? Number(raw) : raw;
-    settings.set({ [key]: val } as Partial<Settings>, debounce);
-  }}>
-    {#each options as [val, label]}<option value={String(val)}>{label}</option>{/each}
-  </select>
+  <Select value={v![key] as number | string} {options} onchange={(val) => settings.set({ [key]: val } as Partial<Settings>, debounce)} />
 {/snippet}
 
 {#snippet color(key: keyof Settings)}
@@ -195,9 +190,8 @@
           {@render choice("resume", [["ask", "Ask"], ["always", "Always"], ["never", "Never"]])}
         </Row>
         <Row label="When a video ends">
-          <select value={v.stopAfterEach ? "stop" : "next"} onchange={(e) => settings.set({ stopAfterEach: e.currentTarget.value === "stop" })}>
-            <option value="next">Play the next item</option><option value="stop">Stop</option>
-          </select>
+          <Select value={v.stopAfterEach ? "stop" : "next"} options={[["next", "Play the next item"], ["stop", "Stop"]]}
+            onchange={(val) => settings.set({ stopAfterEach: val === "stop" })} />
         </Row>
         <Row label="Pause when minimised">{@render toggle("pauseWhenMinimized")}</Row>
       </div>
@@ -264,11 +258,9 @@
       <h3>Language</h3>
       <div class="group">
         <Row label="Preferred language" help="Subtitles in these languages turn on automatically. VLC's default is none.">
-          <select value={v.subtitleLanguage === null ? "system" : "custom"}
-            onchange={(e) => settings.set({ subtitleLanguage: e.currentTarget.value === "system" ? null : info.systemLanguages.join(",") })}>
-            <option value="system">System languages ({info.systemLanguages.join(", ") || "none"})</option>
-            <option value="custom">Custom…</option>
-          </select>
+          <Select value={v.subtitleLanguage === null ? "system" : "custom"}
+            options={[["system", `System languages (${info.systemLanguages.join(", ") || "none"})`], ["custom", "Custom…"]]}
+            onchange={(val) => settings.set({ subtitleLanguage: val === "system" ? null : info.systemLanguages.join(",") })} />
         </Row>
         {#if v.subtitleLanguage !== null}
           <Row label="Languages" help="Two- or three-letter codes; add “any” to fall back to any track.">{@render text("subtitleLanguage", "en, fr")}</Row>
@@ -400,7 +392,6 @@
     background: var(--sidebar);
     border: 1px solid var(--border);
   }
-  select,
   .text,
   .num {
     height: 28px;
@@ -413,7 +404,6 @@
     font-size: 13px;
     max-width: 280px;
   }
-  select:focus,
   .text:focus,
   .num:focus {
     outline: 2px solid var(--acc);
@@ -425,6 +415,12 @@
   .num {
     width: 90px;
     text-align: right;
+  }
+  /* The webview's spin arrows; the arrow keys still step the value. */
+  .num::-webkit-inner-spin-button,
+  .num::-webkit-outer-spin-button {
+    -webkit-appearance: none;
+    margin: 0;
   }
   .unit {
     min-width: 34px;

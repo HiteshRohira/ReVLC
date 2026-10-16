@@ -46,6 +46,11 @@ button:disabled {
   opacity: 0.4;
 }
 
+/* Thumbnails and icons aren't web images to drag out of the window. */
+img {
+  -webkit-user-drag: none;
+}
+
 :focus-visible {
   outline: 2px solid var(--acc);
   outline-offset: 2px;

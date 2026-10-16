@@ -2,6 +2,7 @@
   import { onMount } from "svelte";
   import { invoke } from "@tauri-apps/api/core";
   import Dialog from "./Dialog.svelte";
+  import Select from "./Select.svelte";
   import { player, type Capture, type Devices } from "./player.svelte";
   import { ui } from "./ui.svelte";
   import { isMac } from "./platform";
@@ -51,22 +52,16 @@
   </div>
 
   <label for="capture-device">{kind === "screen" ? "Display" : "Device"}</label>
-  <select id="capture-device" bind:value={device} disabled={!list.length}>
-    {#each list as d (d.id)}<option value={d.id}>{d.name}</option>{:else}<option value="">No {kind} found</option>{/each}
-  </select>
+  <Select id="capture-device" class="field" bind:value={device} disabled={!list.length}
+    options={list.length ? list.map((d) => [d.id, d.name]) : [["", `No ${kind} found`]]} />
 
   {#if kind !== "microphone"}
     <label for="capture-audio">Audio</label>
-    <select id="capture-audio" bind:value={audio}>
-      <option value="">None</option>
-      {#each devices.audio as d (d.id)}<option value={d.id}>{d.name}</option>{/each}
-    </select>
+    <Select id="capture-audio" class="field" bind:value={audio} options={[["", "None"], ...devices.audio.map((d): [string, string] => [d.id, d.name])]} />
   {/if}
 
   {#if kind === "screen"}
     <label for="capture-fps">Frame rate</label>
-    <select id="capture-fps" bind:value={fps}>
-      {#each FPS as f}<option value={f}>{f} fps</option>{/each}
-    </select>
+    <Select id="capture-fps" class="field" bind:value={fps} options={FPS.map((f): [number, string] => [f, `${f} fps`])} />
   {/if}
 </Dialog>

@@ -1172,8 +1172,38 @@ fn show_settings(app: &AppHandle) -> tauri::Result<()> {
     let builder = builder.title_bar_style(tauri::TitleBarStyle::Overlay).hidden_title(true);
     #[cfg(not(target_os = "macos"))]
     let builder = builder.decorations(false);
-    builder.build()?;
+    let _window = builder.build()?;
+    #[cfg(windows)]
+    quiet_webview(&_window);
     Ok(())
+}
+
+/// Turns off what WebView2 does as a browser: its shortcuts (F5 and Ctrl+R
+/// reload the UI mid-playback, Ctrl+P prints, Ctrl+F finds, F7 turns on caret
+/// browsing), form autofill, pinch zoom and swipe navigation. Copy, paste and
+/// the other editing keys aren't browser shortcuts and keep working.
+#[cfg(windows)]
+fn quiet_webview(window: &tauri::WebviewWindow) {
+    use webview2_com::Microsoft::Web::WebView2::Win32::{
+        ICoreWebView2Settings3, ICoreWebView2Settings4, ICoreWebView2Settings5, ICoreWebView2Settings6,
+    };
+    use windows::core::Interface;
+    let _ = window.with_webview(|webview| unsafe {
+        let Ok(settings) = webview.controller().CoreWebView2().and_then(|core| core.Settings()) else { return };
+        if let Ok(s) = settings.cast::<ICoreWebView2Settings3>() {
+            let _ = s.SetAreBrowserAcceleratorKeysEnabled(false);
+        }
+        if let Ok(s) = settings.cast::<ICoreWebView2Settings4>() {
+            let _ = s.SetIsGeneralAutofillEnabled(false);
+            let _ = s.SetIsPasswordAutosaveEnabled(false);
+        }
+        if let Ok(s) = settings.cast::<ICoreWebView2Settings5>() {
+            let _ = s.SetIsPinchZoomEnabled(false);
+        }
+        if let Ok(s) = settings.cast::<ICoreWebView2Settings6>() {
+            let _ = s.SetIsSwipeNavigationEnabled(false);
+        }
+    });
 }
 
 /// Installed font families, for the subtitle font picker. Main thread only.
@@ -1632,6 +1662,8 @@ fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     let _ = core.add(args, true);
 
     let window = app.get_webview_window("main").ok_or("main window missing")?;
+    #[cfg(windows)]
+    quiet_webview(&window);
     #[cfg(windows)]
     let hwnd = window.hwnd()?.0 as isize;
     let attach = core.clone();

@@ -60,9 +60,11 @@
     font-size: 13px;
   }
   .dialog :global(input[type="text"]),
-  .dialog :global(select) {
+  .dialog :global(.select.field) {
     box-sizing: border-box;
     width: 100%;
+    max-width: none;
+    height: auto;
     padding: 10px 12px;
     border-radius: 8px;
     border: 1px solid var(--border);
@@ -72,7 +74,8 @@
     outline: none;
   }
   .dialog :global(input[type="text"]:focus),
-  .dialog :global(select:focus) {
+  .dialog :global(.select.field:focus-visible),
+  .dialog :global(.select.field.open) {
     border-color: var(--acc);
   }
   .dialog :global(label) {
@@ -82,8 +85,32 @@
     font-weight: 600;
     color: var(--muted);
   }
+  /* Drawn here rather than by the webview, which uses the Windows control. */
   .dialog :global(input[type="checkbox"]) {
-    accent-color: var(--acc);
+    -webkit-appearance: none;
+    appearance: none;
+    display: inline-grid;
+    place-items: center;
+    width: 16px;
+    height: 16px;
+    margin: 0 6px 0 0;
+    vertical-align: -3px;
+    border-radius: 4px;
+    border: 1px solid rgb(255 255 255 / 0.3);
+    background: rgb(0 0 0 / 0.3);
+  }
+  .dialog :global(input[type="checkbox"]:checked) {
+    border-color: var(--acc);
+    background: var(--acc);
+  }
+  .dialog :global(input[type="checkbox"]:checked::after) {
+    content: "";
+    width: 4px;
+    height: 8px;
+    margin-top: -2px;
+    border: solid var(--on-acc);
+    border-width: 0 2px 2px 0;
+    transform: rotate(45deg);
   }
   /* Segmented control: a row of mutually exclusive buttons. */
   .dialog :global(.seg) {

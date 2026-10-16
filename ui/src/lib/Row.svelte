@@ -1,11 +1,24 @@
 <script lang="ts">
-  import type { Snippet } from "svelte";
+  import { onMount, type Snippet } from "svelte";
   let { label, help, children }: { label: string; help?: string; children: Snippet } = $props();
+
+  const id = `row-${Math.random().toString(36).slice(2, 8)}`;
+  let ctl: HTMLElement;
+
+  // Screen readers name the row's switch, dropdown or field after its label,
+  // and read the help text as its description.
+  onMount(() => {
+    for (const el of ctl.querySelectorAll("input, [role=switch], [role=combobox]")) {
+      if (el.hasAttribute("aria-label") || el.hasAttribute("aria-labelledby")) continue;
+      el.setAttribute("aria-labelledby", id);
+      if (help) el.setAttribute("aria-describedby", `${id}-help`);
+    }
+  });
 </script>
 
 <div class="row">
-  <div class="lab">{label}{#if help}<small>{help}</small>{/if}</div>
-  <div class="ctl">{@render children()}</div>
+  <div class="lab"><span {id}>{label}</span>{#if help}<small id="{id}-help">{help}</small>{/if}</div>
+  <div class="ctl" bind:this={ctl}>{@render children()}</div>
 </div>
 
 <style>

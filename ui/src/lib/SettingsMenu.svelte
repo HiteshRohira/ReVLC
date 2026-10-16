@@ -171,7 +171,7 @@
         <div class="bm">
           {#if editing === b.time}
             <!-- svelte-ignore a11y_autofocus -->
-            <input class="rename" value={b.name} autofocus aria-label="Bookmark name"
+            <input class="rename" value={b.name} autofocus aria-label="Bookmark name" spellcheck="false" autocomplete="off"
               onkeydown={(e) => { e.stopPropagation(); if (e.key === "Enter") rename(b.time, e.currentTarget.value); if (e.key === "Escape") editing = null; }}
               onblur={(e) => rename(b.time, e.currentTarget.value)} />
           {:else}
