@@ -47,7 +47,7 @@ struct Core {
     /// Set once the video view exists; opens before that are queued so
     /// libVLC never falls back to its own window.
     ready: AtomicBool,
-    pending: Mutex<Vec<Item>>,
+    pending: Mutex<Pending>,
     history: Mutex<History>,
     /// What to do once the current item starts playing.
     resume: Mutex<Option<PendingSeek>>,
@@ -87,6 +87,18 @@ struct LibraryScan {
 /// How long a library scan is reused. Refreshes come every couple of
 /// seconds while thumbnails are made; new files show up after this.
 const LIBRARY_SCAN_TTL: Duration = Duration::from_secs(30);
+
+/// Files macOS hands over before `setup` has made the player: on a cold
+/// launch from Finder, the open event can come first. `setup` plays them.
+/// Only touched on the main thread.
+static EARLY_OPENS: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
+/// What was opened before the UI was ready, to play once it is.
+#[derive(Default)]
+struct Pending {
+    items: Vec<Item>,
+    subtitles: Vec<String>,
+}
 
 #[derive(Default)]
 struct SleepTimer {
@@ -644,6 +656,7 @@ impl Core {
     /// files add their entries.
     fn add(&self, uris: Vec<String>, play: bool) -> Result<(), String> {
         let mut items = Vec::new();
+        let mut subtitles = Vec::new();
         for uri in uris.into_iter().map(playlist_file::native_path) {
             let path = Path::new(&uri);
             if uri.contains("://") {
@@ -661,11 +674,13 @@ impl Core {
                 }
             } else if playlist_file::is_playlist(path) {
                 items.extend(playlist_file::read(path)?);
+            } else if library::is_subtitle(path) {
+                subtitles.push(uri);
             } else {
                 items.push(Item::new(uri));
             }
         }
-        self.add_items(items, play)
+        self.add_with_subtitles(items, subtitles, play)
     }
 
     /// Plays files the system handed us on the main thread, from another
@@ -680,22 +695,47 @@ impl Core {
     }
 
     fn add_items(&self, items: Vec<Item>, play: bool) -> Result<(), String> {
-        if items.is_empty() {
-            return Ok(());
+        self.add_with_subtitles(items, Vec::new(), play)
+    }
+
+    /// Like VLC, subtitle files go into what's playing, or into the video
+    /// opened along with them.
+    fn add_with_subtitles(&self, items: Vec<Item>, subtitles: Vec<String>, play: bool) -> Result<(), String> {
+        {
+            // Checked under the lock `mark_ready` takes, so nothing can land
+            // in `pending` after it has been emptied.
+            let mut pending = self.pending.lock().unwrap_or_else(|e| e.into_inner());
+            if !self.ready.load(Ordering::Acquire) {
+                pending.items.extend(items);
+                pending.subtitles.extend(subtitles);
+                return Ok(());
+            }
         }
-        if !self.ready.load(Ordering::Acquire) {
-            self.pending.lock().unwrap_or_else(|e| e.into_inner()).extend(items);
-            return Ok(());
+        if !items.is_empty() {
+            let first = self.playlist().add(items);
+            self.emit_playlist();
+            if play {
+                self.play_index(first)?;
+            }
         }
-        let first = self.playlist().add(items);
-        self.emit_playlist();
-        if play { self.play_index(first) } else { Ok(()) }
+        for uri in subtitles {
+            if self.current_uri().is_none() {
+                self.notice("error", "Open a video first, then its subtitles");
+                break;
+            }
+            self.vlc.add_subtitle(&file_uri(&uri))?;
+            self.notice("osd", "Subtitles added");
+        }
+        Ok(())
     }
 
     fn mark_ready(&self) {
-        self.ready.store(true, Ordering::Release);
-        let pending = std::mem::take(&mut *self.pending.lock().unwrap_or_else(|e| e.into_inner()));
-        if let Err(e) = self.add_items(pending, true) {
+        let pending = {
+            let mut pending = self.pending.lock().unwrap_or_else(|e| e.into_inner());
+            self.ready.store(true, Ordering::Release);
+            std::mem::take(&mut *pending)
+        };
+        if let Err(e) = self.add_with_subtitles(pending.items, pending.subtitles, true) {
             self.notice("error", e);
         }
     }
@@ -1586,8 +1626,9 @@ fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     let pump = core.clone();
     thread::Builder::new().name("vlc-events".into()).spawn(move || pump_events(pump, rx))?;
 
-    // Files passed on the command line.
-    let args: Vec<String> = std::env::args().skip(1).filter(|a| !a.starts_with('-')).collect();
+    // Files passed on the command line, then any Finder opened before now.
+    let mut args: Vec<String> = std::env::args().skip(1).filter(|a| !a.starts_with('-')).collect();
+    args.append(&mut EARLY_OPENS.lock().unwrap_or_else(|e| e.into_inner()));
     let _ = core.add(args, true);
 
     let window = app.get_webview_window("main").ok_or("main window missing")?;
@@ -1750,8 +1791,13 @@ pub fn run() {
                 .into_iter()
                 .map(|u| u.to_file_path().map(|p| p.to_string_lossy().into_owned()).unwrap_or_else(|_| u.to_string()))
                 .collect();
-            if let Some(Ok(core)) = handle.try_state::<Player>().as_deref().map(Player::core) {
-                core.add_from_main(uris);
+            match handle.try_state::<Player>() {
+                Some(player) => {
+                    if let Ok(core) = player.core() {
+                        core.add_from_main(uris);
+                    }
+                }
+                None => EARLY_OPENS.lock().unwrap_or_else(|e| e.into_inner()).extend(uris),
             }
         }
         #[cfg(not(target_os = "macos"))]

@@ -1034,8 +1034,11 @@ unsafe extern "C" fn grab_display(opaque: *mut c_void, _picture: *mut c_void) {
 
 impl Vlc {
     /// Decodes one frame about `fraction` of the way into `path` and saves it
-    /// as a JPEG `width` pixels wide. Uses a separate, silent, software-decoded
-    /// player so it never disturbs playback.
+    /// as a JPEG `width` pixels wide. Uses a separate, silent player so it
+    /// never disturbs playback. It decodes in hardware where it can: in
+    /// software, a 4K or 8K file costs gigabytes of frame buffers and
+    /// several cores. Formats without hardware support (AV1, VP9) get few
+    /// decoder threads, since one frame doesn't need many.
     pub fn thumbnail(&self, path: &str, out: &Path, fraction: f64, width: u32) -> Result<(), String> {
         use std::sync::atomic::Ordering::Acquire;
         use std::time::{Duration, Instant};
@@ -1063,7 +1066,14 @@ impl Vlc {
                 drop(Box::from_raw(grab));
                 return Err("could not create the thumbnail player".into());
             }
-            for opt in [":no-audio", ":no-spu", ":codec=avcodec", ":avcodec-hw=none", ":no-sub-autodetect-file"] {
+            for opt in [
+                ":no-audio",
+                ":no-spu",
+                ":no-sub-autodetect-file",
+                ":avcodec-threads=2",
+                ":dav1d-thread-frames=1",
+                ":dav1d-thread-tiles=2",
+            ] {
                 let o = cstr(opt);
                 (api.libvlc_media_add_option_flag)(media, o.as_ptr(), OPTION_TRUSTED | OPTION_UNIQUE);
             }

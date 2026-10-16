@@ -13,7 +13,31 @@ VLC_VERSION="${VLC_VERSION:-3.0.24}"
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 DEST="$ROOT/src-tauri/vlc"
 
+# A plugin cache makes libVLC start faster: without one it opens every
+# plugin on each launch. VLC.app's own cache lists the plugins we drop, so
+# libVLC writes a fresh one; it stays valid because bundling keeps each
+# plugin's size and modification time, which is what libVLC checks.
+make_plugin_cache_macos() {
+  rm -f "$DEST/plugins/plugins.dat"
+  VLC_PLUGIN_PATH="$DEST/plugins" python3 -I -c '
+import ctypes, sys
+lib = sys.argv[1] + "/lib/"
+ctypes.CDLL(lib + "libvlccore.dylib", mode=ctypes.RTLD_GLOBAL)
+vlc = ctypes.CDLL(lib + "libvlc.dylib")
+vlc.libvlc_new.restype = ctypes.c_void_p
+args = [b"--reset-plugins-cache", b"--ignore-config", b"--quiet"]
+inst = vlc.libvlc_new(len(args), (ctypes.c_char_p * len(args))(*args))
+if not inst:
+    sys.exit("libvlc_new failed")
+vlc.libvlc_release(ctypes.c_void_p(inst))
+' "$DEST"
+  [[ -f "$DEST/plugins/plugins.dat" ]] || { echo "libVLC did not write plugins.dat" >&2; exit 1; }
+}
+
 if [[ $# -eq 0 && "$(cat "$DEST/VERSION" 2>/dev/null)" == "$VLC_VERSION" ]]; then
+  if [[ "$(uname -s)" == Darwin && ! -f "$DEST/plugins/plugins.dat" ]]; then
+    make_plugin_cache_macos
+  fi
   echo "libVLC $VLC_VERSION is already in $DEST"
   exit 0
 fi
@@ -75,10 +99,12 @@ prepare_macos() {
   mkdir -p "$DEST/share"
   # Resolve symlinks (libvlc.dylib -> libvlc.5.dylib) so bundling copies real files.
   rsync -aL "$src/lib/" "$DEST/lib/"
-  # VLC's own Cocoa interface isn't needed; ReVLC is the interface.
-  rsync -a --exclude 'libmacosx_plugin.dylib' "$src/plugins/" "$DEST/plugins/"
+  # VLC's own Cocoa interface isn't needed; ReVLC is the interface. The
+  # notifications plugin needs Growl, which VLC doesn't ship, so it never loads.
+  rsync -a --exclude 'libmacosx_plugin.dylib' --exclude 'libosx_notifications_plugin.dylib' "$src/plugins/" "$DEST/plugins/"
   # Lua scripts (sites like Vimeo, playlist parsers) and HRTF data.
   rsync -a "$src/share/lua" "$src/share/hrtfs" "$DEST/share/"
+  make_plugin_cache_macos
 }
 
 case "$(uname -s)" in

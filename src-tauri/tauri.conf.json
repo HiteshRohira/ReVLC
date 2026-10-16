@@ -76,7 +76,18 @@
           "wmv",
           "flv",
           "ogv",
-          "3gp"
+          "3gp",
+          "mts",
+          "m2t",
+          "vob",
+          "divx",
+          "rm",
+          "rmvb",
+          "asf",
+          "f4v",
+          "3g2",
+          "ogm",
+          "mxf"
         ],
         "name": "Video",
         "role": "Viewer"
@@ -92,7 +103,20 @@
           "opus",
           "wma",
           "alac",
-          "aiff"
+          "aiff",
+          "mka",
+          "ape",
+          "wv",
+          "tta",
+          "mpc",
+          "ac3",
+          "dts",
+          "oga",
+          "spx",
+          "m4b",
+          "amr",
+          "aif",
+          "aifc"
         ],
         "name": "Audio",
         "role": "Viewer"
@@ -102,7 +126,8 @@
           "m3u",
           "m3u8",
           "pls",
-          "xspf"
+          "xspf",
+          "asx"
         ],
         "name": "Playlist",
         "role": "Viewer"

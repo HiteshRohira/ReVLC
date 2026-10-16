@@ -6,12 +6,22 @@ use std::path::{Path, PathBuf};
 
 use serde::Serialize;
 
+// Media VLC registers for on macOS, for folder scans. Leaves out
+// extensions other files share (".ps" PostScript, ".rec", ".mod", ".it"):
+// those still open from Finder, but a scan would pick up non-media.
 pub const VIDEO_EXTENSIONS: &[&str] = &[
-    "mp4", "m4v", "mkv", "webm", "mov", "avi", "ts", "m2ts", "mts", "mpg", "mpeg", "wmv", "flv", "ogv", "3gp", "vob",
-    "divx", "rmvb", "f4v", "asf",
+    "mp4", "m4v", "mkv", "webm", "mov", "qt", "avi", "ts", "m2ts", "mts", "m2t", "mt2s", "tp", "mpg", "mpeg", "m1v",
+    "m2v", "m2p", "wmv", "flv", "f4v", "ogv", "ogm", "ogx", "3gp", "3g2", "vob", "vro", "evo", "divx", "rm",
+    "rmvb", "asf", "dv", "mxf", "gxf", "wtv", "nsv", "nuv", "tod", "bik", "crf", "axv", "anx", "mks", "dav", "xesc",
 ];
 pub const AUDIO_EXTENSIONS: &[&str] = &[
-    "mp3", "m4a", "aac", "flac", "wav", "ogg", "opus", "wma", "alac", "aiff", "ape", "mka",
+    "mp3", "m4a", "m4b", "aac", "ac3", "eac3", "flac", "wav", "ogg", "oga", "opus", "spx", "wma", "alac", "aif",
+    "aiff", "aifc", "ape", "mka", "wv", "tta", "mpc", "dts", "mlp", "aob", "m2a", "mp1", "mp2", "mpa", "amr", "oma",
+    "voc", "vqf", "axa", "mid", "midi", "rmi", "xm", "s3m",
+];
+pub const SUBTITLE_EXTENSIONS: &[&str] = &[
+    "srt", "ass", "ssa", "vtt", "sub", "mpsub", "idx", "sup", "smi", "ttml", "usf", "utf", "rt", "aqt", "jss", "pjs",
+    "psb",
 ];
 
 /// Stop scanning after this many files so a huge folder can't stall the app.
@@ -26,6 +36,10 @@ fn has_ext(path: &Path, exts: &[&str]) -> bool {
 
 pub fn is_video(path: &Path) -> bool {
     has_ext(path, VIDEO_EXTENSIONS)
+}
+
+pub fn is_subtitle(path: &Path) -> bool {
+    has_ext(path, SUBTITLE_EXTENSIONS)
 }
 
 pub fn is_media(path: &Path) -> bool {
@@ -289,5 +303,8 @@ mod tests {
         assert!(is_video(Path::new("/x/Movie.MKV")));
         assert!(is_media(Path::new("song.flac")));
         assert!(!is_media(Path::new("notes.txt")));
+        assert!(is_subtitle(Path::new("Movie.en.SRT")));
+        assert!(!is_media(Path::new("Movie.srt")));
+        assert!(!is_media(Path::new("paper.ps")));
     }
 }
