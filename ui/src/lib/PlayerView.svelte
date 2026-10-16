@@ -157,6 +157,9 @@
     gap: 4px;
     height: 32px;
   }
+  :global([data-platform="windows"]) .bar {
+    height: 36px;
+  }
   .back {
     width: 26px;
     height: 26px;

@@ -229,6 +229,13 @@
     background: var(--sidebar);
     border-right: 1px solid var(--border);
   }
+  /* Below the title strip, with no traffic lights to clear. */
+  :global([data-platform="windows"]) .home {
+    top: 36px;
+  }
+  :global([data-platform="windows"]) aside {
+    padding-top: 16px;
+  }
   h6 {
     margin: 18px 10px 6px;
     font-size: 11px;
@@ -242,6 +249,7 @@
     justify-content: flex-start;
     align-items: center;
     gap: 10px;
+    box-sizing: border-box;
     width: 100%;
     padding: 7px 10px;
     border-radius: 8px;
@@ -273,7 +281,6 @@
   }
   .nv span {
     margin-left: auto;
-    margin-right: -2px;
     font-size: 10.5px;
     font-weight: 600;
     padding: 1px 6px;
@@ -294,10 +301,6 @@
     gap: 8px;
     height: 64px;
     padding: 0 24px 0 28px;
-  }
-  /* Room for the window buttons. */
-  :global([data-platform="windows"]) .top {
-    padding-right: 150px;
   }
   .top h1 {
     margin: 0;
