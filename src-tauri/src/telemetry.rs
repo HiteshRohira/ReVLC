@@ -24,14 +24,14 @@ use serde_json::{Map, Value, json};
 /// The PostHog project's API key (also in site/analytics.js). Project keys
 /// only allow sending events, so they're meant to be public. Empty turns
 /// analytics off; REVLC_POSTHOG_KEY at build time overrides it.
-const PROJECT_KEY: &str = "";
+const PROJECT_KEY: &str = "phc_yQnHwv5pdERXG2fUUPsGH3Yvp7UehPnre4RBVZLE6qxn";
 const KEY: &str = match option_env!("REVLC_POSTHOG_KEY") {
     Some(key) => key,
     None => PROJECT_KEY,
 };
 const HOST: &str = match option_env!("REVLC_POSTHOG_HOST") {
     Some(host) => host,
-    None => "https://us.i.posthog.com",
+    None => "https://eu.i.posthog.com",
 };
 
 /// Sends at least this often while events are waiting...

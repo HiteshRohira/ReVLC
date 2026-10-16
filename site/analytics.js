@@ -3,8 +3,8 @@
 // its own.
 
 // The PostHog project key (the same one the app uses). Empty turns this off.
-const POSTHOG_KEY = "";
-const POSTHOG_HOST = "https://us.i.posthog.com";
+const POSTHOG_KEY = "phc_yQnHwv5pdERXG2fUUPsGH3Yvp7UehPnre4RBVZLE6qxn";
+const POSTHOG_HOST = "https://eu.i.posthog.com";
 
 if (POSTHOG_KEY) {
   // PostHog's loader: queues calls until the library arrives.

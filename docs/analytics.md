@@ -18,13 +18,13 @@ stall). Anything that doesn't serve that question isn't collected.
 
 ## Setup
 
-1. Create a PostHog project. Copy its project API key (`phc_...`). The key
-   only allows sending events, so it's fine to commit.
-2. Paste it into `PROJECT_KEY` in `src-tauri/src/telemetry.rs` and
-   `POSTHOG_KEY` in `site/analytics.js`. If the project is in the EU region,
-   change the host in both to `https://eu.i.posthog.com`.
-3. In the project settings, decide on IP addresses. PostHog uses them to add
-   the country. To keep no IPs at all, turn on "Discard client IP data".
+The project is "ReVLC" (id 308872) in PostHog's EU region. Its project key
+is in `PROJECT_KEY` in `src-tauri/src/telemetry.rs` and `POSTHOG_KEY` in
+`site/analytics.js`. The key only allows sending events, so it's fine to
+commit.
+
+In the project settings, decide on IP addresses. PostHog uses them to add
+the country. To keep no IPs at all, turn on "Discard client IP data".
 
 ## Events
 
