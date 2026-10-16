@@ -209,6 +209,8 @@ pub fn parse_path(path: &Path) -> NameInfo {
         let (_, y) = find_year(&folder)?;
         (folder_title(&folder).eq_ignore_ascii_case(&title)).then_some(y)
     });
+    // A name that is all release words ("h264_4k") keeps them, spaced like any other.
+    let title = if title.is_empty() { tidy(&name) } else { title };
     NameInfo { title: if title.is_empty() { stem } else { title }, year, ..Default::default() }
 }
 
@@ -395,6 +397,8 @@ mod tests {
         assert_eq!((m.title.as_str(), m.year, m.show), ("Big Buck Bunny", None, None));
         let m = parse("/m/[Group] Some_Film_720p.mp4");
         assert_eq!(m.title, "Some Film");
+        // All release words: spaced like other names, not left as the raw file name.
+        assert_eq!(parse("/m/h264_4k_copy1.mp4").title, "h264 4k copy1");
     }
 
     #[test]

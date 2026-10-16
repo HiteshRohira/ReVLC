@@ -100,7 +100,8 @@ pub fn scan(dir: &Path, keep: fn(&Path) -> bool) -> Vec<PathBuf> {
                 if depth < MAX_DEPTH {
                     walk(&path, depth + 1, keep, out);
                 }
-            } else if keep(&path) {
+            // Empty files (a failed download or copy) can't play.
+            } else if keep(&path) && entry.metadata().is_ok_and(|m| m.len() > 0) {
                 out.push(path);
             }
         }
@@ -265,8 +266,10 @@ mod tests {
     fn nested_folders_list_files_once() {
         let dir = std::env::temp_dir().join(format!("revlc-library-{}", std::process::id()));
         std::fs::create_dir_all(dir.join("Show")).unwrap();
-        std::fs::write(dir.join("Movie.mkv"), b"").unwrap();
-        std::fs::write(dir.join("Show").join("Episode 1.mkv"), b"").unwrap();
+        std::fs::write(dir.join("Movie.mkv"), b"x").unwrap();
+        std::fs::write(dir.join("Show").join("Episode 1.mkv"), b"x").unwrap();
+        // Empty files are left out.
+        std::fs::write(dir.join("Broken.mkv"), b"").unwrap();
         let root = dir.to_string_lossy().into_owned();
         let show = dir.join("Show").to_string_lossy().into_owned();
         let items = scan_folders(&[root.clone(), show.clone()]);

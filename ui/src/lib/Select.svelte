@@ -114,13 +114,21 @@
   function onScroll(e: Event) {
     if (!list?.contains(e.target as Node)) hide();
   }
+
+  // Accessibility tools blur the window for a moment before clicking an
+  // option; only close if the app has really lost focus.
+  function onBlur() {
+    setTimeout(() => {
+      if (!document.hasFocus()) hide();
+    }, 150);
+  }
 </script>
 
 <svelte:window
   onpointerdowncapture={open ? onPointerDown : undefined}
   onscrollcapture={open ? onScroll : undefined}
   onresize={open ? hide : undefined}
-  onblur={open ? hide : undefined}
+  onblur={open ? onBlur : undefined}
 />
 
 <button

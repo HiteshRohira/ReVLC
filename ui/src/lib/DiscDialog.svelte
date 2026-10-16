@@ -22,7 +22,7 @@
   const found = $derived(discs.filter((d) => d.kind === kind));
   const hint = $derived(KINDS.find((k) => k.kind === kind)!.hint);
   const hasMenus = $derived(kind === "dvd" || kind === "bluray");
-  const name = (p: string) => p.split("/").filter(Boolean).pop() ?? p;
+  const name = (p: string) => p.split(/[\\/]/).filter(Boolean).pop() ?? p;
 
   async function refresh() {
     discs = await invoke<Disc[]>("disc_list");

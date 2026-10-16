@@ -64,9 +64,18 @@
   function onPointerDown(e: PointerEvent) {
     if (open !== null && !bar.contains(e.target as Node)) show(null);
   }
+
+  // Closes when the app loses focus. Accessibility tools (UI Automation's
+  // Invoke, used by Voice Access) blur the window for a moment before they
+  // click an item, so only close if focus hasn't come back.
+  function onBlur() {
+    setTimeout(() => {
+      if (!document.hasFocus()) show(null);
+    }, 150);
+  }
 </script>
 
-<svelte:window onkeydowncapture={onKeyDown} onkeyupcapture={onKeyUp} onpointerdowncapture={onPointerDown} onblur={() => show(null)} />
+<svelte:window onkeydowncapture={onKeyDown} onkeyupcapture={onKeyUp} onpointerdowncapture={onPointerDown} onblur={onBlur} />
 
 <header bind:this={bar} data-tauri-drag-region>
   <img src={icon} alt="" data-tauri-drag-region />

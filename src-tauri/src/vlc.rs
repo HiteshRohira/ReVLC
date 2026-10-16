@@ -70,6 +70,8 @@ api! {
     libvlc_new: fn(c_int, *const *const c_char) -> *mut Inst;
     libvlc_errmsg: fn() -> *const c_char;
     libvlc_get_version: fn() -> *const c_char;
+    libvlc_set_user_agent: fn(*mut Inst, *const c_char, *const c_char);
+    libvlc_set_app_id: fn(*mut Inst, *const c_char, *const c_char, *const c_char);
     libvlc_free: fn(*mut c_void);
     libvlc_media_new_path: fn(*mut Inst, *const c_char) -> *mut Media;
     libvlc_media_new_location: fn(*mut Inst, *const c_char) -> *mut Media;
@@ -393,6 +395,15 @@ impl Vlc {
             for (name, value) in config {
                 put_config(&core, inst, name, value);
             }
+            let version = CStr::from_ptr((api.libvlc_get_version)()).to_string_lossy().into_owned();
+            // Before the player makes its audio output, which names itself
+            // after this: otherwise the volume mixer lists "VLC media player".
+            // Streams keep VLC's own HTTP user agent, which some servers expect.
+            let vlc_version = version.split_whitespace().next().unwrap_or("3");
+            let (name, agent) = (cstr("ReVLC"), cstr(&format!("VLC/{vlc_version} LibVLC/{vlc_version}")));
+            (api.libvlc_set_user_agent)(inst, name.as_ptr(), agent.as_ptr());
+            let (id, ver, icon) = (cstr("app.revlc"), cstr(env!("CARGO_PKG_VERSION")), cstr("revlc"));
+            (api.libvlc_set_app_id)(inst, id.as_ptr(), ver.as_ptr(), icon.as_ptr());
             let mp = (api.libvlc_media_player_new)(inst);
             if mp.is_null() {
                 return Err(format!("could not create a media player: {}", errmsg(&api)));
@@ -400,7 +411,6 @@ impl Vlc {
             // The web UI handles all keyboard and mouse input.
             (api.libvlc_video_set_key_input)(mp, 0);
             (api.libvlc_video_set_mouse_input)(mp, 0);
-            let version = CStr::from_ptr((api.libvlc_get_version)()).to_string_lossy().into_owned();
             Ok(Self { api, core, inst, mp, version })
         }
     }

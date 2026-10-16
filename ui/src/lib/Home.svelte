@@ -67,7 +67,7 @@
     { label: "Internet radio", icon: Radio },
   ];
 
-  const base = (path: string) => path.split("/").filter(Boolean).pop() ?? path;
+  const base = (path: string) => path.split(/[\\/]/).filter(Boolean).pop() ?? path;
   const left = (e: HistoryEntry) => `${Math.max(1, Math.round((e.length - e.position) / 60000))} min left`;
 
   /** Plays a library file and the rest of its show or folder after it. */
