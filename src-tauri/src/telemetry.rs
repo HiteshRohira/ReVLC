@@ -210,8 +210,15 @@ fn send(client: &reqwest::Client, batch: &[Value], exiting: bool) -> bool {
     let body = json!({ "api_key": KEY, "batch": batch });
     let request = client.post(format!("{HOST}/batch/")).json(&body);
     let request = if exiting { request.timeout(EXIT_WAIT) } else { request };
-    match tauri::async_runtime::block_on(request.send()) {
-        Ok(response) if response.status().is_success() => true,
+    // send() sets up its timeout as it's called, which needs Tokio's runtime.
+    match tauri::async_runtime::block_on(async move { request.send().await }) {
+        Ok(response) if response.status().is_success() => {
+            if cfg!(debug_assertions) {
+                let names: Vec<&str> = batch.iter().filter_map(|e| e["event"].as_str()).collect();
+                eprintln!("revlc: analytics: sent {}", names.join(", "));
+            }
+            true
+        }
         // The server turned the batch down: sending it again won't help.
         Ok(response) if response.status().is_client_error() => {
             eprintln!("revlc: analytics rejected: {}", response.status());

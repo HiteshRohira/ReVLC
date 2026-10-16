@@ -1873,7 +1873,8 @@ pub fn run() {
         .expect("error while building revlc");
 
     app.run(|handle, event| {
-        if let RunEvent::ExitRequested { .. } = event {
+        // The Quit menu item ends the app without asking: only Exit comes.
+        if matches!(event, RunEvent::ExitRequested { .. } | RunEvent::Exit) {
             if let Some(Ok(core)) = handle.try_state::<Player>().as_deref().map(Player::core) {
                 core.save_progress(false);
                 core.quality().close("quit");
