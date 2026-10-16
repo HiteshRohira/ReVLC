@@ -245,17 +245,10 @@
   {/if}
 
   {#if updater.prompt && !controlsHidden}
-    <div class="update" role="alertdialog" aria-label="Update available">
-      {#if updater.state.status === "ready"}
-        <span><b>ReVLC {updater.state.version}</b> is ready. Restart to finish updating.</span>
-        <button class="btn pri" onclick={updater.restart}>Restart now</button>
-      {:else if updater.state.status === "downloading"}
-        <span>Downloading ReVLC {updater.state.version}…{#if updater.state.progress !== null}&nbsp;<b class="tnum">{Math.round(updater.state.progress * 100)}%</b>{/if}</span>
-      {:else}
-        <span><b>ReVLC {updater.state.version}</b> is available.</span>
-        <button class="btn pri" onclick={updater.install}>Update</button>
-      {/if}
-      {#if updater.state.status !== "downloading"}<button class="btn" onclick={updater.later}>Later</button>{/if}
+    <div class="update" role="alertdialog" aria-label="Update ready">
+      <span><b>ReVLC {updater.state.version}</b> is ready. Restart to finish updating.</span>
+      <button class="btn pri" onclick={updater.restart}>Restart now</button>
+      <button class="btn" onclick={updater.later}>Later</button>
     </div>
   {/if}
 

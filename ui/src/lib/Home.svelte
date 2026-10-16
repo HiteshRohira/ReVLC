@@ -3,6 +3,7 @@
   import { Clapperboard, Disc3, Film, FolderOpen, FolderPlus, HardDrive, House, Link, ListMusic, Music2, Play, Radio, Settings, Webcam, X } from "@lucide/svelte";
   import { player, resumable, formatTime, thumbUrl, cleanTitle, type HistoryEntry, type LibraryItem } from "./player.svelte";
   import { ui } from "./ui.svelte";
+  import UpdateButton from "./UpdateButton.svelte";
 
   let { onopen, onopenfolder }: { onopen: () => void; onopenfolder: () => void } = $props();
 
@@ -142,6 +143,7 @@
     </nav>
     <div class="appearance">
       <button class="nv" onclick={() => invoke("open_settings")}><Settings size={17} />Settings</button>
+      <UpdateButton />
     </div>
   </aside>
 
@@ -235,6 +237,15 @@
   }
   :global([data-platform="windows"]) aside {
     padding-top: 16px;
+  }
+  .appearance {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+  }
+  .appearance .nv {
+    flex: 1;
+    min-width: 0;
   }
   h6 {
     margin: 18px 10px 6px;

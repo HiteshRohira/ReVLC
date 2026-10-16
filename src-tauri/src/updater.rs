@@ -106,8 +106,19 @@ pub async fn check(app: &AppHandle, manual: bool) {
         let _ = app.emit("update://manual-check", ());
     }
     // Already checking, or installed and waiting for a restart.
-    if matches!(updater.status(), Status::Checking | Status::Downloading | Status::Ready) {
-        return;
+    let state = updater.state.lock().unwrap_or_else(|e| e.into_inner()).clone();
+    match state.status {
+        Status::Checking => return,
+        Status::Downloading => {
+            if manual {
+                let progress = state.progress.map(|p| format!(" ({}%)", (p * 100.0).floor())).unwrap_or_default();
+                notice(app, "info", format!("Downloading ReVLC {}{progress}", state.version));
+            }
+            return;
+        }
+        // The banner shows again; the manual-check event cleared "Later".
+        Status::Ready => return,
+        _ => {}
     }
     updater.set(app, |s| s.status = Status::Checking);
     let result = match app.updater() {

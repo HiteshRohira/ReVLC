@@ -17,6 +17,11 @@ export function installTooltips() {
   let target: HTMLElement | null = null;
   let timer: ReturnType<typeof setTimeout> | undefined;
   let hiddenAt = 0;
+  // A hint can change while it shows, like a download's progress.
+  const watch = new MutationObserver(() => {
+    if (target?.dataset.tip) place(target);
+    else hide();
+  });
 
   function place(el: HTMLElement) {
     tip.textContent = el.dataset.tip ?? "";
@@ -39,6 +44,7 @@ export function installTooltips() {
       // A name that is its own hint only needs one when it's cut off.
       if (el.dataset.tip === el.textContent?.trim() && el.scrollWidth <= el.clientWidth) return;
       place(el);
+      watch.observe(el, { attributes: true, attributeFilter: ["data-tip"] });
     };
     if (performance.now() - hiddenAt < WARM) go();
     else timer = setTimeout(go, DELAY);
@@ -46,6 +52,7 @@ export function installTooltips() {
 
   function hide() {
     clearTimeout(timer);
+    watch.disconnect();
     if (tip.classList.contains("on")) hiddenAt = performance.now();
     tip.classList.remove("on");
     target = null;
