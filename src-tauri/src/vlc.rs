@@ -7,6 +7,7 @@ use std::ffi::{CStr, CString, c_char, c_float, c_int, c_uint, c_void};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::mpsc::Sender;
+use std::time::Instant;
 
 use libloading::Library;
 use serde::Serialize;
@@ -42,6 +43,33 @@ struct AudioDevice {
     next: *mut AudioDevice,
     device: *mut c_char,
     description: *mut c_char,
+}
+
+/// libvlc_media_track_t.
+#[repr(C)]
+struct MediaTrack {
+    codec: u32,
+    original_fourcc: u32,
+    id: c_int,
+    kind: c_int,
+    profile: c_int,
+    level: c_int,
+    /// Points at a libvlc_video_track_t for video tracks.
+    details: *mut c_void,
+    bitrate: c_uint,
+    language: *mut c_char,
+    description: *mut c_char,
+}
+
+/// The start of libvlc_video_track_t.
+#[repr(C)]
+struct VideoTrack {
+    height: c_uint,
+    width: c_uint,
+    sar_num: c_uint,
+    sar_den: c_uint,
+    frame_rate_num: c_uint,
+    frame_rate_den: c_uint,
 }
 
 #[repr(C)]
@@ -145,6 +173,8 @@ api! {
     libvlc_media_parse_with_options: fn(*mut Media, c_int, c_int) -> c_int;
     libvlc_media_get_parsed_status: fn(*mut Media) -> c_int;
     libvlc_media_get_duration: fn(*mut Media) -> i64;
+    libvlc_media_tracks_get: fn(*mut Media, *mut *mut *mut MediaTrack) -> c_uint;
+    libvlc_media_tracks_release: fn(*mut *mut MediaTrack, c_uint);
 }
 
 /// libvlc_media_option_t: an option the application chose, which libVLC
@@ -184,6 +214,20 @@ pub mod event {
     ];
 }
 
+/// A player event, as libVLC sent it.
+#[derive(Clone, Copy, Debug)]
+pub struct Event {
+    pub kind: i32,
+    /// The media it belongs to (see [`Vlc::generation`]).
+    pub generation: u64,
+    /// When libVLC sent it; events are handled in batches, a little later.
+    pub at: Instant,
+    /// How full the input cache was, 0–100.
+    pub cache: f32,
+    /// The new time in ms, for TIME_CHANGED; -1 otherwise.
+    pub time: i64,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum State {
@@ -195,6 +239,20 @@ pub enum State {
     Stopped,
     Ended,
     Error,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct StreamInfo {
+    pub video_codec: Option<String>,
+    pub audio_codec: Option<String>,
+    pub width: u32,
+    pub height: u32,
+    pub fps: f32,
+}
+
+/// A codec's fourcc as text, like "h264" or "mp4a".
+fn fourcc(code: u32) -> String {
+    code.to_le_bytes().iter().map(|&b| if b.is_ascii_graphic() { b as char } else { ' ' }).collect::<String>().trim().to_string()
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -471,21 +529,28 @@ impl Vlc {
         unsafe { (self.api.libvlc_media_player_set_video_title_display)(self.mp, pos, timeout_ms.max(0) as c_uint) }
     }
 
-    /// Sends every player event type to `tx`, with the media generation it
+    /// Sends every player event to `tx`, with the media generation it
     /// belongs to (see [`Vlc::generation`]). The callback runs on a libVLC
     /// thread, so it must not call back into libVLC.
-    pub fn subscribe(&self, tx: Sender<(i32, u64)>) {
+    pub fn subscribe(&self, tx: Sender<Event>) {
         unsafe extern "C" fn on_event(ev: *const c_void, data: *mut c_void) {
             unsafe {
                 let ty = *(ev as *const c_int);
+                // libvlc_event_t: int type, void *p_obj, then the union, whose
+                // first member is `float new_cache` for Buffering and
+                // `libvlc_time_t new_time` for TimeChanged.
+                let union = (ev as *const u8).add(2 * size_of::<*const c_void>());
                 if ty == event::BUFFERING {
-                    // libvlc_event_t: int type, void *p_obj, then the union
-                    // whose first member here is `float new_cache`.
-                    let cache = *((ev as *const u8).add(2 * size_of::<*const c_void>()) as *const c_float);
-                    BUFFERING.store(cache.to_bits(), Ordering::Relaxed);
+                    BUFFERING.store((*(union as *const c_float)).to_bits(), Ordering::Relaxed);
                 }
-                let tx = &*(data as *const Sender<(i32, u64)>);
-                let _ = tx.send((ty, GENERATION.load(Ordering::Acquire)));
+                let tx = &*(data as *const Sender<Event>);
+                let _ = tx.send(Event {
+                    kind: ty,
+                    generation: GENERATION.load(Ordering::Acquire),
+                    at: Instant::now(),
+                    cache: f32::from_bits(BUFFERING.load(Ordering::Relaxed)),
+                    time: if ty == event::TIME_CHANGED { *(union as *const i64) } else { -1 },
+                });
             }
         }
         let data = Box::into_raw(Box::new(tx)) as *mut c_void;
@@ -675,6 +740,42 @@ impl Vlc {
 
     pub fn has_video(&self) -> bool {
         unsafe { (self.api.libvlc_media_player_has_vout)(self.mp) > 0 }
+    }
+
+    /// The codecs, size and frame rate of what's playing.
+    pub fn stream_info(&self) -> StreamInfo {
+        let mut info = StreamInfo::default();
+        unsafe {
+            let media = (self.api.libvlc_media_player_get_media)(self.mp);
+            if media.is_null() {
+                return info;
+            }
+            let mut tracks: *mut *mut MediaTrack = std::ptr::null_mut();
+            let count = (self.api.libvlc_media_tracks_get)(media, &mut tracks);
+            for i in 0..count as usize {
+                let track = &**tracks.add(i);
+                match track.kind {
+                    0 if info.audio_codec.is_none() => info.audio_codec = Some(fourcc(track.codec)),
+                    1 if info.video_codec.is_none() => {
+                        info.video_codec = Some(fourcc(track.codec));
+                        if !track.details.is_null() {
+                            let video = &*(track.details as *const VideoTrack);
+                            info.width = video.width;
+                            info.height = video.height;
+                            if video.frame_rate_den > 0 {
+                                info.fps = video.frame_rate_num as f32 / video.frame_rate_den as f32;
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            if count > 0 {
+                (self.api.libvlc_media_tracks_release)(tracks, count);
+            }
+            (self.api.libvlc_media_release)(media);
+        }
+        info
     }
 
     pub fn rate(&self) -> f32 {
@@ -1137,3 +1238,4 @@ fn errmsg(api: &Api) -> String {
         }
     }
 }
+

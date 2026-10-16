@@ -27,6 +27,7 @@
 
     <button class="go" onclick={() => theme.finishOnboarding()}>Get started</button>
     <p class="note">You can change this any time from the sidebar.</p>
+    <p class="note">ReVLC sends anonymous statistics, like how quickly videos start, to help make playback better. Never what you watch. You can turn this off in Settings.</p>
   </div>
 </div>
 
@@ -145,5 +146,8 @@
     margin: 14px 0 0;
     font-size: 12px;
     color: var(--faint);
+  }
+  .note + .note {
+    margin-top: 6px;
   }
 </style>

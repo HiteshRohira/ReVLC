@@ -3,12 +3,16 @@ mod capture;
 mod disc;
 mod history;
 mod library;
+#[cfg_attr(not(any(target_os = "macos", windows)), allow(dead_code))]
+mod machine;
 mod menu;
 mod meta;
 mod playlist;
 mod playlist_file;
+mod quality;
 mod settings;
 mod store;
+mod telemetry;
 #[cfg(target_os = "macos")]
 mod surface_macos;
 #[cfg(windows)]
@@ -76,6 +80,8 @@ struct Core {
     reloads: AtomicU64,
     /// The last library scan, reused for a little while.
     library_scan: Mutex<Option<LibraryScan>>,
+    /// Playback quality measurements, for analytics.
+    quality: Mutex<quality::Quality>,
 }
 
 struct LibraryScan {
@@ -307,6 +313,7 @@ impl Core {
             }
             *self.resume.lock().unwrap_or_else(|e| e.into_inner()) =
                 Some(PendingSeek::Seek { ms: self.vlc.time(), announce: false });
+            self.quality().close("settings_changed");
             let _ = self.vlc.open(&item.uri, &item.options, item.trusted);
             (state, self.vlc.generation())
         };
@@ -319,6 +326,15 @@ impl Core {
                 self.vlc.set_pause(true);
             }
         }
+    }
+
+    fn quality(&self) -> MutexGuard<'_, quality::Quality> {
+        self.quality.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Tells the quality measurements about a seek the user asked for.
+    fn seeking(&self, target: i64, kind: &'static str) {
+        self.quality().seek_requested(&self.vlc, self.vlc.time(), target, kind);
     }
 
     fn library(&self) -> MutexGuard<'_, Library> {
@@ -626,7 +642,23 @@ impl Core {
         }
         self.emit_playlist();
         self.emit_bookmarks();
-        self.vlc.open(uri, &item.options, item.trusted)
+        let result = self.vlc.open(uri, &item.options, item.trusted);
+        let resume_ms = match *self.resume.lock().unwrap_or_else(|e| e.into_inner()) {
+            Some(PendingSeek::Seek { ms, .. }) => Some(ms),
+            _ => None,
+        };
+        let open = {
+            let settings = self.settings();
+            quality::Open {
+                uri,
+                resume_ms,
+                hardware_decoding: settings.hardware_decoding,
+                file_caching: settings.file_caching,
+                network_caching: settings.network_caching,
+            }
+        };
+        self.quality().opened(open, self.vlc.generation(), result.as_ref().err().map(String::as_str));
+        result
     }
 
     /// What to do about `uri`'s resume point once it starts playing.
@@ -648,6 +680,7 @@ impl Core {
 
     fn stop_locked(&self) {
         self.save_progress(true);
+        self.quality().close("stopped");
         self.vlc.stop();
         self.emit_state();
     }
@@ -830,7 +863,7 @@ fn make_thumbnails(core: Arc<Core>) {
 
 /// Turns libVLC events into UI events. Time updates are throttled so the
 /// web view isn't woken more than a few times a second.
-fn pump_events(core: Arc<Core>, rx: Receiver<(i32, u64)>) {
+fn pump_events(core: Arc<Core>, rx: Receiver<vlc::Event>) {
     const TIME_INTERVAL: Duration = Duration::from_millis(250);
     const PROGRESS_INTERVAL: Duration = Duration::from_secs(5);
 
@@ -840,23 +873,32 @@ fn pump_events(core: Arc<Core>, rx: Receiver<(i32, u64)>) {
     while let Ok(first) = rx.recv() {
         // Let bursts of events (e.g. opening a file) arrive, then handle them together.
         thread::sleep(Duration::from_millis(20));
-        let batch: Vec<(i32, u64)> = std::iter::once(first).chain(rx.try_iter()).collect();
-        let events: Vec<i32> = batch.iter().map(|&(ty, _)| ty).collect();
+        let batch: Vec<vlc::Event> = std::iter::once(first).chain(rx.try_iter()).collect();
+        let events: Vec<i32> = batch.iter().map(|e| e.kind).collect();
         let has = |ty: i32| events.contains(&ty);
         // Ending or failing only counts for what's open now, not for
         // media replaced since (the user picked another item meanwhile).
         let transition = core.transition();
         let generation = core.vlc.generation();
-        let current = |ty: i32| batch.contains(&(ty, generation));
+        let current = |ty: i32| batch.iter().any(|e| e.kind == ty && e.generation == generation);
 
         // Web pages and remote playlists end by expanding into what they hold:
         // one stream plays in place, several replace the entry in the queue.
         let subitems = if current(event::END_REACHED) { core.vlc.subitems() } else { Vec::new() };
+        // Before the queue moves on, so a finished item counts as finished.
+        if subitems.is_empty() {
+            core.quality().handle(&batch, &core.vlc);
+        } else {
+            let events: Vec<vlc::Event> = batch.iter().filter(|e| e.kind != event::END_REACHED).copied().collect();
+            core.quality().handle(&events, &core.vlc);
+        }
         if subitems.len() == 1 && core.vlc.play_subitem() {
+            core.quality().followed(core.vlc.generation());
             if let Some(uri) = core.current_uri() {
                 core.set_resume(&uri);
             }
         } else if subitems.len() > 1 {
+            core.quality().forget();
             if let Err(e) = core.expand_current(subitems) {
                 core.notice("error", e);
             }
@@ -913,6 +955,7 @@ fn pump_events(core: Arc<Core>, rx: Receiver<(i32, u64)>) {
                 if time < b {
                     loop_jump = None;
                 } else if loop_jump.is_none_or(|at| at.elapsed() > Duration::from_secs(1)) {
+                    core.seeking(a, "loop");
                     core.vlc.set_time(a);
                     loop_jump = Some(Instant::now());
                 }
@@ -1100,6 +1143,7 @@ fn settings_set(player: tauri::State<Player>, settings: Settings) -> Res {
         core.vlc.set_audio_device(&settings.audio_device);
     }
     settings.save(&core.data_dir)?;
+    telemetry::set_enabled(settings.analytics);
     *core.settings() = settings.clone();
     let _ = core.app.emit("settings://changed", settings);
     if vlc_changed {
@@ -1112,7 +1156,9 @@ fn settings_set(player: tauri::State<Player>, settings: Settings) -> Res {
 /// Seeks to a resume point the user accepted.
 #[tauri::command]
 fn resume_at(player: tauri::State<Player>, ms: i64) -> Res {
-    player.core()?.vlc.set_time(ms);
+    let core = player.core()?;
+    core.seeking(ms, "resume");
+    core.vlc.set_time(ms);
     Ok(())
 }
 
@@ -1270,6 +1316,7 @@ fn history_remove(player: tauri::State<Player>, uri: String) -> Res {
 #[tauri::command]
 fn seek(player: tauri::State<Player>, ms: i64) -> Res {
     let core = player.core()?;
+    core.seeking(ms, "jump");
     core.vlc.set_time(ms);
     core.emit_state();
     Ok(())
@@ -1280,7 +1327,9 @@ fn seek_by(player: tauri::State<Player>, delta_ms: i64) -> Res {
     let core = player.core()?;
     let target = core.vlc.time() + delta_ms;
     let length = core.vlc.length();
-    core.vlc.set_time(if length > 0 { target.min(length - 500) } else { target });
+    let target = if length > 0 { target.min(length - 500) } else { target };
+    core.seeking(target, "skip");
+    core.vlc.set_time(target);
     core.emit_state();
     Ok(())
 }
@@ -1424,6 +1473,7 @@ async fn playlist_remove(player: tauri::State<'_, Player>, index: usize) -> Res 
         let _transition = core.transition();
         let was_current = core.playlist().remove(index);
         if was_current {
+            core.quality().close("stopped");
             core.vlc.stop();
         }
         core.emit_playlist();
@@ -1512,6 +1562,9 @@ fn set_title(player: tauri::State<Player>, index: i32) -> Res {
 #[tauri::command]
 fn set_chapter(player: tauri::State<Player>, index: i32) -> Res {
     let core = player.core()?;
+    if let Some(chapter) = core.vlc.chapters().get(index.max(0) as usize) {
+        core.seeking(chapter.start, "chapter");
+    }
     core.vlc.set_chapter(index);
     core.emit_state();
     Ok(())
@@ -1605,12 +1658,16 @@ fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     let settings = Settings::load(&data_dir);
     // Extra libVLC options for debugging, e.g. REVLC_VLC_ARGS="--verbose=2".
     let args: Vec<String> = std::env::var("REVLC_VLC_ARGS").unwrap_or_default().split_whitespace().map(String::from).collect();
-    let vlc = match Vlc::load(resource_dir.as_deref(), &args, &settings.vlc_config(&languages)) {
+    let vlc = Vlc::load(resource_dir.as_deref(), &args, &settings.vlc_config(&languages));
+    telemetry::start(&data_dir, settings.analytics, vlc.as_ref().map_or("unavailable", |v| v.version.as_str()));
+    let vlc = match vlc {
         Ok(vlc) => {
             vlc.set_hardware_decoding(settings.hardware_decoding);
             vlc
         }
         Err(e) => {
+            // Nothing can play. The error names paths, so only the fact is sent.
+            telemetry::capture("engine_failed", serde_json::json!({}));
             eprintln!("revlc: {e}");
             app.manage(Player(Err(e)));
             return Ok(());
@@ -1639,6 +1696,7 @@ fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
         transition: Mutex::default(),
         reloads: AtomicU64::new(0),
         library_scan: Mutex::default(),
+        quality: Mutex::default(),
         data_dir,
     });
 
@@ -1818,7 +1876,9 @@ pub fn run() {
         if let RunEvent::ExitRequested { .. } = event {
             if let Some(Ok(core)) = handle.try_state::<Player>().as_deref().map(Player::core) {
                 core.save_progress(false);
+                core.quality().close("quit");
             }
+            telemetry::flush_on_exit();
         }
         // Files opened from Finder ("Open With", double-click, dock drop).
         #[cfg(target_os = "macos")]

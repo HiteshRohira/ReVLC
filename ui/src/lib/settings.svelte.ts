@@ -10,6 +10,7 @@ export interface Settings {
   pauseWhenMinimized: boolean;
   seekbarChapters: boolean;
   autoUpdate: boolean;
+  analytics: boolean;
 
   video: boolean;
   startFullscreen: boolean;

@@ -29,6 +29,8 @@ pub struct Settings {
     pub seekbar_chapters: bool,
     /// Download and install new versions in the background.
     pub auto_update: bool,
+    /// Send anonymous usage and playback-quality statistics.
+    pub analytics: bool,
 
     // Video
     pub video: bool,
@@ -93,6 +95,7 @@ impl Default for Settings {
             pause_when_minimized: false,
             seekbar_chapters: true,
             auto_update: true,
+            analytics: true,
 
             video: true,
             start_fullscreen: false,

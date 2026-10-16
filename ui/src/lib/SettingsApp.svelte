@@ -38,7 +38,7 @@
 
   // Keys reset by each tab's "Restore defaults".
   const TAB_KEYS: Record<Exclude<Tab, "shortcuts">, (keyof Settings)[]> = {
-    general: ["resume", "stopAfterEach", "pauseWhenMinimized", "seekbarChapters", "autoUpdate"],
+    general: ["resume", "stopAfterEach", "pauseWhenMinimized", "seekbarChapters", "autoUpdate", "analytics"],
     video: ["video", "startFullscreen", "alwaysOnTop", "deinterlace", "deinterlaceMode", "snapshotPath", "snapshotPrefix", "snapshotFormat", "snapshotSequential"],
     audio: ["audio", "audioDevice", "audioLanguage", "timeStretch", "replayGain", "spdif"],
     subtitles: ["subtitleLanguage", "subAutodetect", "subAutodetectFuzzy", "subEncoding", "font", "fontSize", "fontColor", "fontOpacity", "bold", "outlineThickness", "outlineColor", "backgroundOpacity", "backgroundColor", "shadowOpacity", "subMargin", "showTitle", "titleTimeout", "titlePosition"],
@@ -203,6 +203,13 @@
         </Row>
         <Row label="ReVLC {version}">
           <button class="btn" onclick={checkForUpdates}>Check now</button>
+        </Row>
+      </div>
+      <h3>Privacy</h3>
+      <div class="group">
+        <Row label="Share anonymous usage statistics"
+          help="Your app version and computer type, and how quickly videos start and seek. Never file names, titles or links.">
+          {@render toggle("analytics")}
         </Row>
       </div>
     {:else if tab === "video"}

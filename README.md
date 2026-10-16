@@ -105,6 +105,12 @@ Updates are signed with the key in the `TAURI_SIGNING_PRIVATE_KEY` secret
 updates signed with it. `npm run build:app` and `scripts/release-files.sh`
 still build and collect a release locally, signed with that file.
 
+## Privacy
+
+ReVLC sends anonymous statistics: the app version, the kind of computer, and
+how quickly videos start and seek. Never file names, titles or links. Turn it
+off in Settings → General → Privacy. Details in [docs/analytics.md](docs/analytics.md).
+
 ## Known issues
 
 - Subtitles can overlap the control bar while it's visible (Settings → Subtitles → "Raise subtitles by" moves them up).
