@@ -1093,6 +1093,29 @@ fn set_menu_shortcuts(app: AppHandle, keys: HashMap<String, String>) -> Res {
     app.set_menu(menu).map(|_| ()).map_err(|e| e.to_string())
 }
 
+/// Runs a menu item that isn't a player action, for the macOS menu bar and
+/// the menus the UI draws on Windows. False if `id` isn't one of them.
+fn run_app_item(app: &AppHandle, id: &str) -> bool {
+    match id {
+        "checkUpdates" => {
+            let app = app.clone();
+            tauri::async_runtime::spawn(async move { updater::check(&app, true).await });
+        }
+        "github" => {
+            let opener = if cfg!(windows) { "explorer" } else { "open" };
+            let _ = std::process::Command::new(opener).arg("https://github.com/HiteshRohira/ReVLC").spawn();
+        }
+        "quit" => app.exit(0),
+        _ => return false,
+    }
+    true
+}
+
+#[tauri::command]
+fn app_menu_item(app: AppHandle, id: String) {
+    run_app_item(&app, &id);
+}
+
 fn show_settings(app: &AppHandle) -> tauri::Result<()> {
     if let Some(window) = app.get_webview_window("settings") {
         window.unminimize()?;
@@ -1101,7 +1124,8 @@ fn show_settings(app: &AppHandle) -> tauri::Result<()> {
     let builder = WebviewWindowBuilder::new(app, "settings", WebviewUrl::App("index.html?view=settings".into()))
         .title("Settings")
         .inner_size(760.0, 640.0)
-        .min_inner_size(640.0, 480.0);
+        .min_inner_size(640.0, 480.0)
+        .center();
     // The UI draws the title bar: traffic lights over it on macOS, its own
     // window buttons elsewhere.
     #[cfg(target_os = "macos")]
@@ -1643,16 +1667,11 @@ pub fn run() {
                     eprintln!("revlc: could not open settings: {e}");
                 }
             }
-            "checkUpdates" => {
-                let app = app.clone();
-                tauri::async_runtime::spawn(async move { updater::check(&app, true).await });
-            }
-            "github" => {
-                let _ = std::process::Command::new("open").arg("https://github.com/HiteshRohira/ReVLC").spawn();
-            }
             // Everything else is a player action the UI knows how to run.
             id => {
-                let _ = app.emit_to("main", "menu://action", id.to_string());
+                if !run_app_item(app, id) {
+                    let _ = app.emit_to("main", "menu://action", id.to_string());
+                }
             }
         })
         .invoke_handler(tauri::generate_handler![
@@ -1672,6 +1691,7 @@ pub fn run() {
             resume_at,
             open_settings,
             set_menu_shortcuts,
+            app_menu_item,
             library_list,
             library_rescan,
             library_add,

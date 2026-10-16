@@ -3,7 +3,8 @@
   import { open as openDialog } from "@tauri-apps/plugin-dialog";
   import { AudioLines, Bookmark, BookmarkPlus, Camera, Check, ChevronLeft, ChevronRight, Crop, FileUp, Gauge, ListTree, Moon, Repeat, Rows3, Settings2, X } from "@lucide/svelte";
   import { player, trackName, formatTime, ASPECT_RATIOS, CROPS, SLEEP_PRESETS, SPEEDS, SUBTITLE_EXTENSIONS, type Track } from "./player.svelte";
-  import { modKey } from "./platform";
+  import { effectiveBindings, formatBinding } from "./actions";
+  import { settings } from "./settings.svelte";
 
   // "subtitles" is the subtitle button's menu; "settings" is the gear menu.
   let { kind = "settings", onclose }: { kind?: "settings" | "subtitles"; onclose: () => void } = $props();
@@ -13,6 +14,8 @@
   let page = $state<Page>(kind === "subtitles" ? "subtitles" : "root");
 
   const s = $derived(player.state);
+  const bindings = $derived(effectiveBindings(settings.value?.shortcuts ?? {}));
+  const key = (id: string) => formatBinding(bindings[id]);
   const t = $derived(player.tracks);
   const name = (list: Track[], id: number) => trackName(list.find((x) => x.id === id)?.name ?? "Off");
   const speedLabel = $derived(Math.abs(s.rate - 1) < 0.01 ? "Normal" : `${Math.round(s.rate * 100) / 100}×`);
@@ -87,11 +90,11 @@
       <Rows3 size={18} /><span class="lab">Deinterlace</span><span class="tog" class:on={player.deinterlace}></span>
     </button>
     <button class="it" onclick={() => { player.snapshot(); onclose(); }}>
-      <Camera size={18} /><span class="lab">Take snapshot</span><em>⇧S</em>
+      <Camera size={18} /><span class="lab">Take snapshot</span><em>{key("snapshot")}</em>
     </button>
     <hr />
     <button class="it" onclick={() => { invoke("open_settings"); onclose(); }}>
-      <Settings2 size={18} /><span class="lab">More settings…</span><em>{modKey},</em>
+      <Settings2 size={18} /><span class="lab">More settings…</span><em>{formatBinding("Cmd+,")}</em>
     </button>
   {:else if page === "speed"}
     {@render header("Playback speed")}
@@ -139,7 +142,7 @@
     </div>
     {#if player.titles.some((t) => t.menu)}
       <hr />
-      <button class="it" onclick={() => { player.navigate("popup"); onclose(); }}><ListTree size={18} /><span class="lab">Disc menu</span><em>⇧M</em></button>
+      <button class="it" onclick={() => { player.navigate("popup"); onclose(); }}><ListTree size={18} /><span class="lab">Disc menu</span><em>{key("discMenu")}</em></button>
     {/if}
   {:else if page === "loop"}
     {@render header("A–B loop")}
@@ -155,12 +158,12 @@
     {/each}
     <hr />
     <button class="it" disabled={s.loopA === null && s.loopB === null} onclick={() => player.setAbLoop(null, null)}>
-      <X size={18} /><span class="lab">Clear loop</span><em>⇧L</em>
+      <X size={18} /><span class="lab">Clear loop</span><em>{key("abLoop")}</em>
     </button>
   {:else if page === "bookmarks"}
     {@render header("Bookmarks")}
     <button class="it" disabled={!player.active} onclick={() => player.addBookmark()}>
-      <BookmarkPlus size={18} /><span class="lab">Add at {formatTime(s.time)}</span><em>{modKey}B</em>
+      <BookmarkPlus size={18} /><span class="lab">Add at {formatTime(s.time)}</span><em>{key("addBookmark")}</em>
     </button>
     <hr />
     <div class="scroll">

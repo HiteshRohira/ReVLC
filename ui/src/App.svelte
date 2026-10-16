@@ -12,6 +12,7 @@
   import DiscDialog from "./lib/DiscDialog.svelte";
   import JumpDialog from "./lib/JumpDialog.svelte";
   import UrlDialog from "./lib/UrlDialog.svelte";
+  import TitleBar from "./lib/TitleBar.svelte";
   import WindowControls from "./lib/WindowControls.svelte";
   import { isMac } from "./lib/platform";
   import { player, isSubtitle, cleanTitle } from "./lib/player.svelte";
@@ -229,6 +230,7 @@
     <div class="stage" role="presentation" ondblclick={(e) => e.target === e.currentTarget && toggleFullscreen()}></div>
     <PlayerView hidden={controlsHidden} onfullscreen={toggleFullscreen} onadd={openFiles} />
   {:else}
+    {#if !isMac}<TitleBar {host} />{/if}
     <Home onopen={openFiles} onopenfolder={openFolder} />
   {/if}
 

@@ -14,7 +14,7 @@
   --acc-soft: rgb(255 255 255 / 0.12);
 
   color-scheme: dark;
-  font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", system-ui, sans-serif;
+  font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI Variable Text", system-ui, sans-serif;
   font-size: 14px;
   color: var(--text);
   -webkit-font-smoothing: antialiased;

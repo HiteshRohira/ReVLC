@@ -3,6 +3,7 @@
   import { onMount } from "svelte";
 
   // Minimise, maximise and close, drawn by the UI on Windows (the window has no title bar).
+  // Fixed to the top right, over the title strip or the player.
   let { hidden = false }: { hidden?: boolean } = $props();
 
   const win = getCurrentWindow();
@@ -48,7 +49,7 @@
     display: grid;
     place-items: center;
     width: 46px;
-    height: 32px;
+    height: 36px;
     border-radius: 0;
     color: var(--text, #fff);
   }

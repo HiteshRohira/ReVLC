@@ -126,7 +126,7 @@ impl Default for Settings {
             background_color: 0,
             shadow_opacity: 128,
             sub_margin: 0,
-            show_title: true,
+            show_title: false,
             title_timeout: 5000,
             title_position: 8,
 
