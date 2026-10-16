@@ -75,7 +75,7 @@
 
   <div class="top" data-tauri-drag-region>
     <div class="bar" data-tauri-drag-region>
-      <button class="back" title="Back to home" aria-label="Back to home" onclick={player.stop}><ChevronLeft size={18} /></button>
+      <button class="back" data-tip="Back to home" aria-label="Back to home" onclick={player.stop}><ChevronLeft size={18} /></button>
       <div class="title" data-tauri-drag-region>
         {cleanTitle(player.current?.title ?? "")}{#if chapterName}<span>&nbsp;·&nbsp;{chapterName}</span>{/if}
       </div>
@@ -86,37 +86,37 @@
     <SeekBar />
     <div class="row">
       <div class="grp">
-        <button class="icon" title="Previous (P)" aria-label="Previous" onclick={player.previous}><SkipBack size={19} /></button>
-        <button class="icon play" title="{player.playing ? 'Pause' : 'Play'} (Space)" aria-label={player.playing ? "Pause" : "Play"} onclick={player.togglePause}>
+        <button class="icon" data-tip="Previous (P)" aria-label="Previous" onclick={player.previous}><SkipBack size={19} /></button>
+        <button class="icon play" data-tip="{player.playing ? 'Pause' : 'Play'} (Space)" aria-label={player.playing ? "Pause" : "Play"} onclick={player.togglePause}>
           <Transport playing={player.playing} size={26} />
         </button>
-        <button class="icon" title="Next (N)" aria-label="Next" onclick={player.next}><SkipForward size={19} /></button>
+        <button class="icon" data-tip="Next (N)" aria-label="Next" onclick={player.next}><SkipForward size={19} /></button>
         <div class="volume">
-          <button class="icon" title="Mute (M)" aria-label={s.muted ? "Unmute" : "Mute"} onclick={() => player.setMuted(!s.muted)}><VolumeIcon size={20} /></button>
+          <button class="icon" data-tip="Mute (M)" aria-label={s.muted ? "Unmute" : "Mute"} onclick={() => player.setMuted(!s.muted)}><VolumeIcon size={20} /></button>
           <input type="range" min="0" max="150" value={s.muted ? 0 : s.volume} style="--progress: {((s.muted ? 0 : s.volume) / 150) * 100}%"
             aria-label="Volume" oninput={(e) => player.setVolume(Number(e.currentTarget.value))} />
         </div>
-        <button class="time tnum" title="Jump to time ({modKey}T)" disabled={!s.seekable} onclick={() => (ui.dialog = "jump")}>
+        <button class="time tnum" data-tip="Jump to time ({modKey}T)" disabled={!s.seekable} onclick={() => (ui.dialog = "jump")}>
           {formatTime(s.time)}&nbsp;<span>/ {s.length > 0 ? formatTime(s.length) : "Live"}</span>
         </button>
       </div>
       <div class="grp">
         <div class="menu-wrap" bind:this={menusEl}>
-          <button class="icon cc" class:on={subtitlesOn} class:active={ui.menu === "subtitles"} title="Subtitles" aria-label="Subtitles"
+          <button class="icon cc" class:on={subtitlesOn} class:active={ui.menu === "subtitles"} data-tip="Subtitles" aria-label="Subtitles"
             aria-expanded={ui.menu === "subtitles"} onclick={() => toggleMenu("subtitles")}>
             <Captions size={21} />
           </button>
-          <button class="icon" class:active={ui.menu === "settings"} title="Settings" aria-label="Settings" aria-expanded={ui.menu === "settings"} onclick={() => toggleMenu("settings")}>
+          <button class="icon" class:active={ui.menu === "settings"} data-tip="Settings" aria-label="Settings" aria-expanded={ui.menu === "settings"} onclick={() => toggleMenu("settings")}>
             <Settings size={20} />
           </button>
           {#if ui.menu}
             {#key ui.menu}<div class="pop"><SettingsMenu kind={ui.menu} onclose={() => (ui.menu = null)} /></div>{/key}
           {/if}
         </div>
-        <button class="icon" class:active={ui.playlistOpen} title="Up next ({modKey}L)" aria-label="Up next" onclick={() => (ui.playlistOpen = !ui.playlistOpen)}>
+        <button class="icon" class:active={ui.playlistOpen} data-tip="Up next ({modKey}L)" aria-label="Up next" onclick={() => (ui.playlistOpen = !ui.playlistOpen)}>
           <ListVideo size={21} />
         </button>
-        <button class="icon" title="Fullscreen (F)" aria-label={ui.fullscreen ? "Exit fullscreen" : "Fullscreen"} onclick={onfullscreen}>
+        <button class="icon" data-tip="Fullscreen (F)" aria-label={ui.fullscreen ? "Exit fullscreen" : "Fullscreen"} onclick={onfullscreen}>
           {#if ui.fullscreen}<Minimize size={19} />{:else}<Maximize size={19} />{/if}
         </button>
       </div>

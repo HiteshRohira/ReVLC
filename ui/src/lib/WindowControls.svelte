@@ -17,17 +17,17 @@
 </script>
 
 <div class="caption" class:hidden>
-  <button aria-label="Minimise" title="Minimise" onclick={() => win.minimize()}>
+  <button aria-label="Minimise" data-tip="Minimise" onclick={() => win.minimize()}>
     <svg viewBox="0 0 10 10"><path d="M0 5h10" /></svg>
   </button>
-  <button aria-label={maximized ? "Restore" : "Maximise"} title={maximized ? "Restore" : "Maximise"} onclick={() => win.toggleMaximize()}>
+  <button aria-label={maximized ? "Restore" : "Maximise"} data-tip={maximized ? "Restore" : "Maximise"} onclick={() => win.toggleMaximize()}>
     {#if maximized}
       <svg viewBox="0 0 10 10"><path d="M2.5 2.5V.5h7v7h-2M.5 2.5h7v7h-7z" /></svg>
     {:else}
       <svg viewBox="0 0 10 10"><path d="M.5.5h9v9h-9z" /></svg>
     {/if}
   </button>
-  <button class="close" aria-label="Close" title="Close" onclick={() => win.close()}>
+  <button class="close" aria-label="Close" data-tip="Close" onclick={() => win.close()}>
     <svg viewBox="0 0 10 10"><path d="M.5.5l9 9M9.5.5l-9 9" /></svg>
   </button>
 </div>

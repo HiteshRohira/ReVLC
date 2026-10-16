@@ -46,6 +46,27 @@ button:disabled {
   opacity: 0.4;
 }
 
+/* Hints from data-tip; see tooltip.ts. */
+.tip {
+  position: fixed;
+  z-index: 300;
+  max-width: 360px;
+  padding: 5px 9px;
+  border-radius: 7px;
+  border: 1px solid var(--border);
+  background: #1e1e21;
+  box-shadow: 0 8px 24px rgb(0 0 0 / 0.45);
+  color: var(--text);
+  font-size: 12px;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+  pointer-events: none;
+}
+
+.tip:not(.on) {
+  display: none;
+}
+
 /* Thumbnails and icons aren't web images to drag out of the window. */
 img {
   -webkit-user-drag: none;

@@ -64,7 +64,7 @@
     {/each}
   </div>
 
-  <label for="disc-list">Disc <button type="button" class="refresh" title="Look for discs again" aria-label="Look for discs again" onclick={refresh}><RefreshCw size={12} /></button></label>
+  <label for="disc-list">Disc <button type="button" class="refresh" data-tip="Look for discs again" aria-label="Look for discs again" onclick={refresh}><RefreshCw size={12} /></button></label>
   <div class="list" id="disc-list" role="radiogroup" aria-label="Disc">
     {#each found as d (d.path)}
       <button type="button" class="opt" role="radio" aria-checked={path === d.path} class:on={path === d.path} onclick={() => (path = d.path)}>
@@ -72,7 +72,7 @@
       </button>
     {/each}
     {#if path && !found.some((d) => d.path === path)}
-      <button type="button" class="opt on" role="radio" aria-checked="true" title={path}><FileBox size={16} /><span>{name(path)}</span></button>
+      <button type="button" class="opt on" role="radio" aria-checked="true" data-tip={path}><FileBox size={16} /><span>{name(path)}</span></button>
     {/if}
     {#if !found.length && !path}<div class="none">No {KINDS.find((k) => k.kind === kind)!.label} found. Insert one, or choose a folder or image.</div>{/if}
   </div>

@@ -124,6 +124,7 @@
 <svelte:window onkeydowncapture={onKey} />
 
 {#snippet toggle(key: keyof Settings)}
+  <!-- svelte-ignore a11y_consider_explicit_label (Row names it after its label) -->
   <button class="switch" class:on={v![key]} role="switch" aria-checked={!!v![key]}
     onclick={() => settings.set({ [key]: !v![key] } as Partial<Settings>)}></button>
 {/snippet}
@@ -221,7 +222,7 @@
       <h3>Snapshots</h3>
       <div class="group">
         <Row label="Folder">
-          <span class="path" title={v.snapshotPath || SNAPSHOT_DEFAULT}>{v.snapshotPath ? v.snapshotPath.split(/[\\/]/).pop() : SNAPSHOT_DEFAULT}</span>
+          <span class="path" data-tip={v.snapshotPath || SNAPSHOT_DEFAULT}>{v.snapshotPath ? v.snapshotPath.split(/[\\/]/).pop() : SNAPSHOT_DEFAULT}</span>
           <button class="btn" onclick={chooseSnapshotFolder}>Choose…</button>
         </Row>
         <Row label="File name prefix">{@render text("snapshotPrefix", "vlcsnap-")}</Row>

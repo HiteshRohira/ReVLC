@@ -61,13 +61,13 @@
 <aside class="queue" aria-label="Up next">
   <header>
     <h2>Up next <span>{player.playlist.items.length}</span></h2>
-    <button class="icon" title="Close ({modKey}L)" aria-label="Close" onclick={() => (ui.playlistOpen = false)}><X size={18} /></button>
+    <button class="icon" data-tip="Close ({modKey}L)" aria-label="Close" onclick={() => (ui.playlistOpen = false)}><X size={18} /></button>
   </header>
   <div class="tools">
     <button class="tool" onclick={onadd}><Plus size={15} /> Add</button>
     <span class="sp"></span>
     <div class="sort" bind:this={sortEl}>
-      <button class="icon sm" class:on={sortOpen} title="Sort" aria-label="Sort" aria-expanded={sortOpen} disabled={player.playlist.items.length < 2}
+      <button class="icon sm" class:on={sortOpen} data-tip="Sort" aria-label="Sort" aria-expanded={sortOpen} disabled={player.playlist.items.length < 2}
         onclick={() => (sortOpen = !sortOpen)}><ArrowUpDown size={16} /></button>
       {#if sortOpen}
         <div class="drop" role="menu">
@@ -75,15 +75,15 @@
         </div>
       {/if}
     </div>
-    <button class="icon sm" title="Save playlist ({modKey}S)" aria-label="Save playlist" disabled={!player.playlist.items.length}
+    <button class="icon sm" data-tip="Save playlist ({modKey}S)" aria-label="Save playlist" disabled={!player.playlist.items.length}
       onclick={savePlaylist}><Save size={16} /></button>
-    <button class="icon sm" class:on={player.playlist.shuffle} title={player.playlist.shuffle ? "Shuffle on" : "Shuffle off"}
+    <button class="icon sm" class:on={player.playlist.shuffle} data-tip={player.playlist.shuffle ? "Shuffle on" : "Shuffle off"}
       aria-pressed={player.playlist.shuffle} onclick={() => player.setShuffle(!player.playlist.shuffle)}><Shuffle size={16} /></button>
-    <button class="icon sm" class:on={player.playlist.repeat !== "off"} title={LABEL[player.playlist.repeat]} aria-label={LABEL[player.playlist.repeat]}
+    <button class="icon sm" class:on={player.playlist.repeat !== "off"} data-tip={LABEL[player.playlist.repeat]} aria-label={LABEL[player.playlist.repeat]}
       onclick={() => player.setRepeat(NEXT[player.playlist.repeat])}>
       {#if player.playlist.repeat === "one"}<Repeat1 size={16} />{:else}<Repeat size={16} />{/if}
     </button>
-    <button class="icon sm" title="Clear" aria-label="Clear queue" disabled={!player.playlist.items.length} onclick={player.clear}><Trash2 size={16} /></button>
+    <button class="icon sm" data-tip="Clear" aria-label="Clear queue" disabled={!player.playlist.items.length} onclick={player.clear}><Trash2 size={16} /></button>
   </div>
   {#if player.playlist.items.length > 1}
     <div class="search">
@@ -97,11 +97,11 @@
     {#each visible as { item, i } (i + item.uri)}
       <li data-index={i} class:current={i === player.playlist.current} class:target={dropAt === i && dragFrom !== i}
         onpointerdown={(e) => onPress(e, i)}>
-        <button class="entry" title={item.uri} ondblclick={() => player.playIndex(i)} onkeydown={(e) => e.key === "Enter" && player.playIndex(i)}>
+        <button class="entry" data-tip={item.uri} ondblclick={() => player.playIndex(i)} onkeydown={(e) => e.key === "Enter" && player.playIndex(i)}>
           <span class="n tnum">{i === player.playlist.current ? "▶" : i + 1}</span>
           <span class="t">{cleanTitle(item.title)}</span>
         </button>
-        <button class="rm" aria-label="Remove {item.title}" title="Remove" onclick={() => player.remove(i)}><X size={14} /></button>
+        <button class="rm" aria-label="Remove {item.title}" data-tip="Remove" onclick={() => player.remove(i)}><X size={14} /></button>
       </li>
     {:else}
       <p class="empty">{query ? "Nothing matches your search." : "Drop files or playlists here, or click Add."}</p>

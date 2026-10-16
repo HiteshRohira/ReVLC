@@ -96,8 +96,8 @@
 {#snippet historyTile(e: HistoryEntry, withProgress: boolean)}
   <div class="tile">
     {@render thumb(thumbUrl(e.thumb, player.thumbVersion), e.length, withProgress && e.length > 0 ? e.position / e.length : null, () => player.open([e.uri]), e.uri)}
-    <button class="forget" title="Remove from history" aria-label="Remove {cleanTitle(e.title)} from history" onclick={() => player.forget(e.uri)}><X size={14} /></button>
-    <div class="n" title={cleanTitle(e.title)}>{cleanTitle(e.title)}</div>
+    <button class="forget" data-tip="Remove from history" aria-label="Remove {cleanTitle(e.title)} from history" onclick={() => player.forget(e.uri)}><X size={14} /></button>
+    <div class="n" data-tip={cleanTitle(e.title)}>{cleanTitle(e.title)}</div>
     <div class="m">{withProgress ? left(e) : e.finished ? "Watched" : e.uri.includes("://") ? "Stream" : "Recently opened"}</div>
   </div>
 {/snippet}
@@ -105,7 +105,7 @@
 {#snippet libraryTile(item: LibraryItem, name: string, sub: string)}
   <div class="tile">
     {@render thumb(thumbUrl(item.thumb ?? item.art, player.thumbVersion), item.duration, null, () => playFromFolder(item), item.uri)}
-    <div class="n" title={name}>{name}</div>
+    <div class="n" data-tip={name}>{name}</div>
     <div class="m">{sub}</div>
   </div>
 {/snippet}
@@ -185,9 +185,9 @@
           <div class="root">
             <div>
               <h2>{base(root)}</h2>
-              <p title={root}>{root}</p>
+              <p data-tip={root}>{root}</p>
             </div>
-            <button class="btn small" title="Remove from library (files are not deleted)" onclick={() => player.removeFolder(root)}><X size={14} />Remove</button>
+            <button class="btn small" data-tip="Remove from library (files are not deleted)" aria-label="Remove {root} from library" onclick={() => player.removeFolder(root)}><X size={14} />Remove</button>
           </div>
           {#each rootGroups as g (g.key)}
             {#if g.art}

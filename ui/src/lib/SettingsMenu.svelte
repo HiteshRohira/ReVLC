@@ -68,7 +68,7 @@
 
 {#snippet delay(label: string, ms: number, set: (v: number) => void)}
   <div class="delay">
-    <div class="row"><span>{label}</span><button class="val tnum" title="Reset" onclick={() => set(0)}>{fmtDelay(ms)}</button></div>
+    <div class="row"><span>{label}</span><button class="val tnum" data-tip="Reset" aria-label="Reset {label}, now {fmtDelay(ms)}" onclick={() => set(0)}>{fmtDelay(ms)}</button></div>
     <input type="range" min="-5000" max="5000" step="50" value={ms} style="--progress: {((ms + 5000) / 10000) * 100}%"
       aria-label={label} oninput={(e) => set(Number(e.currentTarget.value))} />
     <div class="ends"><span>Earlier</span><span>Later</span></div>
@@ -175,11 +175,11 @@
               onkeydown={(e) => { e.stopPropagation(); if (e.key === "Enter") rename(b.time, e.currentTarget.value); if (e.key === "Escape") editing = null; }}
               onblur={(e) => rename(b.time, e.currentTarget.value)} />
           {:else}
-            <button class="it" title="Jump here · double-click to rename" onclick={() => player.seek(b.time)} ondblclick={() => (editing = b.time)}>
+            <button class="it" data-tip="Jump here · double-click to rename" onclick={() => player.seek(b.time)} ondblclick={() => (editing = b.time)}>
               <span class="lab">{b.name}</span><em class="tnum">{formatTime(b.time)}</em>
             </button>
           {/if}
-          <button class="rm" title="Remove" aria-label="Remove {b.name}" onclick={() => player.removeBookmark(b.time)}><X size={14} /></button>
+          <button class="rm" data-tip="Remove" aria-label="Remove {b.name}" onclick={() => player.removeBookmark(b.time)}><X size={14} /></button>
         </div>
       {:else}
         <p class="empty">No bookmarks in this file</p>

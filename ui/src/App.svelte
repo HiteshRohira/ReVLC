@@ -270,7 +270,7 @@
   {/if}
 
   {#if sleepLeft && showPlayer && !controlsHidden}
-    <button class="sleep tnum" title="Sleep timer (click to turn off)" onclick={() => player.setSleepTimer(null)}><Moon size={13} />{sleepLeft}</button>
+    <button class="sleep tnum" data-tip="Sleep timer (click to turn off)" aria-label="Sleep timer: {sleepLeft}. Turn off" onclick={() => player.setSleepTimer(null)}><Moon size={13} />{sleepLeft}</button>
   {/if}
 
   {#if ui.dialog === "url"}<UrlDialog />
