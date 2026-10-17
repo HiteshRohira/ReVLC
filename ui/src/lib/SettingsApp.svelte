@@ -262,6 +262,7 @@
             background: {v.backgroundOpacity ? `${hex(v.backgroundColor)}${Math.round(v.backgroundOpacity).toString(16).padStart(2, '0')}` : 'transparent'};
             margin-bottom: {Math.min(60, v.subMargin / 4)}px"
         >This is how subtitles will look.</span>
+        <small class="credit">Tears of Steel · (CC) Blender Foundation</small>
       </div>
       <h3>Language</h3>
       <div class="group">
@@ -521,6 +522,16 @@
     border-radius: 12px;
     background: linear-gradient(transparent 40%, rgb(0 0 0 / 0.35)), url("/preview-frame.jpg") center 35% / cover, #2a3340;
     overflow: hidden;
+  }
+  .preview .credit {
+    position: absolute;
+    top: 8px;
+    right: 10px;
+    padding: 1px 6px;
+    border-radius: 4px;
+    background: rgb(0 0 0 / 0.5);
+    font-size: 10px;
+    color: rgb(255 255 255 / 0.75);
   }
   .preview span {
     padding: 2px 6px;

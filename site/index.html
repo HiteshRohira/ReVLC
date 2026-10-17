@@ -17,13 +17,13 @@
   <meta property="og:image" content="assets/og-image.jpg">
   <meta property="og:image:width" content="1200">
   <meta property="og:image:height" content="630">
-  <meta property="og:image:alt" content="ReVLC playing a film with subtitles and a minimal control bar">
+  <meta property="og:image:alt" content="Cassiopeia A, the remains of an exploded star, seen by the James Webb Space Telescope">
   <meta name="twitter:card" content="summary_large_image">
   <meta name="twitter:title" content="ReVLC: VLC, rebuilt for the modern age">
   <meta name="twitter:description" content="The VLC engine you trust, with an interface built for today. Free and open source. Early alpha for macOS and Windows.">
   <meta name="twitter:image" content="assets/og-image.jpg">
 
-  <link rel="preload" as="image" href="assets/player.jpg" imagesrcset="assets/player-1000.jpg 1000w, assets/player.jpg 2000w" imagesizes="(min-width: 1240px) 1160px, 94vw">
+  <link rel="preload" as="image" href="assets/player.webp" imagesrcset="assets/player-1000.webp 1000w, assets/player.webp 2000w" imagesizes="(min-width: 1240px) 1160px, 94vw">
   <link rel="stylesheet" href="styles.css">
   <script src="main.js" defer></script>
   <script src="analytics.js" defer></script>
@@ -77,12 +77,13 @@
       <div class="wrap wrap-wide">
         <figure class="screen">
           <!-- A blurred copy of the frame lights the page around it, like bias lighting behind a TV. -->
-          <img class="screen-glow" src="assets/player-1000.jpg" alt="" aria-hidden="true" width="1000" height="625">
-          <img class="screen-img" src="assets/player.jpg"
-               srcset="assets/player-1000.jpg 1000w, assets/player.jpg 2000w"
+          <img class="screen-glow" src="assets/player-1000.webp" alt="" aria-hidden="true" width="1000" height="625">
+          <img class="screen-img" src="assets/player.webp"
+               srcset="assets/player-1000.webp 1000w, assets/player.webp 2000w"
                sizes="(min-width: 1240px) 1160px, 94vw"
                width="2000" height="1250"
-               alt="ReVLC paused on an episode of Suits, with the episode title at the top and a slim control bar along the bottom">
+               alt="ReVLC paused on Cassiopeia A, with the title at the top and a slim control bar split into chapters along the bottom">
+          <figcaption class="clip-credit">Cassiopeia A · ESA/Webb</figcaption>
         </figure>
       </div>
     </section>
@@ -120,40 +121,41 @@
               <p class="step-time">00:00</p>
               <h3>Pick up where you left off.</h3>
               <p>Continue watching remembers your position in every file and shows a thumbnail of where you stopped. Everything you open lands in Recently added.</p>
-              <img class="step-img" src="assets/home-1000.jpg" width="1000" height="625" loading="lazy" decoding="async"
-                   alt="ReVLC home screen with a Continue watching row showing progress on each thumbnail, and Recently added episodes of Suits">
+              <img class="step-img" src="assets/home-1000.webp" width="1000" height="625" loading="lazy" decoding="async"
+                   alt="ReVLC home screen with a Continue watching row showing progress on the thumbnail, and Recently added episodes of a demo show">
             </li>
             <li class="step" data-step="1">
               <p class="step-time">05:33</p>
               <h3>A library that knows a season is a season.</h3>
               <p>Add a folder and ReVLC builds a library from it, reading show names, seasons, episode titles and durations from your files.</p>
-              <img class="step-img" src="assets/library-1000.jpg" width="1000" height="625" loading="lazy" decoding="async"
-                   alt="The Videos page listing a season of Suits as titled episodes with thumbnails and durations">
+              <img class="step-img" src="assets/library-1000.webp" width="1000" height="625" loading="lazy" decoding="async"
+                   alt="The Videos page listing a season of a demo show as titled episodes with thumbnails and durations">
             </li>
             <li class="step" data-step="2">
               <p class="step-time">15:27</p>
               <h3>One menu for everything.</h3>
               <p>Speed, audio track, crop and aspect ratio, chapters, A–B loop, bookmarks, a sleep timer and deinterlacing. All in a single menu that stays out of the way until you need it.</p>
-              <img class="step-img" src="assets/player-menu-1000.jpg" width="1000" height="625" loading="lazy" decoding="async"
-                   alt="The player menu open over a paused episode, listing playback speed, audio, crop and aspect, chapters, A–B loop, bookmarks, sleep timer, deinterlace and snapshot">
+              <img class="step-img" src="assets/player-menu-1000.webp" width="1000" height="625" loading="lazy" decoding="async"
+                   alt="The player menu open over Westerlund 2, listing playback speed, audio, crop and aspect, A–B loop, bookmarks, sleep timer, deinterlace and snapshot">
             </li>
             <li class="step" data-step="3">
               <p class="step-time">27:58</p>
               <h3>Up next, your way.</h3>
               <p>Queue up files and drag them into order, search and sort them, or save the queue as an M3U, PLS or XSPF playlist. Shuffle, or repeat one or all.</p>
-              <img class="step-img" src="assets/queue-1000.jpg" width="1000" height="625" loading="lazy" decoding="async"
-                   alt="The Up next panel open beside a paused episode, listing the next three episodes, with search, sort, save, shuffle, repeat and clear controls">
+              <img class="step-img" src="assets/queue-1000.webp" width="1000" height="625" loading="lazy" decoding="async"
+                   alt="The Up next panel open beside a solar flare, listing three episodes, with search, sort, save, shuffle, repeat and clear controls">
             </li>
           </ol>
 
           <div class="tour-stage" aria-hidden="true">
             <div class="stage-frame">
-              <img class="is-active" src="assets/home-1000.jpg" srcset="assets/home-1000.jpg 1000w, assets/home.jpg 2000w" sizes="680px" width="2000" height="1250" alt="" loading="lazy" decoding="async">
-              <img src="assets/library-1000.jpg" srcset="assets/library-1000.jpg 1000w, assets/library.jpg 1600w" sizes="680px" width="1600" height="1000" alt="" loading="lazy" decoding="async">
-              <img src="assets/player-menu-1000.jpg" srcset="assets/player-menu-1000.jpg 1000w, assets/player-menu.jpg 2000w" sizes="680px" width="2000" height="1250" alt="" loading="lazy" decoding="async">
-              <img src="assets/queue-1000.jpg" srcset="assets/queue-1000.jpg 1000w, assets/queue.jpg 2000w" sizes="680px" width="2000" height="1250" alt="" loading="lazy" decoding="async">
+              <img class="is-active" src="assets/home-1000.webp" srcset="assets/home-1000.webp 1000w, assets/home.webp 2000w" sizes="680px" width="2000" height="1250" alt="" loading="lazy" decoding="async">
+              <img src="assets/library-1000.webp" srcset="assets/library-1000.webp 1000w, assets/library.webp 1600w" sizes="680px" width="1600" height="1000" alt="" loading="lazy" decoding="async">
+              <img src="assets/player-menu-1000.webp" srcset="assets/player-menu-1000.webp 1000w, assets/player-menu.webp 2000w" sizes="680px" width="2000" height="1250" alt="" loading="lazy" decoding="async">
+              <img src="assets/queue-1000.webp" srcset="assets/queue-1000.webp 1000w, assets/queue.webp 2000w" sizes="680px" width="2000" height="1250" alt="" loading="lazy" decoding="async">
             </div>
             <div class="stage-bar"><span></span><span></span><span></span><span></span></div>
+            <p class="clip-credit">Cassiopeia A and Westerlund 2 · ESA/Webb. Solar flare · NASA/SDO</p>
           </div>
         </div>
       </div>
@@ -177,14 +179,14 @@
               <span style="--at: 13%"></span><span style="--at: 36%"></span><span style="--at: 50%"></span><span style="--at: 65%"></span><span style="--at: 78%"></span>
               <i></i>
             </div>
-            <img class="tile-shot tile-shot-br" src="assets/crop-chapters.jpg" width="600" height="530" loading="lazy" decoding="async"
-                 alt="The Chapters menu listing seven chapters with start times, Chapter 03 checked">
+            <img class="tile-shot tile-shot-br" src="assets/crop-chapters.webp" width="600" height="530" loading="lazy" decoding="async"
+                 alt="The Chapters menu listing five chapters with start times, Chapter 05 checked">
           </li>
 
           <li class="tile tile-keys">
             <div class="tile-copy">
               <h3>The keys you know.</h3>
-              <p>VLC's shortcuts, all editable. Press <kbd>?</kbd> in the app to see them. Try them here.</p>
+              <p>VLC-style shortcuts you can rebind. Press <kbd>?</kbd> in the app to see them. Try them here.</p>
             </div>
             <div class="keys" aria-hidden="true">
               <div class="keys-row">
@@ -200,18 +202,18 @@
           <li class="tile tile-subs">
             <div class="tile-copy">
               <h3>Subtitles, already on.</h3>
-              <p>They turn on in your system language, including Blu-ray image subtitles. Style them with a live preview, and the video you're watching updates as you go.</p>
+              <p>They turn on in your system language. Style them with a live preview, and the video you're watching updates as you go.</p>
             </div>
-            <img class="tile-shot tile-shot-b" src="assets/settings-window-760.jpg" srcset="assets/settings-window-760.jpg 760w, assets/settings-window.jpg 1520w" sizes="(min-width: 960px) 380px, 90vw" width="1520" height="1280" loading="lazy" decoding="async"
+            <img class="tile-shot tile-shot-b" src="assets/settings-window-760.webp" srcset="assets/settings-window-760.webp 760w, assets/settings-window.webp 1520w" sizes="(min-width: 960px) 380px, 90vw" width="1520" height="1280" loading="lazy" decoding="async"
                  alt="ReVLC's Settings window on the Subtitles tab, with a live subtitle preview and language options">
           </li>
 
           <li class="tile tile-disc">
             <div class="tile-copy">
-              <h3>Discs, with their menus.</h3>
-              <p>DVD and Blu-ray with menus, audio CD, VCD, VIDEO_TS folders and disc images.</p>
+              <h3>Discs and disc images.</h3>
+              <p>DVDs with their menus, unencrypted Blu-ray, audio CD, VCD, VIDEO_TS folders and disc images.</p>
             </div>
-            <img class="tile-shot tile-shot-br" src="assets/crop-disc.jpg" width="760" height="470" loading="lazy" decoding="async"
+            <img class="tile-shot tile-shot-br" src="assets/crop-disc.webp" width="760" height="470" loading="lazy" decoding="async"
                  alt="The Open disc dialog with DVD, Blu-ray, Audio CD and VCD tabs and a Use disc menus option">
           </li>
 
@@ -236,14 +238,14 @@
         <div class="accent-copy">
           <p class="label">03 · Make it yours</p>
           <h2 id="accent-title">Your colour.</h2>
-          <p>Choose an accent the first time you open ReVLC, and change it any time from the sidebar. Go on, try it on this page.</p>
+          <p>Choose an accent the first time you open ReVLC, and change it any time in Settings. Go on, try it on this page.</p>
           <div class="swatches" role="radiogroup" aria-label="Page accent">
             <button class="swatch-btn" type="button" role="radio" aria-checked="false" data-accent="white"><span class="swatch swatch-white" aria-hidden="true"></span>ReVLC White</button>
             <button class="swatch-btn" type="button" role="radio" aria-checked="true" data-accent="orange"><span class="swatch swatch-orange" aria-hidden="true"></span>VLC Orange</button>
           </div>
         </div>
         <figure class="shot">
-          <img src="assets/onboarding-orange-1000.jpg" srcset="assets/onboarding-orange-1000.jpg 1000w, assets/onboarding-orange.jpg 2000w" sizes="(min-width: 960px) 640px, 92vw" width="2000" height="1250" loading="lazy" decoding="async"
+          <img src="assets/onboarding-orange-1000.webp" srcset="assets/onboarding-orange-1000.webp 1000w, assets/onboarding-orange.webp 2000w" sizes="(min-width: 960px) 640px, 92vw" width="2000" height="1250" loading="lazy" decoding="async"
                alt="The Welcome to ReVLC screen offering two accents, ReVLC White and VLC Orange, with VLC Orange selected">
         </figure>
       </div>
@@ -355,7 +357,12 @@
           <li><a href="https://github.com/HiteshRohira/ReVLC/blob/master/LICENSE">GPL-3.0</a></li>
         </ul>
       </div>
-      <p>Film stills from <a href="https://studio.blender.org/films/">Blender Foundation open movies</a> (Tears of Steel, Big Buck Bunny, Elephants Dream, Cosmos Laundromat, Spring), licensed CC-BY.</p>
+      <p class="credits">Screenshots show a demo folder, "Deep Sky", with chapter markers and captions added.
+        <a href="https://esawebb.org/videos/weic2311a/">Cassiopeia A</a>: NASA, ESA, CSA, D. Milisavljevic (Purdue University), T. Temim (Princeton University), I. De Looze (UGent), J. DePasquale (STScI), N. Bartmann (ESA/Webb), M. Zimani (ESA/Webb).
+        <a href="https://esawebb.org/videos/potm2512a/">Westerlund 2</a>: ESA/Webb, NASA &amp; CSA, V. Almendros-Abad, M. Guarcello, K. Monsch, the EWOCS team, N. Bartmann (ESA/Webb).
+        Both <a href="https://creativecommons.org/licenses/by/4.0/">CC BY 4.0</a>.
+        <a href="https://svs.gsfc.nasa.gov/12224">Solar flare</a>: NASA's Goddard Space Flight Center/SDO.
+        Subtitle preview: <a href="https://studio.blender.org/projects/tears-of-steel/">Tears of Steel</a>, (CC) Blender Foundation, <a href="https://creativecommons.org/licenses/by/3.0/">CC BY 3.0</a>.</p>
       <p>"VLC" is a trademark of VideoLAN. ReVLC is an independent project and is not affiliated with or endorsed by VideoLAN.</p>
     </div>
   </footer>

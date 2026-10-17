@@ -69,7 +69,7 @@ if (steps.length && frames.length) {
   show(0);
 }
 
-// Accent switch, like the one in the app's sidebar.
+// Accent switch, like the one in the app's Settings.
 const swatches = [...document.querySelectorAll("[data-accent]")];
 const setAccent = (name) => {
   if (name === "white") root.dataset.accent = "white";

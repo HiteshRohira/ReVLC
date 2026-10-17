@@ -1,8 +1,8 @@
 # VLC feature parity checklist
 
 This is ReVLC's public roadmap. The goal is every user-facing feature of VLC
-3.0 desktop, with a modern UI. Codec support covers the popular formats
-rather than everything VLC can decode.
+3.0 desktop, with a modern UI. ReVLC bundles all of VLC's codecs and plugins, so it
+plays what VLC plays.
 
 Main features come first. Ship, get feedback, then keep ticking boxes.
 
@@ -27,7 +27,7 @@ Main features come first. Ship, get feedback, then keep ticking boxes.
 - [x] Open network URL: HTTP(S), HLS, DASH, RTSP, RTMP, UDP *(engine)*
 - [x] Vimeo, Dailymotion and similar via VLC's Lua scripts *(engine)*. YouTube is out: VLC 3.0.24 removed its broken youtube.lua.
 - [x] Open folder (recursive, natural sort)
-- [x] Open disc: DVD with menus, Blu-ray, audio CD, VCD, ISO *(engine)*
+- [x] Open disc: DVD with menus, Blu-ray (unencrypted; no BD-J menus), audio CD, VCD, ISO *(engine)*
 - [x] Capture devices: webcam, microphone, screen *(engine)*
 
 ## Playlist
@@ -65,7 +65,7 @@ Main features come first. Ship, get feedback, then keep ticking boxes.
 - [x] Aspect ratio override
 - [x] Crop
 - [x] Deinterlace
-- [x] Snapshot (saved to Pictures)
+- [x] Snapshot (saved to the Desktop on macOS, Pictures on Windows)
 - [x] Fullscreen
 - [ ] Zoom and pan
 - [ ] Rotate / flip

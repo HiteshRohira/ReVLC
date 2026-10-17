@@ -8,38 +8,44 @@ ReVLC aims for full VLC feature parity with a cleaner, faster UI. It is early:
 see the [feature parity checklist](docs/parity.md) for what works today and
 what's next.
 
-![ReVLC paused on an episode of Suits](docs/screenshot.jpg)
+![ReVLC paused on Cassiopeia A](docs/screenshot.webp)
 
-## Screenshots
+<sub>Cassiopeia A · ESA/Webb. Footage credits are under [Credits](#credits).</sub>
 
-Click any screenshot for the full size.
+<details>
+<summary><b>More screenshots</b></summary>
+<br>
+
+Click any screenshot for the full size, or browse [docs/screenshots](docs/screenshots).
 
 <table>
   <tr>
-    <td width="50%"><a href="docs/screenshots/home.jpg"><img src="docs/screenshots/home.jpg" alt="Home: Continue watching and Recently added"></a><br><b>Home</b>: continue watching and recently added</td>
-    <td width="50%"><a href="docs/screenshots/library.jpg"><img src="docs/screenshots/library.jpg" alt="Videos: a show's episodes with titles and durations"></a><br><b>Library</b>: shows grouped by season, with episode titles</td>
+    <td width="50%"><a href="docs/screenshots/home.webp"><img src="docs/screenshots/home.webp" alt="Home: Continue watching and Recently added"></a><br><b>Home</b>: continue watching and recently added</td>
+    <td width="50%"><a href="docs/screenshots/library.webp"><img src="docs/screenshots/library.webp" alt="Videos: a show's episodes with titles and durations"></a><br><b>Library</b>: shows grouped by season, with episode titles</td>
   </tr>
   <tr>
-    <td><a href="docs/screenshots/menu.jpg"><img src="docs/screenshots/menu.jpg" alt="The player menu"></a><br><b>Player menu</b>: speed, audio, crop, chapters, A–B loop, bookmarks, sleep timer</td>
-    <td><a href="docs/screenshots/chapters.jpg"><img src="docs/screenshots/chapters.jpg" alt="The chapters page of the player menu"></a><br><b>Chapters</b></td>
+    <td><a href="docs/screenshots/menu.webp"><img src="docs/screenshots/menu.webp" alt="The player menu"></a><br><b>Player menu</b>: speed, audio, crop, chapters, A–B loop, bookmarks, sleep timer</td>
+    <td><a href="docs/screenshots/chapters.webp"><img src="docs/screenshots/chapters.webp" alt="The chapters page of the player menu"></a><br><b>Chapters</b></td>
   </tr>
   <tr>
-    <td><a href="docs/screenshots/subtitles-menu.jpg"><img src="docs/screenshots/subtitles-menu.jpg" alt="The subtitles menu"></a><br><b>Subtitles</b>: tracks, external files, delay</td>
-    <td><a href="docs/screenshots/queue.jpg"><img src="docs/screenshots/queue.jpg" alt="The Up next queue"></a><br><b>Up next</b>: search, sort, save as M3U, PLS or XSPF</td>
+    <td><a href="docs/screenshots/subtitles-menu.webp"><img src="docs/screenshots/subtitles-menu.webp" alt="The subtitles menu"></a><br><b>Subtitles</b>: tracks, external files, delay</td>
+    <td><a href="docs/screenshots/queue.webp"><img src="docs/screenshots/queue.webp" alt="The Up next queue"></a><br><b>Up next</b>: search, sort, save as M3U, PLS or XSPF</td>
   </tr>
   <tr>
-    <td><a href="docs/screenshots/jump.jpg"><img src="docs/screenshots/jump.jpg" alt="The Jump to time dialog"></a><br><b>Jump to time</b> (⌘T)</td>
-    <td><a href="docs/screenshots/disc.jpg"><img src="docs/screenshots/disc.jpg" alt="The Open disc dialog"></a><br><b>Open disc</b>: DVD, Blu-ray, audio CD, VCD, ISO</td>
+    <td><a href="docs/screenshots/jump.webp"><img src="docs/screenshots/jump.webp" alt="The Jump to time dialog"></a><br><b>Jump to time</b> (⌘T)</td>
+    <td><a href="docs/screenshots/disc.webp"><img src="docs/screenshots/disc.webp" alt="The Open disc dialog"></a><br><b>Open disc</b>: DVD, Blu-ray, audio CD, VCD, ISO</td>
   </tr>
   <tr>
-    <td><a href="docs/screenshots/settings-general.jpg"><img src="docs/screenshots/settings-general.jpg" alt="Settings: General"></a><br><b>Settings</b>: General</td>
-    <td><a href="docs/screenshots/settings-subtitles.jpg"><img src="docs/screenshots/settings-subtitles.jpg" alt="Settings: Subtitles with a live preview"></a><br><b>Settings</b>: subtitle styling with a live preview</td>
+    <td><a href="docs/screenshots/settings-general.webp"><img src="docs/screenshots/settings-general.webp" alt="Settings: General"></a><br><b>Settings</b>: General</td>
+    <td><a href="docs/screenshots/settings-subtitles.webp"><img src="docs/screenshots/settings-subtitles.webp" alt="Settings: Subtitles with a live preview"></a><br><b>Settings</b>: subtitle styling with a live preview</td>
   </tr>
   <tr>
-    <td><a href="docs/screenshots/settings-shortcuts.jpg"><img src="docs/screenshots/settings-shortcuts.jpg" alt="Settings: Shortcuts"></a><br><b>Settings</b>: editable, VLC-style shortcuts</td>
+    <td><a href="docs/screenshots/settings-shortcuts.webp"><img src="docs/screenshots/settings-shortcuts.webp" alt="Settings: Shortcuts"></a><br><b>Settings</b>: editable, VLC-style shortcuts</td>
     <td></td>
   </tr>
 </table>
+
+</details>
 
 ## Stack
 
@@ -76,7 +82,7 @@ npm run tauri dev     # run in development
 npm run build:app     # macOS: ReVLC.app and a .dmg; Windows: an NSIS installer (both in src-tauri/target/release/bundle)
 ```
 
-`prepare:vlc` puts libVLC (libraries, plugins and Lua scripts, about 80 MB)
+`prepare:vlc` puts libVLC (libraries, plugins and Lua scripts, about 90 MB)
 in `src-tauri/vlc`, which is bundled into the app. Without it, development
 builds fall back to an installed VLC.app. Set `REVLC_VLC_DIR` to use libVLC
 from somewhere else (a directory with `lib/`, `plugins/` and `share/`; on
@@ -107,8 +113,9 @@ still build and collect a release locally, signed with that file.
 
 ## Privacy
 
-ReVLC sends anonymous statistics: the app version, the kind of computer, and
-how quickly videos start and seek. Never file names, titles or links. Turn it
+ReVLC sends anonymous statistics: the app version, the kind of computer, how
+quickly videos start and seek, and what kind of video played (codec,
+resolution, length, time watched). Never file names, titles or links. Turn it
 off in Settings → General → Privacy. Details in [docs/analytics.md](docs/analytics.md).
 
 ## Known issues
@@ -122,6 +129,16 @@ off in Settings → General → Privacy. Details in [docs/analytics.md](docs/ana
 
 Pick an unchecked item in [docs/parity.md](docs/parity.md). Most "engine"
 items only need UI and a thin command in `src-tauri/src/vlc.rs`.
+
+## Credits
+
+The screenshots show a demo folder, "Deep Sky", made from these clips (chapter markers and captions added):
+
+- [Pan of Cassiopeia A](https://esawebb.org/videos/weic2311a/): NASA, ESA, CSA, D. Milisavljevic (Purdue University), T. Temim (Princeton University), I. De Looze (UGent), J. DePasquale (STScI), N. Bartmann (ESA/Webb), M. Zimani (ESA/Webb). [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/).
+- [Pan of Westerlund 2](https://esawebb.org/videos/potm2512a/): ESA/Webb, NASA & CSA, V. Almendros-Abad, M. Guarcello, K. Monsch, the EWOCS team, N. Bartmann (ESA/Webb). [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/).
+- [Solar flare, April 17, 2016](https://svs.gsfc.nasa.gov/12224): NASA's Goddard Space Flight Center/SDO.
+
+The subtitle preview in Settings, which ships with the app, is a still from [Tears of Steel](https://studio.blender.org/projects/tears-of-steel/), (CC) Blender Foundation, [CC BY 3.0](https://creativecommons.org/licenses/by/3.0/).
 
 ## License
 
