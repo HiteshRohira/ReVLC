@@ -1,0 +1,45 @@
+name: Bug report
+description: Something doesn't play, looks wrong or crashes.
+labels: [bug]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you did, what you expected, and what you saw instead. Screenshots help.
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: ReVLC version
+      description: Settings → General → Updates shows it.
+      placeholder: 0.2.5-alpha
+    validations:
+      required: true
+  - type: dropdown
+    id: os
+    attributes:
+      label: System
+      options:
+        - macOS (Apple Silicon)
+        - Windows 10
+        - Windows 11
+    validations:
+      required: true
+  - type: input
+    id: os-version
+    attributes:
+      label: OS version
+      placeholder: macOS 15.1, Windows 11 24H2
+  - type: textarea
+    id: media
+    attributes:
+      label: The media
+      description: Container and codecs if you know them (for example MKV, HEVC 10-bit, DTS), or the stream's protocol. Does it play in VLC?
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs
+      description: Anything printed when running ReVLC from a terminal, if you have it.
+      render: text

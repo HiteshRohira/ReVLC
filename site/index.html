@@ -12,16 +12,17 @@
 
   <meta property="og:type" content="website">
   <meta property="og:site_name" content="ReVLC">
+  <meta property="og:url" content="https://revlc.vercel.app/">
   <meta property="og:title" content="ReVLC: VLC, rebuilt for the modern age">
   <meta property="og:description" content="The VLC engine you trust, with an interface built for today. Free and open source. Early alpha for macOS and Windows.">
-  <meta property="og:image" content="assets/og-image.jpg">
+  <meta property="og:image" content="https://revlc.vercel.app/assets/og-image.jpg">
   <meta property="og:image:width" content="1200">
   <meta property="og:image:height" content="630">
   <meta property="og:image:alt" content="Cassiopeia A, the remains of an exploded star, seen by the James Webb Space Telescope">
   <meta name="twitter:card" content="summary_large_image">
   <meta name="twitter:title" content="ReVLC: VLC, rebuilt for the modern age">
   <meta name="twitter:description" content="The VLC engine you trust, with an interface built for today. Free and open source. Early alpha for macOS and Windows.">
-  <meta name="twitter:image" content="assets/og-image.jpg">
+  <meta name="twitter:image" content="https://revlc.vercel.app/assets/og-image.jpg">
 
   <link rel="preload" as="image" href="assets/player.webp" imagesrcset="assets/player-1000.webp 1000w, assets/player.webp 2000w" imagesizes="(min-width: 1240px) 1160px, 94vw">
   <link rel="stylesheet" href="styles.css">
@@ -339,6 +340,23 @@
         <p class="center">
           <a class="link" href="https://github.com/HiteshRohira/ReVLC">View the source on GitHub <span aria-hidden="true">→</span></a>
         </p>
+      </div>
+    </section>
+
+    <!-- Launch film -->
+    <section class="film" id="film" aria-labelledby="film-title" data-chapter="Film">
+      <div class="wrap">
+        <header class="section-head section-head-center">
+          <p class="label">06 · Liftoff</p>
+          <h2 id="film-title">The launch film.</h2>
+          <p class="section-sub">57 seconds of ReVLC, playing inside ReVLC. Sound on.</p>
+        </header>
+        <figure class="shot film-shot">
+          <video controls playsinline preload="none" poster="assets/promo-poster.webp" width="1920" height="1080"
+                 aria-label="ReVLC launch film: an Apollo 11 countdown over A–B loop, speed, subtitle and crop demos in ReVLC">
+            <source src="assets/promo.mp4" type="video/mp4">
+          </video>
+        </figure>
       </div>
     </section>
   </main>

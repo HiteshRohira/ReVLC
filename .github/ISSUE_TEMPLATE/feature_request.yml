@@ -1,0 +1,20 @@
+name: Feature request
+description: A VLC feature you miss, or an idea for ReVLC.
+labels: [enhancement]
+body:
+  - type: markdown
+    attributes:
+      value: Check the [parity checklist](https://github.com/HiteshRohira/ReVLC/blob/master/docs/parity.md) first; it may already be planned.
+  - type: textarea
+    id: what
+    attributes:
+      label: What you'd like
+      description: What it should do, and how you use it today (in VLC or elsewhere).
+    validations:
+      required: true
+  - type: checkboxes
+    id: vlc
+    attributes:
+      label: VLC
+      options:
+        - label: VLC has this feature
