@@ -1,7 +1,7 @@
 /** Accent colours offered in onboarding and Settings. More can be added here. */
 export const ACCENTS = {
   white: { name: "ReVLC White", color: "#ffffff", on: "#0b0b0c", soft: "rgb(255 255 255 / 0.12)" },
-  orange: { name: "VLC Orange", color: "#ff7a1a", on: "#ffffff", soft: "rgb(255 122 26 / 0.16)" },
+  orange: { name: "Classic Orange", color: "#ff7a1a", on: "#ffffff", soft: "rgb(255 122 26 / 0.16)" },
 } as const;
 
 export type AccentId = keyof typeof ACCENTS;
