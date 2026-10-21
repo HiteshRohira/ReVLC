@@ -1,6 +1,6 @@
 {
   "version": "0.2.5",
-  "notes": "Anonymous usage and playback-quality statistics (app version, computer type, how quickly videos start and seek; never what you watch), with a switch in Settings → General → Privacy. Quitting now always saves where you were.",
+  "notes": "Usage and playback-quality statistics with no personal information (app version, computer type, how quickly videos start and seek; never what you watch), with a switch in Settings → General → Privacy. Quitting now always saves where you were.",
   "pub_date": "2026-10-16T19:33:27Z",
   "platforms": {
     "darwin-aarch64": {
