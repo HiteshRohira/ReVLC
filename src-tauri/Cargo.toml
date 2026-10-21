@@ -1,6 +1,6 @@
 [package]
 name = "revlc"
-version = "0.2.6"
+version = "0.2.7"
 description = "A modern media player built on libVLC"
 authors = ["revlc contributors"]
 license = "GPL-3.0-or-later"
