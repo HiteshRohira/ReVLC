@@ -348,8 +348,29 @@ pub struct Vlc {
 unsafe impl Send for Vlc {}
 unsafe impl Sync for Vlc {}
 
+/// Why libVLC couldn't start. `stage` is safe to send with analytics; the
+/// message names paths, so it stays on the machine.
+pub struct LoadError {
+    /// `not_found`, `load` (a library didn't load), `symbol`, `init`
+    /// (libvlc_new failed) or `player`.
+    pub stage: &'static str,
+    pub message: String,
+}
+
+impl LoadError {
+    fn new(stage: &'static str, message: String) -> Self {
+        Self { stage, message }
+    }
+}
+
 /// Directories where we look for libVLC: `lib/`, `plugins/` and `share/`,
 /// or on Windows VLC's own layout (the DLLs, `plugins/` and `lua/` together).
+///
+/// On Windows the resource directory can come as an extended-length
+/// `\\?\C:\...` path. libVLC finds its plugins from the path libvlccore.dll
+/// was loaded from, and Windows 10's msvcrt can't stat files under that
+/// prefix, so libvlc_new finds no modules and fails. Paths are loaded in
+/// their ordinary form.
 fn candidate_dirs(resource_dir: Option<&Path>) -> Vec<PathBuf> {
     let mut dirs = Vec::new();
     if let Some(dir) = std::env::var_os("REVLC_VLC_DIR") {
@@ -360,7 +381,7 @@ fn candidate_dirs(resource_dir: Option<&Path>) -> Vec<PathBuf> {
     }
     #[cfg(target_os = "macos")]
     dirs.push(PathBuf::from("/Applications/VLC.app/Contents/MacOS"));
-    dirs
+    dirs.iter().map(|d| dunce::simplified(d).to_path_buf()).collect()
 }
 
 /// Where the libVLC libraries are inside a libVLC directory. On Windows,
@@ -399,15 +420,18 @@ impl Vlc {
     /// `extra_args` are passed to libVLC as command-line options. `config`
     /// is applied before the media player is created, because the player
     /// copies some options (title display, deinterlacing) when it's made.
-    pub fn load(resource_dir: Option<&Path>, extra_args: &[String], config: &[(&str, ConfigValue)]) -> Result<Self, String> {
+    pub fn load(resource_dir: Option<&Path>, extra_args: &[String], config: &[(&str, ConfigValue)]) -> Result<Self, LoadError> {
         let dirs = candidate_dirs(resource_dir);
         let dir = dirs
             .iter()
             .find(|d| lib_dir(d).join(lib_names().1).exists())
             .ok_or_else(|| {
-                format!(
-                    "libVLC 3 was not found. Install VLC 3 from videolan.org or set REVLC_VLC_DIR. Looked in: {}",
-                    dirs.iter().map(|d| d.display().to_string()).collect::<Vec<_>>().join(", ")
+                LoadError::new(
+                    "not_found",
+                    format!(
+                        "libVLC 3 was not found. Install VLC 3 from videolan.org or set REVLC_VLC_DIR. Looked in: {}",
+                        dirs.iter().map(|d| d.display().to_string()).collect::<Vec<_>>().join(", ")
+                    ),
                 )
             })?;
 
@@ -418,20 +442,22 @@ impl Vlc {
         }
 
         let (core_name, lib_name) = lib_names();
-        let load = |name: &str| -> Result<&'static Library, String> {
+        let load = |name: &str| -> Result<&'static Library, LoadError> {
             let path = lib_dir(dir).join(name);
             // SAFETY: loading libVLC runs its initialisers, which are safe to run.
-            let lib = unsafe { Library::new(&path) }.map_err(|e| format!("{}: {e}", path.display()))?;
+            let lib = unsafe { Library::new(&path) }
+                .map_err(|e| LoadError::new("load", format!("Couldn't load {}: {e}", path.display())))?;
             Ok(Box::leak(Box::new(lib)))
         };
         // libvlc.dylib refers to libvlccore through @rpath, so load the core first.
         let core_lib = load(core_name)?;
         let lib = load(lib_name)?;
-        let api = unsafe { Api::load(lib) }.map_err(|e| format!("libVLC is missing a symbol: {e}"))?;
+        let missing = |e: libloading::Error| LoadError::new("symbol", format!("libVLC is missing a symbol: {e}"));
+        let api = unsafe { Api::load(lib) }.map_err(missing)?;
         let core = unsafe {
             CoreApi {
-                put_int: *core_lib.get(b"config_PutInt\0").map_err(|e| e.to_string())?,
-                put_psz: *core_lib.get(b"config_PutPsz\0").map_err(|e| e.to_string())?,
+                put_int: *core_lib.get(b"config_PutInt\0").map_err(missing)?,
+                put_psz: *core_lib.get(b"config_PutPsz\0").map_err(missing)?,
             }
         };
 
@@ -450,7 +476,10 @@ impl Vlc {
         unsafe {
             let inst = (api.libvlc_new)(argv.len() as c_int, argv.as_ptr());
             if inst.is_null() {
-                return Err(format!("libvlc_new failed: {}", errmsg(&api)));
+                return Err(LoadError::new(
+                    "init",
+                    format!("libVLC loaded from {} but couldn't start: {}", dir.display(), errmsg(&api)),
+                ));
             }
             for (name, value) in config {
                 put_config(&core, inst, name, value);
@@ -466,7 +495,7 @@ impl Vlc {
             (api.libvlc_set_app_id)(inst, id.as_ptr(), ver.as_ptr(), icon.as_ptr());
             let mp = (api.libvlc_media_player_new)(inst);
             if mp.is_null() {
-                return Err(format!("could not create a media player: {}", errmsg(&api)));
+                return Err(LoadError::new("player", format!("libVLC couldn't create a media player: {}", errmsg(&api))));
             }
             // The web UI handles all keyboard and mouse input.
             (api.libvlc_video_set_key_input)(mp, 0);

@@ -20,6 +20,8 @@ tauri-plugin-dialog = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 libloading = "0.8"
+# Loads libVLC from ordinary paths rather than \\?\ ones; see vlc.rs.
+dunce = "1"
 image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
 tauri-plugin-updater = "2"
 # Analytics; the same HTTP and TLS crates the updater uses.

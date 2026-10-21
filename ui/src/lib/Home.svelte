@@ -157,7 +157,7 @@
     </div>
 
     {#if player.engineError}
-      <div class="drop error"><h2>libVLC not found</h2><p>{player.engineError}</p></div>
+      <div class="drop error"><h2>The playback engine couldn't start</h2><p>{player.engineError}</p></div>
     {:else if view === "home"}
       {#if isEmpty}
         {@render dropZone("Drop a video here", "or open a file, add a folder to your library, or play a network stream")}

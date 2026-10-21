@@ -1666,10 +1666,10 @@ fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
             vlc
         }
         Err(e) => {
-            // Nothing can play. The error names paths, so only the fact is sent.
-            telemetry::capture("engine_failed", serde_json::json!({}));
-            eprintln!("revlc: {e}");
-            app.manage(Player(Err(e)));
+            // Nothing can play. The message names paths, so only the stage is sent.
+            telemetry::capture("engine_failed", serde_json::json!({ "stage": e.stage }));
+            eprintln!("revlc: {}", e.message);
+            app.manage(Player(Err(e.message)));
             return Ok(());
         }
     };

@@ -39,7 +39,7 @@ product name), `libvlc_version`.
 | `app_updated` | First launch of a new version | `from_version` |
 | `app_launched` | Every launch | |
 | `app_active` | Once a day while the app stays open, so long sessions count as active | |
-| `engine_failed` | libVLC couldn't load: nothing can play | |
+| `engine_failed` | libVLC couldn't start: nothing can play | `stage` (`not_found`, `load`, `symbol`, `init`, `player`) |
 | `playback_started` | First frame on screen | `ttff_ms`, plus the media properties below |
 | `playback_failed` | Never reached a first frame | `stage` (`open`, `error`, `ended_before_playing`), `elapsed_ms` |
 | `playback_abandoned` | Stopped or replaced before the first frame | `reason`, `waited_ms` |
