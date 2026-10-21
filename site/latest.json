@@ -1,15 +1,15 @@
 {
-  "version": "0.2.6",
-  "notes": "Licence texts for ReVLC, VLC and every bundled library now ship inside the app. The orange accent is now called Classic Orange (your choice carries over), and the statistics wording says plainly that no personal information is sent.",
-  "pub_date": "2026-10-21T16:44:44Z",
+  "version": "0.2.7",
+  "notes": "Fixes the playback engine failing to start on some Windows 10 PCs. If the engine ever does fail, the error screen now says why.",
+  "pub_date": "2026-10-21T20:13:10Z",
   "platforms": {
     "darwin-aarch64": {
-      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSVlR1Wml6L0lBeitRZGlnU3dqUkJHdnhYK2FhditEWE8xdGFJT21qV3grWUlFd3JjUnFsUDN3NHEwUXNSRXcwbkdJdDlrV3NjY3JGekZsNXdEQmh2N1RXRWhlY2tva0FZPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkyNjAwODI5CWZpbGU6UmVWTEMuYXBwLnRhci5negl2ZXJzaW9uOjAuMi42CjdOczZiSy9QWUxjZTJLT0Y5QWhjT1R2aXFoSVkzK29GWTVlNExMMkU5ZSszVlFpeUdmeDlrSEJ0WlNaL0ZqY2h6R3AwM2VHWExmeXE4OE54RUFoakNRPT0K",
-      "url": "https://github.com/HiteshRohira/ReVLC/releases/download/v0.2.6-alpha/ReVLC-0.2.6-alpha-arm64.app.tar.gz"
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSVlR1Wml6L0lBejBJcmNJQXd0emhabElrd1IxdGJNSUtyMmJ5SGROSGoxZ0tRQTZOcm9iRHZjNmdhS0hVVVdLZlE2TmdVTkJCL0VCTXVld052SENkZmdjUHBJRmswMkFJPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkyNjEzMzIwCWZpbGU6UmVWTEMuYXBwLnRhci5negl2ZXJzaW9uOjAuMi43Ck5hckxob3UyQU9ycjJFZlBtTi9oZCtDMlRzS1N0NlplQkdrN1VGTGd6aG9VM0huRUd1RklsWkFzMktIVVVuMFNvZlU1TlhTK3pranpFQnlEbWExK0F3PT0K",
+      "url": "https://github.com/HiteshRohira/ReVLC/releases/download/v0.2.7-alpha/ReVLC-0.2.7-alpha-arm64.app.tar.gz"
     },
     "windows-x86_64": {
-      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSVlR1Wml6L0lBejl1Q0hQZUg4MmV0dTRuaWFpS1dTU1ZJZC90OTIvaXhpbkQ2TGNic0lVR2I5a2Y0Q3RQZlJKbTh5NzczejdlcndNbDdIQXAyTUlwYWpnSURDZUF3NkFvPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkyNjAwOTkxCWZpbGU6UmVWTENfMC4yLjZfeDY0LXNldHVwLmV4ZQl2ZXJzaW9uOjAuMi42ClV1cXZRaVkwb1NHYVd4bDYyZ0dGZG80akVBWWZudXdqcFZ6cXlzazR2dXY3WXBOekY0ZCs5WGZ3K0N5emVLd3dSdzFLTzQxTC9Sek1nLzkzczlvOEJ3PT0K",
-      "url": "https://github.com/HiteshRohira/ReVLC/releases/download/v0.2.6-alpha/ReVLC-0.2.6-alpha-x64-setup.exe"
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSVlR1Wml6L0lBejVIZXRjUGRiSCswNmc4N09ublJJaGFKMWlyNWUrbHZwczRxV3lIcXNQc1dXWWFRSnZpUUZ3NTdrTG8vY3hNVkcvWnk3M1pVd1BVL09JOGlsOC9RQUFJPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkyNjEzNTAzCWZpbGU6UmVWTENfMC4yLjdfeDY0LXNldHVwLmV4ZQl2ZXJzaW9uOjAuMi43Ck5walN2M0tZaiswdUExc05KM1crZ3BJbzF1a2o5b0pYNmdxbDhWcDZpeDBDVWtjSEpLTHFJVm4wVW1ackt0cTIrcjg2cHBCUEZ3aFZzaHVwS3N6T0FnPT0K",
+      "url": "https://github.com/HiteshRohira/ReVLC/releases/download/v0.2.7-alpha/ReVLC-0.2.7-alpha-x64-setup.exe"
     }
   }
 }
