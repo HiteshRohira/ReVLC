@@ -133,9 +133,11 @@
       }
     ],
     "resources": {
-      "vlc/": "vlc/"
+      "vlc/": "vlc/",
+      "../LICENSE": "licenses/LICENSE",
+      "../licenses/": "licenses/"
     },
-    "copyright": "GPL-3.0-or-later. Includes libVLC (LGPL-2.1-or-later) and VLC plugins from VideoLAN.",
+    "copyright": "Copyright (C) 2026 Hitesh Rohira. GPL-3.0-or-later. Includes libVLC (LGPL-2.1-or-later) and VLC plugins from VideoLAN.",
     "macOS": {
       "minimumSystemVersion": "11.0",
       "signingIdentity": "-",

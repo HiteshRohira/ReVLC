@@ -1051,6 +1051,29 @@ kbd {
   margin-bottom: 56px;
 }
 
+/* Launch film */
+.film {
+  padding: 120px 0 128px;
+  border-top: 1px solid var(--border);
+}
+
+.film .section-head {
+  margin-bottom: 56px;
+}
+
+.film-shot {
+  max-width: 1000px;
+  margin-inline: auto;
+  aspect-ratio: 16 / 9;
+}
+
+.film-shot video {
+  display: block;
+  width: 100%;
+  height: 100%;
+  background: #000;
+}
+
 .platforms {
   display: grid;
   grid-template-columns: 1fr 1fr;
@@ -1250,7 +1273,8 @@ kbd {
     padding-bottom: 16px;
   }
 
-  .download {
+  .download,
+  .film {
     padding: 88px 0 96px;
   }
 

@@ -207,8 +207,8 @@
       </div>
       <h3>Privacy</h3>
       <div class="group">
-        <Row label="Share anonymous usage statistics"
-          help="Your app version and computer type, and how quickly videos start and seek. Never what you watch.">
+        <Row label="Share usage statistics"
+          help="Your app version and computer type, and how quickly videos start and seek. No personal information, never what you watch.">
           {@render toggle("analytics")}
         </Row>
       </div>

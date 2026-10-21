@@ -6,7 +6,9 @@
 #   scripts/prepare-libvlc.sh [path/to/VLC.app]
 #
 # Does nothing if src-tauri/vlc already holds $VLC_VERSION. Keep this at the
-# latest VLC 3 release: older ones have known security holes.
+# latest VLC 3 release: older ones have known security holes. When it
+# changes, update the version and source link in README.md and
+# licenses/README.md, and licenses/vlc if VLC's licence texts changed.
 set -euo pipefail
 
 VLC_VERSION="${VLC_VERSION:-3.0.24}"

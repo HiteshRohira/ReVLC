@@ -1,8 +1,8 @@
 # Analytics
 
-ReVLC sends anonymous statistics to PostHog for one reason: **to know which
-versions and machines it runs on, and whether people get a good viewing
-experience** (playback that starts, starts quickly, seeks quickly and doesn't
+ReVLC sends usage statistics, with no personal information, to PostHog for
+one reason: **to know which versions and machines it runs on, and whether
+people get a good viewing experience** (playback that starts, starts quickly, seeks quickly and doesn't
 stall). Anything that doesn't serve that question isn't collected.
 
 - Each install gets a random id (`analytics.json` in the app's data folder).

@@ -1,0 +1,30 @@
+# cargo-about settings for scripts/third-party-licenses.sh: the crates
+# compiled into the shipped app, on the platforms ReVLC is built for.
+accepted = [
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "MIT",
+    "MIT-0",
+    "ISC",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "Zlib",
+    "0BSD",
+    "CC0-1.0",
+    "Unlicense",
+    "Unicode-3.0",
+    "MPL-2.0",
+    "CDLA-Permissive-2.0",
+    "BSL-1.0",
+    "LGPL-2.1-or-later",
+    "GPL-3.0-or-later",
+]
+targets = [
+    "aarch64-apple-darwin",
+    "x86_64-apple-darwin",
+    "x86_64-pc-windows-msvc",
+]
+ignore-build-dependencies = true
+ignore-dev-dependencies = true
+# ReVLC itself (publish = false) is under LICENSE, not a third party.
+private = { ignore = true }

@@ -93,7 +93,9 @@ Windows, VLC's own layout with the DLLs next to `plugins/` and `lua/`).
 Releases are built on GitHub Actions, for free on this public repo:
 
 1. Bump the version in `package.json`, `src-tauri/tauri.conf.json` and
-   `src-tauri/Cargo.toml`, commit and push.
+   `src-tauri/Cargo.toml`. If dependencies changed, run
+   `scripts/third-party-licenses.sh` (needs `cargo install cargo-about --locked --features cli`)
+   to update the notices in `licenses/`. Commit and push.
 2. Run the **Release** workflow (Actions → Release → Run workflow, or
    `gh workflow run release.yml -f notes="What changed"`). It makes a draft
    pre-release, builds macOS and Windows, attaches their files, and merges
@@ -113,9 +115,10 @@ still build and collect a release locally, signed with that file.
 
 ## Privacy
 
-ReVLC sends anonymous statistics: the app version, the kind of computer, how
-quickly videos start and seek, and what kind of video played (codec,
-resolution, length, time watched). Never file names, titles or links. Turn it
+ReVLC sends usage statistics with no personal information: the app version,
+the kind of computer, how quickly videos start and seek, and what kind of
+video played (codec, resolution, length, time watched). Never file names,
+titles or links. Turn it
 off in Settings → General → Privacy. Details in [docs/analytics.md](docs/analytics.md).
 
 ## Known issues
@@ -142,6 +145,19 @@ The subtitle preview in Settings, which ships with the app, is a still from [Tea
 
 ## License
 
-GPL-3.0-or-later. The app bundles libVLC (LGPL-2.1-or-later) and VLC
-plugins (GPL/LGPL) from [VideoLAN](https://www.videolan.org/); their
-source code is available at https://code.videolan.org/videolan/vlc.
+Copyright (C) 2026 Hitesh Rohira
+
+ReVLC is free software under the GPL-3.0-or-later ([LICENSE](LICENSE)).
+
+The app bundles libVLC 3.0.24 (LGPL-2.1-or-later) and VLC plugins (mostly
+GPL-2.0-or-later) from [VideoLAN](https://www.videolan.org/). Their source
+code, including the build recipes for the libraries the plugins contain
+(`contrib/` in the tarball), is in
+[VideoLAN's 3.0.24 download folder](https://download.videolan.org/pub/videolan/vlc/3.0.24/).
+
+The licence texts for everything the app ships, and the notices for its Rust
+and JavaScript dependencies, are in [licenses/](licenses/). Installed copies
+have them too.
+
+"VLC" is a trademark of VideoLAN. ReVLC is an independent project and is not
+affiliated with or endorsed by VideoLAN.
