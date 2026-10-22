@@ -191,8 +191,13 @@ fn send_loop() {
             && !send(client, &batch, exiting)
             && !exiting
         {
-            // Offline: try again next time, ahead of newer events.
+            // Offline: try again next time, ahead of newer events. Not if
+            // analytics was turned off meanwhile: checked under the lock
+            // that turning it off empties the queue under.
             let mut state = t.state.lock().unwrap_or_else(|e| e.into_inner());
+            if !t.enabled.load(Ordering::Acquire) {
+                continue;
+            }
             let newer = std::mem::replace(&mut state.events, batch);
             state.events.extend(newer);
             let excess = state.events.len().saturating_sub(MAX_QUEUED);

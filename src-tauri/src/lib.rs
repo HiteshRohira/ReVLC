@@ -82,6 +82,12 @@ struct Core {
     library_scan: Mutex<Option<LibraryScan>>,
     /// Playback quality measurements, for analytics.
     quality: Mutex<quality::Quality>,
+    /// Wakes the thread that writes the history (see [`Core::save_history`]).
+    history_saves: mpsc::Sender<()>,
+    /// Held while writing the history, so writes land in order.
+    history_write: Mutex<()>,
+    /// Held while applying a settings change, so changes apply in order.
+    settings_change: Mutex<()>,
 }
 
 struct LibraryScan {
@@ -264,6 +270,23 @@ impl Core {
         self.history.lock().unwrap_or_else(|e| e.into_inner())
     }
 
+    /// Writes the history if it changed (and, unless `force`, the last
+    /// write was a while ago). The history isn't locked during the write.
+    fn write_history(&self, force: bool) -> Res {
+        let _writing = self.history_write.lock().unwrap_or_else(|e| e.into_inner());
+        let Some((file, entries)) = self.history().unsaved(force) else { return Ok(()) };
+        store::write_json(&file, &entries, false).inspect_err(|e| {
+            eprintln!("revlc: {e}");
+            self.history().save_failed();
+        })
+    }
+
+    /// Writes the history soon, from its own thread: for callers holding
+    /// the transition lock, which shouldn't wait for the disk.
+    fn save_history(&self) {
+        let _ = self.history_saves.send(());
+    }
+
     fn settings(&self) -> MutexGuard<'_, Settings> {
         self.settings.lock().unwrap_or_else(|e| e.into_inner())
     }
@@ -289,6 +312,30 @@ impl Core {
             }
         }
         changed
+    }
+
+    /// Saves and applies new settings, reopening the current video if a
+    /// change only takes effect when a video starts.
+    fn set_settings(self: &Arc<Self>, settings: Settings) -> Res {
+        let _changing = self.settings_change.lock().unwrap_or_else(|e| e.into_inner());
+        let previous = self.settings().clone();
+        if previous == settings {
+            return Ok(());
+        }
+        // Saved first: if that fails, nothing has changed.
+        settings.save(&self.data_dir)?;
+        let vlc_changed = self.apply_vlc_settings(&settings, Some(&previous));
+        if settings.audio_device != previous.audio_device {
+            self.vlc.set_audio_device(&settings.audio_device);
+        }
+        telemetry::set_enabled(settings.analytics);
+        *self.settings() = settings.clone();
+        let _ = self.app.emit("settings://changed", settings);
+        if vlc_changed {
+            let reload = self.clone();
+            thread::spawn(move || reload.reload());
+        }
+        Ok(())
     }
 
     fn transition(&self) -> MutexGuard<'_, ()> {
@@ -355,17 +402,26 @@ impl Core {
                 }
             }
         };
-        // Queue thumbnails for anything that doesn't have one yet.
+        // Queue thumbnails for anything that doesn't have one yet, or (on a
+        // fresh scan) whose file has changed since (the old one shows meanwhile).
         let mut jobs = Vec::new();
+        let mut retry = Vec::new();
         for item in &mut items {
             let thumb = self.library_thumb_path(&item.uri);
-            if thumb.exists() {
+            let made = meta::modified(&thumb);
+            if made > 0 {
                 item.thumb = Some(thumb.to_string_lossy().into_owned());
-            } else {
+            }
+            if made == 0 || (scanned && made < meta::modified(Path::new(&item.uri))) {
+                if made > 0 {
+                    retry.push(thumb.to_string_lossy().into_owned());
+                }
                 jobs.push(ThumbJob { uri: item.uri.clone(), out: thumb, kind: JobKind::Frame(0.3) });
             }
         }
-        self.add_metadata(&mut items, &mut jobs);
+        retry.extend(self.add_metadata(&mut items, &mut jobs));
+        // Changed files are worth another try even if they were tried this session.
+        self.thumbs.tried.lock().unwrap_or_else(|e| e.into_inner()).retain(|key| !retry.contains(key));
         // Only when every folder is there: files on an unplugged drive keep their thumbnails.
         if scanned && folders.iter().all(|f| Path::new(f).is_dir()) {
             self.prune_library_cache(&items, &jobs);
@@ -411,8 +467,10 @@ impl Core {
     }
 
     /// Fills in titles, episode numbers, durations and artwork, queueing
-    /// jobs for whatever hasn't been read or cached yet.
-    fn add_metadata(&self, items: &mut [LibraryItem], jobs: &mut Vec<ThumbJob>) {
+    /// jobs for whatever hasn't been read or cached yet. Returns the job
+    /// keys of files read before that have changed since.
+    fn add_metadata(&self, items: &mut [LibraryItem], jobs: &mut Vec<ThumbJob>) -> Vec<String> {
+        let mut changed = Vec::new();
         let cache = self.meta.lock().unwrap_or_else(|e| e.into_inner());
         let mut images = meta::Images::default();
         let art = |src: Option<PathBuf>, jobs: &mut Vec<ThumbJob>| {
@@ -430,7 +488,11 @@ impl Core {
             let tags = match cache.get(&item.uri) {
                 Some(m) => m.clone(),
                 None => {
-                    jobs.push(ThumbJob { uri: item.uri.clone(), out: PathBuf::new(), kind: JobKind::Meta });
+                    let job = ThumbJob { uri: item.uri.clone(), out: PathBuf::new(), kind: JobKind::Meta };
+                    if cache.is_stale(&item.uri) {
+                        changed.push(job.key());
+                    }
+                    jobs.push(job);
                     Default::default()
                 }
             };
@@ -448,6 +510,7 @@ impl Core {
             item.art = art(images.file_poster(path).or(tags.artwork.map(PathBuf::from)), jobs);
             item.group_art = art(images.group_poster(path), jobs);
         }
+        changed
     }
 
     /// Queues thumbnail jobs. With `once`, jobs already attempted are skipped;
@@ -495,15 +558,20 @@ impl Core {
     /// Records the current position, and grabs a thumbnail if there's video.
     fn save_progress(&self, thumbnail: bool) {
         let Some(uri) = self.current_uri() else { return };
-        if !matches!(self.vlc.state(), State::Playing | State::Paused) || !in_history(&uri) {
+        let started = match self.vlc.state() {
+            State::Playing | State::Paused => true,
+            // Still loading, or buffering after a seek: only once it has a position.
+            State::Opening | State::Buffering => self.vlc.time() > 0,
+            _ => false,
+        };
+        if !started || !in_history(&uri) {
             return;
         }
         if thumbnail {
             self.queue_resume_thumbnail(&uri);
         }
-        let mut history = self.history();
-        history.update(&uri, self.vlc.time(), self.vlc.length());
-        let _ = history.save(true);
+        self.history().update(&uri, self.vlc.time(), self.vlc.length());
+        self.save_history();
     }
 
     fn emit_chapters(&self) {
@@ -636,9 +704,8 @@ impl Core {
         *self.resume.lock().unwrap_or_else(|e| e.into_inner()) = None;
         if in_history(uri) {
             self.set_resume(uri);
-            let mut history = self.history();
-            history.touch(uri, title);
-            let _ = history.save(true);
+            self.history().touch(uri, title);
+            self.save_history();
         }
         self.emit_playlist();
         self.emit_bookmarks();
@@ -764,6 +831,10 @@ impl Core {
     }
 
     fn mark_ready(&self) {
+        let damaged = self.history().damaged.take();
+        if let Some(aside) = damaged {
+            self.notice("error", format!("Your history couldn't be read, so it starts empty. The old file is kept at {}", aside.display()));
+        }
         let pending = {
             let mut pending = self.pending.lock().unwrap_or_else(|e| e.into_inner());
             self.ready.store(true, Ordering::Release);
@@ -791,10 +862,8 @@ impl Core {
             .collect();
         self.playlist().replace(index, items);
         // Its entries get their own history; the list itself wasn't watched.
-        let mut history = self.history();
-        history.remove(&uri);
-        let _ = history.save(true);
-        drop(history);
+        self.history().remove(&uri);
+        self.save_history();
         self.play_index_locked(index)
     }
 
@@ -904,18 +973,17 @@ fn pump_events(core: Arc<Core>, rx: Receiver<vlc::Event>) {
             }
         } else if current(event::END_REACHED) {
             if let Some(uri) = core.current_uri() {
-                let mut history = core.history();
-                history.finish(&uri);
-                let _ = history.save(true);
+                core.history().finish(&uri);
+                core.save_history();
             }
             let stop_after_each = core.settings().stop_after_each;
             let sleep_now = std::mem::take(&mut core.sleep().after_item);
             if sleep_now {
                 core.notice("info", "Sleep timer: stopped after this item");
-            } else if !stop_after_each {
-                if let Err(e) = core.advance_locked(true) {
-                    core.notice("error", e);
-                }
+            } else if !stop_after_each
+                && let Err(e) = core.advance_locked(true)
+            {
+                core.notice("error", e);
             }
         }
         if current(event::ERROR) {
@@ -925,8 +993,9 @@ fn pump_events(core: Arc<Core>, rx: Receiver<vlc::Event>) {
             };
             core.notice("error", format!("Could not play {}", title.unwrap_or_else(|| "this media".into())));
         }
-        drop(transition);
-        if has(event::PLAYING) {
+        // The resume point belongs to what's open now: only its own start
+        // may use it, and before anything else can be opened.
+        if current(event::PLAYING) {
             match core.resume.lock().unwrap_or_else(|e| e.into_inner()).take() {
                 Some(PendingSeek::Seek { ms, announce }) => {
                     core.vlc.set_time(ms);
@@ -939,6 +1008,9 @@ fn pump_events(core: Arc<Core>, rx: Receiver<vlc::Event>) {
                 }
                 None => {}
             }
+        }
+        drop(transition);
+        if has(event::PLAYING) {
             let device = core.settings().audio_device.clone();
             if !device.is_empty() {
                 core.vlc.set_audio_device(&device);
@@ -964,31 +1036,30 @@ fn pump_events(core: Arc<Core>, rx: Receiver<vlc::Event>) {
         if has(event::TIME_CHANGED) && last_progress.elapsed() >= PROGRESS_INTERVAL {
             last_progress = Instant::now();
             if let Some(uri) = core.current_uri() {
-                let mut history = core.history();
-                history.update(&uri, core.vlc.time(), core.vlc.length());
-                let _ = history.save(false);
+                core.history().update(&uri, core.vlc.time(), core.vlc.length());
+                let _ = core.write_history(false);
             }
         }
         if [event::PLAYING, event::LENGTH_CHANGED, event::MEDIA_CHANGED, event::TITLE_CHANGED].iter().any(|&e| has(e)) {
             core.emit_chapters();
         }
-        if has(event::PLAYING) {
-            if let Some(title) = core.vlc.media_title() {
-                let mut playlist = core.playlist();
-                let changed = match playlist.current.and_then(|i| playlist.items.get_mut(i)) {
-                    Some(item) if item.title != title => {
-                        item.title = title.clone();
-                        true
-                    }
-                    _ => false,
-                };
-                drop(playlist);
-                if changed {
-                    if let Some(uri) = core.current_uri() {
-                        core.history().set_title(&uri, &title);
-                    }
-                    core.emit_playlist();
+        if has(event::PLAYING)
+            && let Some(title) = core.vlc.media_title()
+        {
+            let mut playlist = core.playlist();
+            let changed = match playlist.current.and_then(|i| playlist.items.get_mut(i)) {
+                Some(item) if item.title != title => {
+                    item.title = title.clone();
+                    true
                 }
+                _ => false,
+            };
+            drop(playlist);
+            if changed {
+                if let Some(uri) = core.current_uri() {
+                    core.history().set_title(&uri, &title);
+                }
+                core.emit_playlist();
             }
         }
         if has(event::SNAPSHOT_TAKEN) && core.user_snapshot.swap(false, Ordering::AcqRel) {
@@ -1024,19 +1095,9 @@ fn format_time(ms: i64) -> String {
 }
 
 #[tauri::command]
-fn snapshot(player: tauri::State<Player>) -> Snapshot {
-    match player.core() {
-        Ok(core) => Snapshot {
-            // Before the playlist lock below, which lasts for this whole expression.
-            bookmarks: core.current_bookmarks(),
-            state: Some(core.state()),
-            tracks: Some(core.tracks()),
-            playlist: Some(core.playlist().clone()),
-            chapters: core.vlc.chapters(),
-            titles: core.vlc.titles(),
-            engine: Ok(format!("libVLC {}", core.vlc.version)),
-        },
-        Err(e) => Snapshot {
+async fn snapshot(player: tauri::State<'_, Player>) -> Result<Snapshot, String> {
+    if let Err(e) = player.core() {
+        return Ok(Snapshot {
             state: None,
             tracks: None,
             playlist: None,
@@ -1044,8 +1105,20 @@ fn snapshot(player: tauri::State<Player>) -> Snapshot {
             titles: Vec::new(),
             bookmarks: Vec::new(),
             engine: Err(e),
-        },
+        });
     }
+    // Discs can take a while to list their titles and chapters.
+    off_main(player, |core| Snapshot {
+        // Before the playlist lock below, which lasts for this whole expression.
+        bookmarks: core.current_bookmarks(),
+        state: Some(core.state()),
+        tracks: Some(core.tracks()),
+        playlist: Some(core.playlist().clone()),
+        chapters: core.vlc.chapters(),
+        titles: core.vlc.titles(),
+        engine: Ok(format!("libVLC {}", core.vlc.version)),
+    })
+    .await
 }
 
 // Commands that change what plays run off the main thread: they wait for
@@ -1118,39 +1191,24 @@ fn history_entries(core: &Core) -> Vec<UiEntry> {
 }
 
 #[tauri::command]
-fn settings_get(player: tauri::State<Player>) -> Result<SettingsInfo, String> {
-    let core = player.core()?;
-    Ok(SettingsInfo {
+async fn settings_get(player: tauri::State<'_, Player>) -> Result<SettingsInfo, String> {
+    // Listing audio devices can be slow.
+    off_main(player, |core| SettingsInfo {
         settings: core.settings().clone(),
         defaults: Settings::default(),
         system_languages: core.languages.clone(),
         audio_devices: core.vlc.audio_devices(),
         fonts: core.fonts.clone(),
     })
+    .await
 }
 
 /// Saves new settings, applies them, and reopens the current video if a
 /// change only takes effect when a video starts.
 #[tauri::command]
-fn settings_set(player: tauri::State<Player>, settings: Settings) -> Res {
-    let core = player.core()?;
-    let previous = core.settings().clone();
-    if previous == settings {
-        return Ok(());
-    }
-    let vlc_changed = core.apply_vlc_settings(&settings, Some(&previous));
-    if settings.audio_device != previous.audio_device {
-        core.vlc.set_audio_device(&settings.audio_device);
-    }
-    settings.save(&core.data_dir)?;
-    telemetry::set_enabled(settings.analytics);
-    *core.settings() = settings.clone();
-    let _ = core.app.emit("settings://changed", settings);
-    if vlc_changed {
-        let reload = core.clone();
-        thread::spawn(move || reload.reload());
-    }
-    Ok(())
+async fn settings_set(player: tauri::State<'_, Player>, settings: Settings) -> Res {
+    let core = player.core()?.clone();
+    tauri::async_runtime::spawn_blocking(move || core.set_settings(settings)).await.map_err(|e| e.to_string())?
 }
 
 /// Seeks to a resume point the user accepted.
@@ -1306,11 +1364,12 @@ async fn library_remove(player: tauri::State<'_, Player>, path: String) -> Resul
 }
 
 #[tauri::command]
-fn history_remove(player: tauri::State<Player>, uri: String) -> Res {
-    let core = player.core()?;
-    let mut history = core.history();
-    history.remove(&uri);
-    history.save(true)
+async fn history_remove(player: tauri::State<'_, Player>, uri: String) -> Res {
+    off_main(player, move |core| {
+        core.history().remove(&uri);
+        core.write_history(true)
+    })
+    .await?
 }
 
 #[tauri::command]
@@ -1450,13 +1509,16 @@ fn set_deinterlace(player: tauri::State<Player>, mode: Option<String>) -> Res {
 }
 
 #[tauri::command]
-fn take_snapshot(app: AppHandle, player: tauri::State<Player>) -> Res {
-    let core = player.core()?;
+async fn take_snapshot(app: AppHandle, player: tauri::State<'_, Player>) -> Res {
     // VLC's default folder: the Desktop on macOS, Pictures on Windows.
     let default = if cfg!(target_os = "macos") { app.path().desktop_dir() } else { app.path().picture_dir() };
-    let dir = core.settings().snapshot_dir(default.ok()).ok_or("no snapshot folder")?;
-    core.user_snapshot.store(true, Ordering::Release);
-    core.vlc.snapshot(&dir, 0)
+    let dir = player.core()?.settings().snapshot_dir(default.ok()).ok_or("no snapshot folder")?;
+    // libVLC waits for the video to hand over a frame.
+    off_main(player, move |core| {
+        core.user_snapshot.store(true, Ordering::Release);
+        core.vlc.snapshot(&dir, 0)
+    })
+    .await?
 }
 
 #[tauri::command]
@@ -1674,6 +1736,7 @@ fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
         }
     };
     let cache_dir = app.path().app_cache_dir()?;
+    let (history_saves, history_rx) = mpsc::channel();
     let core = Arc::new(Core {
         vlc,
         playlist: Mutex::default(),
@@ -1697,6 +1760,9 @@ fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
         reloads: AtomicU64::new(0),
         library_scan: Mutex::default(),
         quality: Mutex::default(),
+        history_saves,
+        history_write: Mutex::default(),
+        settings_change: Mutex::default(),
         data_dir,
     });
 
@@ -1712,6 +1778,14 @@ fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     core.vlc.set_title_display(settings.show_title, settings.title_position, settings.title_timeout);
     let thumbs = core.clone();
     thread::Builder::new().name("thumbnails".into()).spawn(move || make_thumbnails(thumbs))?;
+    let saver = core.clone();
+    thread::Builder::new().name("history".into()).spawn(move || {
+        while history_rx.recv().is_ok() {
+            // One write covers every request that came meanwhile.
+            history_rx.try_iter().for_each(drop);
+            let _ = saver.write_history(true);
+        }
+    })?;
 
     let (tx, rx) = mpsc::channel();
     core.vlc.subscribe(tx);
@@ -1877,6 +1951,8 @@ pub fn run() {
         if matches!(event, RunEvent::ExitRequested { .. } | RunEvent::Exit) {
             if let Some(Ok(core)) = handle.try_state::<Player>().as_deref().map(Player::core) {
                 core.save_progress(false);
+                // Now, rather than on the history thread, which quitting doesn't wait for.
+                let _ = core.write_history(true);
                 core.quality().close("quit");
             }
             telemetry::flush_on_exit();

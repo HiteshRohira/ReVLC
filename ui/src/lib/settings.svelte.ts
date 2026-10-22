@@ -69,6 +69,7 @@ class SettingsStore {
   /** Why the last change couldn't be saved, if it couldn't. */
   error = $state<string | null>(null);
   #timer: ReturnType<typeof setTimeout> | undefined;
+  #saving: Promise<unknown> = Promise.resolve();
 
   get value() {
     return this.info?.settings ?? null;
@@ -94,11 +95,14 @@ class SettingsStore {
     if (!this.info) return;
     this.info.settings = { ...this.info.settings, ...patch };
     clearTimeout(this.#timer);
+    // One save at a time, in order, each sending the settings as they are by then.
     const save = () =>
-      invoke("settings_set", { settings: $state.snapshot(this.info!.settings) }).then(
-        () => (this.error = null),
-        (e) => (this.error = String(e)),
-      );
+      (this.#saving = this.#saving
+        .then(() => invoke("settings_set", { settings: $state.snapshot(this.info!.settings) }))
+        .then(
+          () => (this.error = null),
+          (e) => (this.error = String(e)),
+        ));
     if (debounce) this.#timer = setTimeout(save, 450);
     else save();
   }

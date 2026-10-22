@@ -97,9 +97,18 @@ pub fn read(path: &Path) -> Result<Vec<Item>, String> {
     let items = match ext(path).as_str() {
         "pls" => read_pls(text, dir),
         "xspf" => read_xspf(text, dir),
+        // An HLS manifest lists a stream's segments and keys rather than
+        // things to play one by one: libVLC plays the stream from it.
+        _ if is_hls(text) => vec![Item::new(path.to_string_lossy().into_owned())],
         _ => read_m3u(text, dir),
     };
     Ok(items)
+}
+
+/// Whether an M3U file is an HLS manifest: a stream's segments (which
+/// need a target duration) or its variants.
+fn is_hls(text: &str) -> bool {
+    text.lines().map(str::trim).any(|l| l.starts_with("#EXT-X-TARGETDURATION") || l.starts_with("#EXT-X-STREAM-INF"))
 }
 
 fn read_m3u(text: &str, dir: &Path) -> Vec<Item> {
@@ -305,6 +314,22 @@ mod tests {
         for ext in ["m3u", "m3u8", "pls", "xspf"] {
             round_trip(ext);
         }
+    }
+
+    #[test]
+    fn hls_manifests_play_as_one_stream() {
+        let dir = std::env::temp_dir().join(format!("revlc-hls-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let manifest = dir.join("show.m3u8");
+        std::fs::write(&manifest, "#EXTM3U\n#EXT-X-TARGETDURATION:6\n#EXT-X-KEY:METHOD=AES-128,URI=\"k.bin\"\n#EXTINF:6,\nseg0.ts\n#EXTINF:6,\nseg1.ts\n").unwrap();
+        let list = dir.join("list.m3u8");
+        std::fs::write(&list, "#EXTM3U\n#EXTINF:-1,A\na.mkv\n#EXTINF:-1,B\nb.mkv\n").unwrap();
+        let hls = read(&manifest).unwrap();
+        let plain = read(&list).unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(hls.len(), 1);
+        assert_eq!(hls[0].uri, manifest.to_string_lossy());
+        assert_eq!(plain.len(), 2);
     }
 
     #[test]

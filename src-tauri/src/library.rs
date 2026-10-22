@@ -2,6 +2,7 @@
 //! plus helpers to find media files inside folders.
 
 use std::cmp::Ordering;
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use serde::Serialize;
@@ -26,6 +27,8 @@ pub const SUBTITLE_EXTENSIONS: &[&str] = &[
 
 /// Stop scanning after this many files so a huge folder can't stall the app.
 const MAX_FILES: usize = 10_000;
+/// ...or after looking at this many entries, media or not.
+const MAX_ENTRIES: usize = 200_000;
 const MAX_DEPTH: usize = 8;
 
 fn has_ext(path: &Path, exts: &[&str]) -> bool {
@@ -82,33 +85,42 @@ pub fn natural_cmp(a: &str, b: &str) -> Ordering {
     }
 }
 
-/// All files under `dir` accepted by `keep`, in natural order.
+/// All files under `dir` accepted by `keep`, in natural order. Folders
+/// reached more than once through links are only listed the first time.
 pub fn scan(dir: &Path, keep: fn(&Path) -> bool) -> Vec<PathBuf> {
-    fn walk(dir: &Path, depth: usize, keep: fn(&Path) -> bool, out: &mut Vec<PathBuf>) {
+    struct Walk {
+        keep: fn(&Path) -> bool,
+        out: Vec<PathBuf>,
+        seen: HashSet<PathBuf>,
+        entries: usize,
+    }
+    fn walk(dir: &Path, depth: usize, w: &mut Walk) {
+        if !dir.canonicalize().is_ok_and(|real| w.seen.insert(real)) {
+            return;
+        }
         let Ok(entries) = std::fs::read_dir(dir) else { return };
-        let mut entries: Vec<_> = entries
-            .flatten()
-            .filter(|e| !e.file_name().to_string_lossy().starts_with('.'))
-            .collect();
+        let mut entries: Vec<_> = entries.flatten().take(MAX_ENTRIES.saturating_sub(w.entries)).collect();
+        w.entries += entries.len();
+        entries.retain(|e| !e.file_name().to_string_lossy().starts_with('.'));
         entries.sort_by(|a, b| natural_cmp(&a.file_name().to_string_lossy(), &b.file_name().to_string_lossy()));
         for entry in entries {
-            if out.len() >= MAX_FILES {
+            if w.out.len() >= MAX_FILES {
                 return;
             }
             let path = entry.path();
             if path.is_dir() {
                 if depth < MAX_DEPTH {
-                    walk(&path, depth + 1, keep, out);
+                    walk(&path, depth + 1, w);
                 }
             // Empty files (a failed download or copy) can't play.
-            } else if keep(&path) && entry.metadata().is_ok_and(|m| m.len() > 0) {
-                out.push(path);
+            } else if (w.keep)(&path) && entry.metadata().is_ok_and(|m| m.len() > 0) {
+                w.out.push(path);
             }
         }
     }
-    let mut out = Vec::new();
-    walk(dir, 0, keep, &mut out);
-    out
+    let mut w = Walk { keep, out: Vec::new(), seen: HashSet::new(), entries: 0 };
+    walk(dir, 0, &mut w);
+    w.out
 }
 
 /// Replaces folders in `uris` with the media files inside them.
@@ -276,6 +288,20 @@ mod tests {
         let found: Vec<_> = items.iter().map(|i| (i.title.as_str(), i.root.as_str())).collect();
         assert_eq!(found, [("Movie", root.as_str()), ("Episode 1", show.as_str())]);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn linked_folders_are_listed_once() {
+        let dir = std::env::temp_dir().join(format!("revlc-library-links-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("Show")).unwrap();
+        std::fs::write(dir.join("Show").join("a.mkv"), b"x").unwrap();
+        // A loop back to the top, and a second way into Show.
+        std::os::unix::fs::symlink(&dir, dir.join("Show").join("loop")).unwrap();
+        std::os::unix::fs::symlink(dir.join("Show"), dir.join("Again")).unwrap();
+        let found = scan(&dir, is_video);
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(found.len(), 1);
     }
 
     #[test]

@@ -20,6 +20,12 @@ export interface Action {
   run: (host: Host) => unknown;
 }
 
+/** Actions that run again while their key is held; the rest (toggles, dialogs) run once. */
+export const REPEATABLE = new Set([
+  "seekForward", "seekBack", "seekForwardLong", "seekBackLong", "nextFrame", "faster", "slower",
+  "volumeUp", "volumeDown", "audioDelayUp", "audioDelayDown", "subtitleDelayUp", "subtitleDelayDown",
+]);
+
 function cycle<T>(list: T[], current: T): T {
   return list[(list.indexOf(current) + 1) % list.length];
 }

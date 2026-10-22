@@ -1,0 +1,54 @@
+# Type-checks the UI and lints and tests the Rust side on both platforms,
+# for every push to master and every pull request. The release workflow
+# runs it first and builds nothing if it fails.
+name: Checks
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+  workflow_call:
+
+jobs:
+  checks:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-14, windows-latest]
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - run: npm ci
+
+      - name: Check the UI
+        run: npm run check
+
+      # The Rust build embeds the built UI and bundles src-tauri/vlc, which
+      # can stay empty: nothing here loads libVLC.
+      - name: Build the UI
+        run: npm run build && mkdir -p src-tauri/vlc
+
+      - name: Clippy
+        working-directory: src-tauri
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: Tests
+        working-directory: src-tauri
+        run: cargo test

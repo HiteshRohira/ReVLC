@@ -16,7 +16,7 @@
   import WindowControls from "./lib/WindowControls.svelte";
   import { isMac } from "./lib/platform";
   import { player, isSubtitle, cleanTitle } from "./lib/player.svelte";
-  import { ACTIONS, ACTION_BY_ID, FIXED_SHORTCUTS, effectiveBindings, eventBinding, formatBinding, syncMenu, type Host } from "./lib/actions";
+  import { ACTIONS, ACTION_BY_ID, FIXED_SHORTCUTS, REPEATABLE, effectiveBindings, eventBinding, formatBinding, syncMenu, type Host } from "./lib/actions";
   import { formatTime } from "./lib/player.svelte";
   import { Moon } from "@lucide/svelte";
   import { settings } from "./lib/settings.svelte";
@@ -59,7 +59,8 @@
   $effect(() => {
     if (!showPlayer) {
       player.loadHistory();
-      player.loadLibrary();
+      // The list on screen stays while this runs; it rescans if the last scan is old.
+      player.loadLibrary(false);
       ui.menu = null;
     }
   });
@@ -105,9 +106,8 @@
     const files = await openDialog({ multiple: true, title: "Open media" });
     if (!files) return;
     const list = Array.isArray(files) ? files : [files];
-    const media = list.filter((f) => !isSubtitle(f));
-    if (media.length) await player.open(media);
-    if (player.active) list.filter(isSubtitle).forEach((s) => player.addSubtitle(s));
+    // Together, so subtitles go with the video opened along with them.
+    await player.open(list);
   }
 
   /** Plays a folder and adds it to the library. */
@@ -147,8 +147,10 @@
       // On macOS, ⌘ shortcuts belong to the menu bar, which runs them itself.
       if (!binding || (isMac && binding.includes("Cmd"))) return;
       const action = ACTIONS.find((a) => bindings[a.id] === binding);
-      if (action) action.run(host);
-      else if (binding === "Cmd+,") invoke("open_settings");
+      if (action) {
+        // Holding a key repeats it: fine for seeking, not for play/pause.
+        if (!e.repeat || REPEATABLE.has(action.id)) action.run(host);
+      } else if (binding === "Cmd+,") invoke("open_settings");
       else return;
     }
     e.preventDefault();
@@ -198,9 +200,11 @@
         else if (payload.type === "drop") {
           dropping = false;
           if (!theme.onboarded) theme.finishOnboarding();
-          const media = payload.paths.filter((p) => !isSubtitle(p));
-          if (player.active) payload.paths.filter(isSubtitle).forEach((s) => player.addSubtitle(s));
-          if (media.length) player.open(media).then(() => player.loadLibrary());
+          // Together, so subtitles go with the video dropped along with them.
+          const media = payload.paths.some((p) => !isSubtitle(p));
+          player.open(payload.paths).then(() => {
+            if (media) player.loadLibrary();
+          });
         }
       }),
       // The native video view eats mouse moves, so the app forwards them.

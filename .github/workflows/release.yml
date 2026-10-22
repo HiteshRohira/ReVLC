@@ -1,5 +1,5 @@
 # Builds a release on GitHub's runners, for the version in package.json:
-# makes a draft pre-release (if there isn't one), builds macOS (Apple
+# runs the checks (checks.yml), makes a draft pre-release (if there isn't one), builds macOS (Apple
 # Silicon) and Windows side by side, attaches their files, and writes the
 # update manifest with both platforms. The manifest is kept as the run's
 # "latest-json" artifact: download it into site/, commit it, publish the
@@ -21,7 +21,11 @@ permissions:
   contents: write
 
 jobs:
+  checks:
+    uses: ./.github/workflows/checks.yml
+
   draft:
+    needs: checks
     runs-on: ubuntu-latest
     outputs:
       tag: ${{ steps.tag.outputs.tag }}
