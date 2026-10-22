@@ -87,20 +87,20 @@ fn find_episode(s: &str) -> Option<(usize, usize, u32, u32)> {
                 if j < b.len() && b[j] == b' ' {
                     j += 1;
                 }
-                if j < b.len() && b[j].eq_ignore_ascii_case(&b'e') {
-                    if let Some((episode, end)) = digits(j + 1, 3) {
-                        return Some((i, end, season, episode));
-                    }
+                if j < b.len()
+                    && b[j].eq_ignore_ascii_case(&b'e')
+                    && let Some((episode, end)) = digits(j + 1, 3)
+                {
+                    return Some((i, end, season, episode));
                 }
             }
-        } else if let Some((season, j)) = digits(i, 2) {
-            if j < b.len() && (b[j] == b'x' || b[j] == b'X') {
-                if let Some((episode, end)) = digits(j + 1, 3) {
-                    if end == b.len() || !b[end].is_ascii_alphanumeric() {
-                        return Some((i, end, season, episode));
-                    }
-                }
-            }
+        } else if let Some((season, j)) = digits(i, 2)
+            && j < b.len()
+            && (b[j] == b'x' || b[j] == b'X')
+            && let Some((episode, end)) = digits(j + 1, 3)
+            && (end == b.len() || !b[end].is_ascii_alphanumeric())
+        {
+            return Some((i, end, season, episode));
         }
     }
     None
@@ -348,6 +348,11 @@ impl MetaCache {
     /// Cached metadata, or `None` if the file is new or has changed.
     pub fn get(&self, path: &str) -> Option<&MediaMeta> {
         self.map.get(path).filter(|c| c.modified == modified(Path::new(path))).map(|c| &c.meta)
+    }
+
+    /// Whether `path` was read before but has changed since.
+    pub fn is_stale(&self, path: &str) -> bool {
+        self.map.get(path).is_some_and(|c| c.modified != modified(Path::new(path)))
     }
 
     pub fn insert(&mut self, path: &str, meta: MediaMeta) {

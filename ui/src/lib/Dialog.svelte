@@ -13,16 +13,37 @@
 
   const close = () => (ui.dialog = null);
 
+  let dialog: HTMLElement;
+
+  // Tab stays inside the dialog, not on the window controls behind it.
+  function onKey(e: KeyboardEvent) {
+    if (e.key === "Escape") {
+      close();
+      return;
+    }
+    if (e.key !== "Tab") return;
+    const stops = [...dialog.querySelectorAll<HTMLElement>("button, input, select, textarea, [tabindex]:not([tabindex='-1'])")].filter(
+      (el) => !el.matches(":disabled"),
+    );
+    if (!stops.length) return;
+    const [first, last] = [stops[0], stops[stops.length - 1]];
+    const at = document.activeElement;
+    if (!dialog.contains(at) || (e.shiftKey && at === first) || (!e.shiftKey && at === last)) {
+      e.preventDefault();
+      (e.shiftKey ? last : first).focus();
+    }
+  }
+
   function submit(e: SubmitEvent) {
     e.preventDefault();
     if (canSubmit) onsubmit();
   }
 </script>
 
-<svelte:window onkeydown={(e) => e.key === "Escape" && close()} />
+<svelte:window onkeydown={onKey} />
 
 <div class="backdrop" role="presentation" onpointerdown={(e) => e.target === e.currentTarget && close()}>
-  <div class="dialog" role="dialog" aria-label={title}><form onsubmit={submit}>
+  <div class="dialog" role="dialog" aria-modal="true" aria-label={title} bind:this={dialog}><form onsubmit={submit}>
     <h2>{title}</h2>
     {#if text}<p>{text}</p>{/if}
     {@render children()}

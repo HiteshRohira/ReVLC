@@ -131,7 +131,8 @@ impl Default for Settings {
             sub_margin: 0,
             show_title: false,
             title_timeout: 5000,
-            title_position: 8,
+            // Top, so it doesn't cover subtitles.
+            title_position: 4,
 
             hardware_decoding: true,
             file_caching: 1000,

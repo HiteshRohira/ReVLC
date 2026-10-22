@@ -63,7 +63,8 @@
   <div class="loading" role="status" aria-label="Buffering"><div class="ring"></div></div>
 {/if}
 
-<div class="player" class:hidden>
+<!-- Covers the video while the controls show, so it takes the double-click too. -->
+<div class="player" class:hidden role="presentation" ondblclick={(e) => e.target === e.currentTarget && onfullscreen()}>
   {#if !s.hasVideo}
     <div class="audio">
       {#if !spinner}

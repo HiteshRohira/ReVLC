@@ -42,6 +42,8 @@ pub struct History {
     entries: Vec<Entry>,
     dirty: bool,
     last_save: Instant,
+    /// Where an unreadable history file was moved, to tell the user.
+    pub damaged: Option<PathBuf>,
 }
 
 fn now() -> u64 {
@@ -51,14 +53,22 @@ fn now() -> u64 {
 impl History {
     pub fn load(data_dir: PathBuf, cache_dir: PathBuf) -> Self {
         let file = data_dir.join("history.json");
-        let entries = std::fs::read(&file)
-            .ok()
-            .and_then(|bytes| serde_json::from_slice(&bytes).ok())
-            .unwrap_or_default();
+        let mut damaged = None;
+        let entries = match std::fs::read(&file).map(|bytes| serde_json::from_slice(&bytes)) {
+            Ok(Ok(entries)) => entries,
+            // Unreadable: keep it aside rather than overwrite it with an empty history.
+            Ok(Err(e)) => {
+                eprintln!("revlc: history.json is damaged: {e}");
+                let aside = data_dir.join(format!("history-damaged-{}.json", now()));
+                damaged = std::fs::rename(&file, &aside).is_ok().then_some(aside);
+                Vec::new()
+            }
+            Err(_) => Vec::new(),
+        };
         let thumbs = cache_dir.join("thumbs");
         let _ = std::fs::create_dir_all(&thumbs);
         let _ = std::fs::create_dir_all(&data_dir);
-        Self { file, thumbs, entries, dirty: false, last_save: Instant::now() }
+        Self { file, thumbs, entries, dirty: false, last_save: Instant::now(), damaged }
     }
 
     pub fn thumb_path(&self, uri: &str) -> PathBuf {
@@ -135,16 +145,20 @@ impl History {
         (!e.finished && e.position > RESUME_MARGIN && before_end).then_some(e.position)
     }
 
-    /// Writes the history if it changed (and, unless `force`, the last
-    /// write was a while ago). Stays dirty on failure, so it's retried.
-    pub fn save(&mut self, force: bool) -> Result<(), String> {
+    /// What to write if the history changed (and, unless `force`, the last
+    /// write was a while ago), for writing without holding the history.
+    /// Report a failed write with [`History::save_failed`] so it's retried.
+    pub fn unsaved(&mut self, force: bool) -> Option<(PathBuf, Vec<Entry>)> {
         if !self.dirty || (!force && self.last_save.elapsed() < SAVE_INTERVAL) {
-            return Ok(());
+            return None;
         }
         self.last_save = Instant::now();
-        crate::store::write_json(&self.file, &self.entries, false).inspect_err(|e| eprintln!("revlc: {e}"))?;
         self.dirty = false;
-        Ok(())
+        Some((self.file.clone(), self.entries.clone()))
+    }
+
+    pub fn save_failed(&mut self) {
+        self.dirty = true;
     }
 
     pub fn list(&self) -> Vec<UiEntry> {
@@ -188,6 +202,20 @@ mod tests {
         h.update("a", 120_000, 600_000);
         h.finish("a");
         assert_eq!(h.resume_point("a"), None);
+    }
+
+    #[test]
+    fn damaged_file_is_kept_aside() {
+        let dir = std::env::temp_dir().join(format!("revlc-history-damaged-{}", std::process::id()));
+        let data = dir.join("data");
+        std::fs::create_dir_all(&data).unwrap();
+        std::fs::write(data.join("history.json"), b"[{\"uri\": tru").unwrap();
+        let h = History::load(data.clone(), dir.join("cache"));
+        assert!(h.entries.is_empty());
+        let aside = h.damaged.clone().unwrap();
+        assert_eq!(std::fs::read(&aside).unwrap(), b"[{\"uri\": tru");
+        assert!(!data.join("history.json").exists());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

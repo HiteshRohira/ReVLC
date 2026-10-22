@@ -140,6 +140,14 @@ interface Snapshot {
   titles: Title[];
   bookmarks: Bookmark[];
   engine: { Ok: string } | { Err: string };
+  /** What was sent before the UI was listening. */
+  early: { notices: { kind: Notice["kind"]; text: string }[]; resume: ResumeOffer | null };
+}
+
+/** An offer to continue `uri` from `ms` (the "Ask" resume setting). */
+export interface ResumeOffer {
+  uri: string;
+  ms: number;
 }
 
 export interface Notice {
@@ -208,6 +216,9 @@ class Player {
   inMenu = $derived(this.titles[this.state.title]?.menu ?? false);
 
   #noticeId = 0;
+  /** A resume point waiting for the user's answer; it lapses after a while. */
+  resumeOffer = $state<ResumeOffer | null>(null);
+  #resumeTimer: ReturnType<typeof setTimeout> | undefined;
 
   async init() {
     await Promise.all([
@@ -224,6 +235,7 @@ class Player {
       listen<{ kind: "info" | "error"; text: string }>("player://notice", (e) =>
         this.notify(e.payload.kind, e.payload.text),
       ),
+      listen<ResumeOffer>("player://resume-prompt", (e) => this.offerResume(e.payload)),
     ]);
     const snap = await invoke<Snapshot>("snapshot");
     if ("Err" in snap.engine) {
@@ -237,6 +249,8 @@ class Player {
     this.chapters = snap.chapters;
     this.titles = snap.titles;
     this.bookmarks = snap.bookmarks;
+    for (const n of snap.early.notices) this.notify(n.kind, n.text);
+    if (snap.early.resume) this.offerResume(snap.early.resume);
     await Promise.all([this.loadHistory(), this.loadLibrary()]);
   }
 
@@ -286,6 +300,12 @@ class Player {
   async forget(uri: string) {
     await this.#call("history_remove", { uri });
     await this.loadHistory();
+  }
+
+  offerResume(offer: ResumeOffer | null) {
+    this.resumeOffer = offer;
+    clearTimeout(this.#resumeTimer);
+    if (offer) this.#resumeTimer = setTimeout(() => (this.resumeOffer = null), 12000);
   }
 
   notify(kind: Notice["kind"], text: string) {

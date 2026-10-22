@@ -20,6 +20,12 @@ export interface Action {
   run: (host: Host) => unknown;
 }
 
+/** Actions that run again while their key is held; the rest (toggles, dialogs) run once. */
+export const REPEATABLE = new Set([
+  "seekForward", "seekBack", "seekForwardLong", "seekBackLong", "nextFrame", "faster", "slower",
+  "volumeUp", "volumeDown", "audioDelayUp", "audioDelayDown", "subtitleDelayUp", "subtitleDelayDown",
+]);
+
 function cycle<T>(list: T[], current: T): T {
   return list[(list.indexOf(current) + 1) % list.length];
 }
@@ -114,7 +120,7 @@ export const FIXED_SHORTCUTS: [string, string][] = [
   ["Cmd+,", "Settings"],
   ["Escape", "Close panel / exit fullscreen"],
   ["0–9", "Jump to 0–90%"],
-  ["Arrows, Return", "Move around DVD and Blu-ray menus"],
+  [isMac ? "Arrows, Return" : "Arrows, Enter", "Move around DVD and Blu-ray menus"],
   ["Double-click", "Toggle fullscreen"],
 ];
 

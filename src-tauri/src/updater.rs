@@ -73,8 +73,19 @@ impl Updater {
         let _ = app.emit("update://state", state);
     }
 
-    fn status(&self) -> Status {
-        self.state.lock().unwrap_or_else(|e| e.into_inner()).status
+    /// Makes `change` if `allowed` says so, in one step, so two callers
+    /// can't both start the same work. Otherwise returns the state as it is.
+    fn claim(&self, app: &AppHandle, allowed: impl FnOnce(&UpdateState) -> bool, change: impl FnOnce(&mut UpdateState)) -> Result<(), UpdateState> {
+        let state = {
+            let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+            if !allowed(&state) {
+                return Err(state.clone());
+            }
+            change(&mut state);
+            state.clone()
+        };
+        let _ = app.emit("update://state", state);
+        Ok(())
     }
 }
 
@@ -105,22 +116,16 @@ pub async fn check(app: &AppHandle, manual: bool) {
     if manual {
         let _ = app.emit("update://manual-check", ());
     }
-    // Already checking, or installed and waiting for a restart.
-    let state = updater.state.lock().unwrap_or_else(|e| e.into_inner()).clone();
-    match state.status {
-        Status::Checking => return,
-        Status::Downloading => {
-            if manual {
-                let progress = state.progress.map(|p| format!(" ({}%)", (p * 100.0).floor())).unwrap_or_default();
-                notice(app, "info", format!("Downloading ReVLC {}{progress}", state.version));
-            }
-            return;
+    // Not while checking, or downloading, or installed and waiting for a
+    // restart (the banner shows again; the manual-check event cleared "Later").
+    let busy = |s: &UpdateState| matches!(s.status, Status::Checking | Status::Downloading | Status::Ready);
+    if let Err(state) = updater.claim(app, |s| !busy(s), |s| s.status = Status::Checking) {
+        if state.status == Status::Downloading && manual {
+            let progress = state.progress.map(|p| format!(" ({}%)", (p * 100.0).floor())).unwrap_or_default();
+            notice(app, "info", format!("Downloading ReVLC {}{progress}", state.version));
         }
-        // The banner shows again; the manual-check event cleared "Later".
-        Status::Ready => return,
-        _ => {}
+        return;
     }
-    updater.set(app, |s| s.status = Status::Checking);
     let result = match app.updater() {
         Ok(u) => u.check().await.map_err(|e| e.to_string()),
         Err(e) => Err(e.to_string()),
@@ -160,14 +165,18 @@ pub async fn install(app: &AppHandle, by_user: bool) {
     let Some(update) = updater.update.lock().unwrap_or_else(|e| e.into_inner()).clone() else {
         return;
     };
-    if updater.status() == Status::Downloading {
+    let started = updater.claim(
+        app,
+        |s| s.status != Status::Downloading,
+        |s| {
+            s.status = Status::Downloading;
+            s.progress = None;
+            s.by_user = by_user;
+        },
+    );
+    if started.is_err() {
         return;
     }
-    updater.set(app, |s| {
-        s.status = Status::Downloading;
-        s.progress = None;
-        s.by_user = by_user;
-    });
     let mut received = 0u64;
     let mut last_emit = Instant::now();
     let on_chunk = |chunk: usize, total: Option<u64>| {
@@ -217,26 +226,34 @@ pub async fn update_install(app: AppHandle) {
 
 /// Restarts into the installed update, saving the resume point first.
 #[tauri::command]
-pub fn update_restart(app: AppHandle) {
-    if let Some(player) = app.try_state::<Player>()
-        && let Ok(core) = player.core()
-    {
-        core.stop();
-    }
+pub async fn update_restart(app: AppHandle) {
+    // Off the main thread, like the player's own Stop: stopping can wait
+    // for the event thread, which can be waiting for the main thread.
+    let player = app.clone();
+    let _ = tauri::async_runtime::spawn_blocking(move || {
+        if let Some(player) = player.try_state::<Player>()
+            && let Ok(core) = player.core()
+        {
+            core.stop();
+            // The Windows installer ends the app without the usual exit.
+            let _ = core.write_history(true);
+        }
+    })
+    .await;
     // Runs the installer, which closes the app and opens the new version.
     #[cfg(windows)]
     {
         let updater = app.state::<Updater>();
         let installer = updater.installer.lock().unwrap_or_else(|e| e.into_inner()).take();
         let update = updater.update.lock().unwrap_or_else(|e| e.into_inner()).clone();
-        if let (Some(update), Some(installer)) = (update, installer) {
-            if let Err(e) = update.install(installer) {
-                eprintln!("revlc: update install failed: {e}");
-                updater.set(&app, |s| s.status = Status::Available);
-                notice(&app, "error", format!("Could not install the update: {e}"));
-                return;
-            }
+        if let (Some(update), Some(installer)) = (update, installer)
+            && let Err(e) = update.install(installer)
+        {
+            eprintln!("revlc: update install failed: {e}");
+            updater.set(&app, |s| s.status = Status::Available);
+            notice(&app, "error", format!("Could not install the update: {e}"));
+            return;
         }
     }
-    app.restart();
+    app.request_restart();
 }

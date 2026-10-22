@@ -86,10 +86,10 @@ pub fn item(capture: &Capture) -> Item {
             ("screen://".to_string(), "Screen")
         }
     };
-    if !matches!(capture.kind, CaptureKind::Microphone) {
-        if let Some(audio) = &capture.audio {
-            options.push(format!(":input-slave=avaudiocapture://{audio}"));
-        }
+    if !matches!(capture.kind, CaptureKind::Microphone)
+        && let Some(audio) = &capture.audio
+    {
+        options.push(format!(":input-slave=avaudiocapture://{audio}"));
     }
     Item { uri, title: title.to_string(), options, trusted: true }
 }

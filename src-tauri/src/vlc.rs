@@ -351,8 +351,8 @@ unsafe impl Sync for Vlc {}
 /// Why libVLC couldn't start. `stage` is safe to send with analytics; the
 /// message names paths, so it stays on the machine.
 pub struct LoadError {
-    /// `not_found`, `load` (a library didn't load), `symbol`, `init`
-    /// (libvlc_new failed) or `player`.
+    /// `not_found`, `load` (a library didn't load), `symbol`, `version`
+    /// (not libVLC 3), `init` (libvlc_new failed) or `player`.
     pub stage: &'static str,
     pub message: String,
 }
@@ -473,6 +473,11 @@ impl Vlc {
             .map(|a| cstr(&a))
             .collect();
         let argv: Vec<*const c_char> = args.iter().map(|a| a.as_ptr()).collect();
+        let version = unsafe { CStr::from_ptr((api.libvlc_get_version)()) }.to_string_lossy().into_owned();
+        // `put_config` relies on how libVLC 3 lays out its instance.
+        if !version.starts_with("3.") {
+            return Err(LoadError::new("version", format!("ReVLC needs libVLC 3, but {} has libVLC {version}", dir.display())));
+        }
         unsafe {
             let inst = (api.libvlc_new)(argv.len() as c_int, argv.as_ptr());
             if inst.is_null() {
@@ -484,7 +489,6 @@ impl Vlc {
             for (name, value) in config {
                 put_config(&core, inst, name, value);
             }
-            let version = CStr::from_ptr((api.libvlc_get_version)()).to_string_lossy().into_owned();
             // Before the player makes its audio output, which names itself
             // after this: otherwise the volume mixer lists "VLC media player".
             // Streams keep VLC's own HTTP user agent, which some servers expect.
@@ -880,10 +884,10 @@ impl Vlc {
         unsafe { (self.api.libvlc_video_set_spu)(self.mp, id) };
     }
 
-    /// Loads an external subtitle file or URL and selects it.
-    pub fn add_subtitle(&self, uri: &str) -> Result<(), String> {
+    /// Loads an external subtitle file or URL, selecting it if `select`.
+    pub fn add_subtitle(&self, uri: &str, select: bool) -> Result<(), String> {
         let c = cstr(uri);
-        match unsafe { (self.api.libvlc_media_player_add_slave)(self.mp, 0, c.as_ptr(), true) } {
+        match unsafe { (self.api.libvlc_media_player_add_slave)(self.mp, 0, c.as_ptr(), select) } {
             0 => Ok(()),
             _ => Err(format!("could not load subtitles from {uri}")),
         }
@@ -973,7 +977,8 @@ impl Vlc {
             let titles = (0..n as usize)
                 .map(|i| {
                     let t = &**list.add(i);
-                    let menu = t.flags & 0x03 != 0;
+                    // libvlc_title_menu; 0x02 is libvlc_title_interactive.
+                    let menu = t.flags & 0x01 != 0;
                     let name = if t.name.is_null() {
                         if menu { "Menu".to_string() } else { format!("Title {}", i + 1) }
                     } else {
@@ -1099,6 +1104,7 @@ fn put_config(core: &CoreApi, inst: *mut Inst, name: &str, value: &ConfigValue) 
     let n = cstr(name);
     unsafe {
         // libvlc_instance_t starts with a pointer to libVLC's root object.
+        // True of every libVLC 3, which `Vlc::load` insists on.
         let obj = *(inst as *mut *mut c_void);
         match value {
             ConfigValue::Int(v) => (core.put_int)(obj, n.as_ptr(), *v),
@@ -1123,7 +1129,8 @@ impl FrameBuf {
     fn new(len: usize) -> Option<Self> {
         let layout = std::alloc::Layout::from_size_align(len, Self::ALIGN).ok().filter(|l| l.size() > 0)?;
         let ptr = unsafe { std::alloc::alloc_zeroed(layout) };
-        (!ptr.is_null()).then_some(Self { ptr, layout })
+        // Lazily: a FrameBuf made from a null pointer would free it when dropped.
+        (!ptr.is_null()).then(|| Self { ptr, layout })
     }
 
     fn as_slice(&self) -> &[u8] {
@@ -1138,12 +1145,18 @@ impl Drop for FrameBuf {
 }
 
 /// A frame captured by [`Vlc::thumbnail`], in VLC's RV32 (BGRX) layout.
+/// The video output thread fills in `frame` while the thumbnailing thread
+/// only watches `frames`, so the frame sits in a cell of its own.
 struct Grab {
+    frame: std::cell::UnsafeCell<GrabFrame>,
+    frames: std::sync::atomic::AtomicU32,
+}
+
+struct GrabFrame {
     buf: Option<FrameBuf>,
     width: u32,
     height: u32,
     target_width: u32,
-    frames: std::sync::atomic::AtomicU32,
 }
 
 unsafe extern "C" fn grab_format(
@@ -1155,7 +1168,8 @@ unsafe extern "C" fn grab_format(
     lines: *mut c_uint,
 ) -> c_uint {
     unsafe {
-        let g = &mut *(*opaque as *mut Grab);
+        // Only the video output thread touches the frame.
+        let g = &mut *(*(*opaque as *const Grab)).frame.get();
         if *width == 0 || *height == 0 {
             return 0;
         }
@@ -1175,7 +1189,7 @@ unsafe extern "C" fn grab_format(
 
 unsafe extern "C" fn grab_lock(opaque: *mut c_void, planes: *mut *mut c_void) -> *mut c_void {
     unsafe {
-        let g = &mut *(opaque as *mut Grab);
+        let g = &*(*(opaque as *const Grab)).frame.get();
         *planes = g.buf.as_ref().map_or(std::ptr::null_mut(), |b| b.ptr as *mut c_void);
     }
     std::ptr::null_mut()
@@ -1200,10 +1214,7 @@ impl Vlc {
         let length = self.parse(path, 3000).map(|m| m.duration).unwrap_or(0);
         let start = if length > 0 { ((length as f64 * fraction) as i64).clamp(0, (length - 1000).max(0)) } else { 0 };
         let grab = Box::into_raw(Box::new(Grab {
-            buf: None,
-            width: 0,
-            height: 0,
-            target_width: width,
+            frame: std::cell::UnsafeCell::new(GrabFrame { buf: None, width: 0, height: 0, target_width: width }),
             frames: Default::default(),
         }));
         let wait = |deadline: Duration, done: &dyn Fn() -> bool| {
@@ -1219,6 +1230,12 @@ impl Vlc {
             let c = path_cstr(path);
             let media = (api.libvlc_media_new_path)(self.inst, c.as_ptr());
             if mp.is_null() || media.is_null() {
+                if !mp.is_null() {
+                    (api.libvlc_media_player_release)(mp);
+                }
+                if !media.is_null() {
+                    (api.libvlc_media_release)(media);
+                }
                 drop(Box::from_raw(grab));
                 return Err("could not create the thumbnail player".into());
             }
@@ -1246,11 +1263,12 @@ impl Vlc {
             let ok = wait(Duration::from_secs(10), &|| g.frames.load(Acquire) >= 3);
             (api.libvlc_media_player_stop)(mp);
             (api.libvlc_media_player_release)(mp);
-            let g = Box::from_raw(grab);
+            // Stopped and released: the video output is gone, so the frame is ours.
+            let g = Box::from_raw(grab).frame.into_inner();
             let Some(buf) = g.buf.as_ref().filter(|_| ok && g.width > 0) else {
                 return Err(format!("no frame decoded from {path}"));
             };
-            let rgb: Vec<u8> = buf.as_slice().chunks_exact(4).flat_map(|p| [p[2], p[1], p[0]]).collect();
+            let rgb: Vec<u8> = buf.as_slice().as_chunks::<4>().0.iter().flat_map(|p| [p[2], p[1], p[0]]).collect();
             let img = image::RgbImage::from_raw(g.width, g.height, rgb).ok_or("bad frame size")?;
             img.save_with_format(out, image::ImageFormat::Jpeg).map_err(|e| e.to_string())
         }

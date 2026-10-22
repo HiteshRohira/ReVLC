@@ -78,7 +78,7 @@
     <button class="icon sm" data-tip="Save playlist ({modKey}S)" aria-label="Save playlist" disabled={!player.playlist.items.length}
       onclick={savePlaylist}><Save size={16} /></button>
     <button class="icon sm" class:on={player.playlist.shuffle} data-tip={player.playlist.shuffle ? "Shuffle on" : "Shuffle off"}
-      aria-pressed={player.playlist.shuffle} onclick={() => player.setShuffle(!player.playlist.shuffle)}><Shuffle size={16} /></button>
+      aria-label="Shuffle" aria-pressed={player.playlist.shuffle} onclick={() => player.setShuffle(!player.playlist.shuffle)}><Shuffle size={16} /></button>
     <button class="icon sm" class:on={player.playlist.repeat !== "off"} data-tip={LABEL[player.playlist.repeat]} aria-label={LABEL[player.playlist.repeat]}
       onclick={() => player.setRepeat(NEXT[player.playlist.repeat])}>
       {#if player.playlist.repeat === "one"}<Repeat1 size={16} />{:else}<Repeat size={16} />{/if}
