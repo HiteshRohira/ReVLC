@@ -89,7 +89,10 @@ self-update; install a newer `.deb` to update. They are CI artifacts, with
 no new release or change to the published downloads.
 
 Video uses X11, including XWayland in a Wayland session. Mint's default
-Cinnamon X11 session is the initial target. Native Wayland, Mint 21.x,
+Cinnamon X11 session is the initial target. This first Linux build uses
+software decoding and GTK compositing, with video output capped at 1080p
+to limit CPU copies; larger files still play, scaled down. Hardware video
+output is reserved for a later build. Native Wayland, Mint 21.x,
 ARM builds, and automatic audio-CD detection aren't supported by this build.
 Camera capture uses Video4Linux2, microphone capture uses the default
 PulseAudio/PipeWire source, and screen capture covers the X11 desktop.

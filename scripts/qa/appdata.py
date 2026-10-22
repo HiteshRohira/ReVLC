@@ -34,9 +34,12 @@ def data_dirs():
     if os.name == "nt":
         return {"roaming": Path(os.environ["APPDATA"]) / "app.revlc", "local": Path(os.environ["LOCALAPPDATA"]) / "app.revlc"}
     if sys.platform.startswith("linux"):
-        config = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config"))
-        cache = Path(os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache"))
-        data = Path(os.environ.get("XDG_DATA_HOME", Path.home() / ".local/share"))
+        def xdg(name, fallback):
+            value = Path(os.environ.get(name, ""))
+            return value if value.is_absolute() else Path.home() / fallback
+        config = xdg("XDG_CONFIG_HOME", ".config")
+        cache = xdg("XDG_CACHE_HOME", ".cache")
+        data = xdg("XDG_DATA_HOME", ".local/share")
         # seed() writes settings to the first directory: Tauri's app_data_dir.
         return {"data": data / "app.revlc", "config": config / "app.revlc", "caches": cache / "app.revlc"}
     sys.exit("Unsupported platform")

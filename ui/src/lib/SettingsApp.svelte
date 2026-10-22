@@ -317,7 +317,11 @@
     {:else if tab === "input"}
       <h3>Decoding</h3>
       <div class="group">
-        <Row label="Hardware-accelerated decoding" help={isMac ? "Uses the Mac's video decoder (VideoToolbox). Saves battery." : isWindows ? "Uses the graphics card's video decoder (Direct3D 11). Saves battery." : "Uses the graphics card's video decoder when supported by your Linux drivers. Saves battery."}>{@render toggle("hardwareDecoding")}</Row>
+        {#if isMac || isWindows}
+          <Row label="Hardware-accelerated decoding" help={isMac ? "Uses the Mac's video decoder (VideoToolbox). Saves battery." : "Uses the graphics card's video decoder (Direct3D 11). Saves battery."}>{@render toggle("hardwareDecoding")}</Row>
+        {:else}
+          <Row label="Video rendering" help="This experimental Linux build uses software decoding and displays video at up to 1080p.">Software</Row>
+        {/if}
         <Row label="Skip H.264 loop filter" help="Speeds up software decoding of H.264 at some cost in quality.">{@render choice("skipLoopFilter", LOOP_FILTER)}</Row>
       </div>
       <h3>Caching</h3>

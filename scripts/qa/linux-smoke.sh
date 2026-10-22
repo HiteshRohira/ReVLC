@@ -19,9 +19,8 @@ trap cleanup EXIT
 openbox >"$RUN/logs/openbox.log" 2>&1 &
 xcompmgr >"$RUN/logs/compositor.log" 2>&1 &
 ffmpeg -hide_banner -loglevel error -y -f lavfi -i 'testsrc2=size=640x360:rate=24' -t 60 -c:v libx264 -pix_fmt yuv420p "$RUN/Linux playback.mp4"
-# Xvfb has no DRI3/VA-API device. Exercise the same embedded X11 surface
-# with WebKit's non-DMA-BUF path and VLC's software X11 video output.
-WEBKIT_DISABLE_DMABUF_RENDERER=1 REVLC_VLC_ARGS='--vout=xcb_x11' revlc "$RUN/Linux playback.mp4" >"$RUN/logs/revlc.log" 2>&1 &
+# Xvfb has no DRI3 device. Keep WebKit on its non-DMA-BUF path.
+WEBKIT_DISABLE_DMABUF_RENDERER=1 revlc "$RUN/Linux playback.mp4" >"$RUN/logs/revlc.log" 2>&1 &
 app_pid=$!
 for _ in {1..30}; do
   kill -0 "$app_pid"
@@ -32,6 +31,8 @@ done
 [[ -n "${window:-}" ]] || { echo 'ReVLC window did not appear' >&2; exit 1; }
 xdotool windowactivate --sync "$window"
 sleep 8
+xdotool mousemove 620 420
+sleep 0.3
 xwininfo -root -tree >"$RUN/logs/windows.txt"
 import -window "$window" "$RUN/screenshots/window.png"
 import -window root "$RUN/screenshots/playing.png"
@@ -43,7 +44,7 @@ import -window root "$RUN/screenshots/paused-still.png"
 xdotool key --clearmodifiers f
 sleep 1
 xprop -id "$window" _NET_WM_STATE >"$RUN/logs/fullscreen-state.txt"
-rg -q '_NET_WM_STATE_FULLSCREEN' "$RUN/logs/fullscreen-state.txt"
+[[ "$(<"$RUN/logs/fullscreen-state.txt")" == *'_NET_WM_STATE_FULLSCREEN'* ]]
 import -window root "$RUN/screenshots/fullscreen.png"
 xdotool key --clearmodifiers Escape
 sleep 1

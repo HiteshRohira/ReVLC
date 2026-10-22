@@ -126,7 +126,6 @@ api! {
     libvlc_media_player_stop: fn(*mut Player);
     libvlc_media_player_set_nsobject: fn(*mut Player, *mut c_void);
     libvlc_media_player_set_hwnd: fn(*mut Player, *mut c_void);
-    libvlc_media_player_set_xwindow: fn(*mut Player, c_uint);
     libvlc_media_player_get_length: fn(*mut Player) -> i64;
     libvlc_media_player_get_time: fn(*mut Player) -> i64;
     libvlc_media_player_set_time: fn(*mut Player, i64);
@@ -544,7 +543,9 @@ impl Vlc {
 
     /// Turns hardware decoding on or off, from the next video.
     pub fn set_hardware_decoding(&self, on: bool) {
-        self.software_decoding.store(!on, Ordering::Relaxed);
+        // Linux composites CPU frames through GTK so transparent controls
+        // remain visible. Hardware surfaces cannot be passed to this output.
+        self.software_decoding.store(!on || cfg!(target_os = "linux"), Ordering::Relaxed);
     }
 
     /// Shows the media title on the video when playback starts. `position`
@@ -611,8 +612,14 @@ impl Vlc {
     }
 
     #[cfg(target_os = "linux")]
-    pub fn set_xwindow(&self, xid: u32) {
-        unsafe { (self.api.libvlc_media_player_set_xwindow)(self.mp, xid) }
+    pub fn set_gtk_surface(&self, frames: std::sync::Arc<std::sync::Mutex<Option<PresentedFrame>>>) {
+        // The main player and its callbacks live until process exit, like
+        // the event subscription. Attach once, before media can be opened.
+        let output = Box::into_raw(Box::new(GtkOutput { frame: std::cell::UnsafeCell::new(None), frames }));
+        unsafe {
+            (self.api.libvlc_video_set_callbacks)(self.mp, gtk_lock, None, Some(gtk_display), output.cast());
+            (self.api.libvlc_video_set_format_callbacks)(self.mp, gtk_format, None);
+        }
     }
 
     /// Identifies the media the player has: changes each time it opens one.
@@ -1158,6 +1165,112 @@ impl Drop for FrameBuf {
 struct Grab {
     frame: std::cell::UnsafeCell<GrabFrame>,
     frames: std::sync::atomic::AtomicU32,
+}
+
+/// An owned CPU frame handed from libVLC to the GTK main thread.
+#[cfg(target_os = "linux")]
+pub struct PresentedFrame {
+    pub pixels: Vec<u8>,
+    pub width: i32,
+    pub height: i32,
+    pub stride: i32,
+}
+
+#[cfg(target_os = "linux")]
+struct GtkFrame {
+    buf: FrameBuf,
+    width: u32,
+    height: u32,
+    stride: u32,
+}
+
+#[cfg(target_os = "linux")]
+struct GtkOutput {
+    // VLC 3's vmem output serializes format, prepare (lock), and display
+    // on its video thread. GTK only receives an owned copy of these pixels.
+    frame: std::cell::UnsafeCell<Option<GtkFrame>>,
+    frames: std::sync::Arc<std::sync::Mutex<Option<PresentedFrame>>>,
+}
+
+#[cfg(target_os = "linux")]
+unsafe extern "C" fn gtk_format(
+    opaque: *mut *mut c_void,
+    chroma: *mut c_char,
+    width: *mut c_uint,
+    height: *mut c_uint,
+    pitches: *mut c_uint,
+    lines: *mut c_uint,
+) -> c_uint {
+    unsafe {
+        if *width == 0 || *height == 0 {
+            return 0;
+        }
+        // Bound CPU copies to 1080p; VLC scales larger files to this output.
+        let scale = (1920.0 / *width as f64).min(1080.0 / *height as f64).min(1.0);
+        let w = ((*width as f64 * scale) as u32).max(1);
+        let h = ((*height as f64 * scale) as u32).max(1);
+        let stride = (w * 4 + 31) & !31;
+        let Some(buf) = FrameBuf::new(stride as usize * h as usize) else { return 0 };
+        let output = &*(*opaque as *const GtkOutput);
+        *output.frame.get() = Some(GtkFrame { buf, width: w, height: h, stride });
+        std::ptr::copy_nonoverlapping(b"RV32".as_ptr().cast(), chroma, 4);
+        (*width, *height, *pitches, *lines) = (w, h, stride, h);
+        1
+    }
+}
+
+#[cfg(target_os = "linux")]
+unsafe extern "C" fn gtk_lock(opaque: *mut c_void, planes: *mut *mut c_void) -> *mut c_void {
+    unsafe {
+        let output = &*(opaque as *const GtkOutput);
+        *planes = (*output.frame.get()).as_ref().map_or(std::ptr::null_mut(), |f| f.buf.ptr.cast());
+    }
+    std::ptr::null_mut()
+}
+
+#[cfg(target_os = "linux")]
+unsafe extern "C" fn gtk_display(opaque: *mut c_void, _picture: *mut c_void) {
+    unsafe {
+        let output = &*(opaque as *const GtkOutput);
+        if let Some(frame) = &*output.frame.get() {
+            *output.frames.lock().unwrap_or_else(|e| e.into_inner()) = Some(PresentedFrame {
+                pixels: frame.buf.as_slice().to_vec(),
+                width: frame.width as i32,
+                height: frame.height as i32,
+                stride: frame.stride as i32,
+            });
+        }
+    }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod gtk_output_tests {
+    use super::*;
+
+    #[test]
+    fn bounded_aligned_frames_are_copied_before_gtk_uses_them() {
+        let frames = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let mut output = GtkOutput { frame: std::cell::UnsafeCell::new(None), frames: frames.clone() };
+        let mut opaque = std::ptr::from_mut(&mut output).cast();
+        let (mut width, mut height, mut pitch, mut lines) = (3840, 2160, 0, 0);
+        let mut chroma = [0; 4];
+        unsafe {
+            assert_eq!(gtk_format(&mut opaque, chroma.as_mut_ptr(), &mut width, &mut height, &mut pitch, &mut lines), 1);
+            assert_eq!((width, height, pitch, lines), (1920, 1080, 7680, 1080));
+            let mut plane = std::ptr::null_mut();
+            gtk_lock(opaque, &mut plane);
+            assert_eq!(plane as usize % 32, 0);
+            *(plane as *mut u8) = 123;
+            gtk_display(opaque, std::ptr::null_mut());
+            *(plane as *mut u8) = 42;
+            let shown = frames.lock().unwrap().take().unwrap();
+            assert_eq!(shown.pixels[0], 123);
+            assert_eq!(shown.pixels.len(), (pitch * lines) as usize);
+            assert_eq!((shown.width, shown.height, shown.stride), (1920, 1080, 7680));
+            width = 0;
+            assert_eq!(gtk_format(&mut opaque, chroma.as_mut_ptr(), &mut width, &mut height, &mut pitch, &mut lines), 0);
+        }
+    }
 }
 
 struct GrabFrame {

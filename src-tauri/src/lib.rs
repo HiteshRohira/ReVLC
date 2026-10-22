@@ -1931,11 +1931,14 @@ fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
             }
         }
         #[cfg(target_os = "linux")]
-        match surface_linux::attach(&webview.inner()) {
-            Ok(xid) => attach.vlc.set_xwindow(xid),
-            Err(e) => {
-                eprintln!("revlc: could not create the video drawable: {e}");
-                return;
+        {
+            let frames = Arc::new(Mutex::new(None));
+            match surface_linux::attach(&webview.inner(), frames.clone()) {
+                Ok(()) => attach.vlc.set_gtk_surface(frames),
+                Err(e) => {
+                    eprintln!("revlc: could not create the video surface: {e}");
+                    return;
+                }
             }
         }
         #[cfg(not(any(target_os = "macos", windows, target_os = "linux")))]
