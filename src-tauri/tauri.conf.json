@@ -42,7 +42,8 @@
       "assetProtocol": {
         "enable": true,
         "scope": [
-          "$APPCACHE/thumbs/*"
+          "$APPCACHE/thumbs/*",
+          "$APPCACHE/scrub/*"
         ]
       }
     }

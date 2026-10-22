@@ -1,15 +1,134 @@
 <script lang="ts">
-  import { player, formatTime, chapterAt, genericChapter } from "./player.svelte";
+  import { untrack } from "svelte";
+  import { player, formatTime, chapterAt, genericChapter, thumbUrl } from "./player.svelte";
   import { settings } from "./settings.svelte";
 
   const s = $derived(player.state);
   const length = $derived(s.length);
   const enabled = $derived(player.active && s.seekable && length > 0);
 
+  // Make preview frames once there's a seekable local video to take them from.
+  const wantFrames = $derived(
+    player.current && enabled && settings.value?.seekbarPreview !== false ? player.current.uri : null,
+  );
+  $effect(() => {
+    // Another video, or none: the close-up strip belongs to the last one.
+    untrack(() => {
+      fineOpen = false;
+      fineAt = null;
+    });
+    if (wantFrames === null) {
+      untrack(() => (player.scrub = null));
+      return;
+    }
+    // The video track may not be known yet when the length is, so ask again a few times.
+    let timer: ReturnType<typeof setTimeout>;
+    const ask = async (left: number) => {
+      await player.prepareScrub();
+      if (!player.scrub && left > 0) timer = setTimeout(() => ask(left - 1), 1000);
+    };
+    // Not while the video is starting: decoding previews then would hold it up.
+    timer = setTimeout(() => ask(3), 2500);
+    return () => clearTimeout(timer);
+  });
+
+  // The preview frame under the pointer, or the nearest one made so far
+  // within about 1/120 of the video: one from further away would show the
+  // wrong scene. Frames are made coarse to fine, so this soon finds one.
+  const hoverK = $derived.by(() => (hover === null || !player.scrub ? null : Math.round(hover / player.scrub.step)));
+  const frame = $derived.by(() => {
+    const sc = player.scrub;
+    // The strip shows the frames while it's open.
+    if (fineOpen || hoverK === null || !sc) return null;
+    const reach = Math.max(1, Math.round(length / 120 / sc.step));
+    for (let d = 0; d <= reach; d++) {
+      for (const k of [hoverK - d, hoverK + d]) {
+        const f = player.scrubFrame(k);
+        if (f) return f;
+      }
+    }
+    return null;
+  });
+  // Have the frames under the pointer made next.
+  $effect(() => {
+    if (hoverK !== null && !player.scrub?.ready.has(hoverK)) untrack(() => player.focusScrub(hoverK - 1, hoverK + 1));
+  });
+
+  // Dragging up off the bar opens a strip of close-up frames, like YouTube's
+  // precise seeking. It stays open, with the video paused, while the user
+  // scrubs either the bar or the strip (a zoomed-in stretch of the bar). It
+  // closes, jumping to the chosen spot, from its close button or on play.
+  const FINE_UP = 40; // px above the bar where fine scrubbing starts
+  const TILE = 156; // px per close-up frame, gap included
+  const fineStep = $derived(player.scrub?.step ?? 10_000);
+  let fineOpen = $state(false);
+  /** The chosen spot while the strip is open. */
+  let fineT = $state(0);
+  /** Where a drag that opened the strip started: then the pointer's sideways travel moves the spot. */
+  let fineAt = $state<{ x: number; t: number } | null>(null);
+  /** Where dragging the strip itself started: it pans like a scroll. */
+  let stripDrag = $state<{ x: number; t: number } | null>(null);
+  /** Briefly true while the strip slides to a clicked frame. */
+  let gliding = $state(false);
+  let glideTimer: ReturnType<typeof setTimeout> | undefined;
+  let seenPaused = false;
+  let barW = $state(0);
+  let asked = -1000;
+  const half = $derived((barW / 2) * (fineStep / TILE)); // ms from the middle to an edge
+  const fineFrames = $derived.by(() => {
+    if (!fineOpen) return [];
+    const first = Math.floor((position - half) / fineStep);
+    const last = Math.ceil((position + half) / fineStep);
+    const out: { k: number; left: number }[] = [];
+    for (let k = Math.max(0, first); k <= Math.min(Math.floor(length / fineStep), last); k++) {
+      out.push({ k, left: barW / 2 + ((k * fineStep - position) / fineStep) * TILE });
+    }
+    return out;
+  });
+  // Ask for the frames around the pointer as it moves along.
+  $effect(() => {
+    if (!fineOpen) {
+      asked = -1000;
+      return;
+    }
+    const mid = Math.round(position / fineStep);
+    if (Math.abs(mid - asked) < 2) return;
+    asked = mid;
+    const reach = Math.ceil(half / fineStep) + 2;
+    untrack(() => player.focusScrub(mid - reach, mid + reach));
+  });
+
   let el: HTMLDivElement;
   let hover = $state<number | null>(null);
   let drag = $state<number | null>(null);
-  const position = $derived(drag ?? s.time);
+  const position = $derived(drag ?? (fineOpen ? fineT : s.time));
+
+  function openFine() {
+    if (fineOpen) return;
+    fineOpen = true;
+    fineT = drag ?? s.time;
+    seenPaused = false;
+    if (player.playing) player.togglePause();
+  }
+  /** Leaves precise seeking for the chosen spot, playing from there. */
+  function closeFine(resume: boolean) {
+    if (!fineOpen) return;
+    const t = fineT;
+    fineOpen = false;
+    fineAt = null;
+    stripDrag = null;
+    player.seek(t);
+    if (resume && !player.playing) player.togglePause();
+  }
+  // Playing again, by any means, takes the chosen spot with it.
+  $effect(() => {
+    if (!fineOpen) return;
+    const playing = player.playing;
+    untrack(() => {
+      if (!playing) seenPaused = true;
+      else if (seenPaused) closeFine(false);
+    });
+  });
 
   // Chapters as segments; a single segment when the media has none.
   const segments = $derived(
@@ -42,11 +161,52 @@
   function onMove(e: PointerEvent) {
     if (!enabled) return;
     hover = msAt(e);
-    if (drag !== null) drag = hover;
+    if (drag === null) return;
+    const up = el.getBoundingClientRect().top - e.clientY;
+    // Fine scrubbing starts above FINE_UP and ends a little below it.
+    if (fineAt === null && up > FINE_UP && player.scrub) {
+      fineAt = { x: e.clientX, t: drag };
+      openFine();
+    } else if (fineAt !== null && up < FINE_UP - 15) fineAt = null;
+    drag = fineAt
+      ? Math.min(length, Math.max(0, fineAt.t + ((e.clientX - fineAt.x) * fineStep) / TILE))
+      : hover;
   }
   function onUp() {
-    if (drag !== null) player.seek(drag);
+    if (drag !== null) {
+      if (fineOpen) fineT = drag;
+      else player.seek(drag);
+    }
     drag = null;
+    fineAt = null;
+  }
+  const clamp = (ms: number) => Math.min(length, Math.max(0, ms));
+  function onStripDown(e: PointerEvent) {
+    e.stopPropagation();
+    (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
+    stripDrag = { x: e.clientX, t: fineT };
+  }
+  function onStripMove(e: PointerEvent) {
+    e.stopPropagation();
+    if (stripDrag) fineT = clamp(stripDrag.t - ((e.clientX - stripDrag.x) * fineStep) / TILE);
+  }
+  function onStripUp(e: PointerEvent) {
+    e.stopPropagation();
+    // A click rather than a drag: the clicked frame slides to the middle.
+    if (stripDrag && Math.abs(e.clientX - stripDrag.x) < 4) {
+      const x = e.clientX - (e.currentTarget as HTMLElement).getBoundingClientRect().left;
+      const hit = fineFrames.reduce<{ k: number; left: number } | null>(
+        (best, f) => (Math.abs(f.left - x) < Math.abs((best?.left ?? Infinity) - x) ? f : best),
+        null,
+      );
+      if (hit && Math.abs(hit.left - x) <= TILE / 2) {
+        gliding = true;
+        clearTimeout(glideTimer);
+        glideTimer = setTimeout(() => (gliding = false), 220);
+        fineT = clamp(hit.k * fineStep);
+      }
+    }
+    stripDrag = null;
   }
   function onKey(e: KeyboardEvent) {
     if (e.key === "ArrowLeft" || e.key === "ArrowRight") e.stopPropagation();
@@ -60,6 +220,7 @@
   class:enabled
   class:active={drag !== null}
   bind:this={el}
+  bind:clientWidth={barW}
   role="slider"
   tabindex="0"
   aria-label="Seek"
@@ -73,9 +234,25 @@
   onpointerleave={() => (hover = null)}
   onkeydown={onKey}
 >
-  {#if hover !== null && enabled}
+  {#if fineOpen}
+    <div class="strip" class:panning={stripDrag !== null} class:gliding role="presentation" onpointerdown={onStripDown} onpointermove={onStripMove} onpointerup={onStripUp}>
+      {#each fineFrames as f (f.k)}
+        {@const src = player.scrubFrame(f.k)}
+        <div class="tile" style="left: {f.left}px">
+          {#if src}<img src={thumbUrl(src)} alt="" draggable="false" />{/if}
+        </div>
+      {/each}
+      <div class="mid"></div>
+      <div class="when tnum">{formatTime(position)}</div>
+      <button class="close" aria-label="Close precise seeking" onpointerdown={(e) => e.stopPropagation()} onclick={() => closeFine(true)}>
+        <svg viewBox="0 0 12 12" width="10" height="10" aria-hidden="true"><path d="M2 2l8 8M10 2l-8 8" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" fill="none" /></svg>
+      </button>
+    </div>
+  {/if}
+  {#if hover !== null && enabled && fineAt === null}
     {@const ch = player.chapters.length > 1 ? chapterAt(player.chapters, hover) : null}
-    <div class="tip" style="left: clamp(60px, {(hover / length) * 100}%, calc(100% - 60px))">
+    <div class="tip" class:framed={frame} style="left: clamp({frame ? 92 : 60}px, {(hover / length) * 100}%, calc(100% - {frame ? 92 : 60}px))">
+      {#if frame}<img src={thumbUrl(frame)} alt="" draggable="false" />{/if}
       <span class="tnum">{formatTime(hover)}</span>{#if nearBookmark}<span class="ch"> · {nearBookmark.name}</span>{:else if ch && !genericChapter(ch.name)}<span class="ch"> · {ch.name}</span>{/if}
     </div>
   {/if}
@@ -190,6 +367,93 @@
     font-weight: 600;
     white-space: nowrap;
     pointer-events: none;
+    z-index: 3;
+  }
+  /* The close-up frames shown while dragging up, sliding past a fixed middle. */
+  .strip {
+    position: absolute;
+    left: 0;
+    right: 0;
+    bottom: 34px;
+    height: 84px;
+    overflow: hidden;
+    border-radius: 8px;
+    background: rgb(10 10 12 / 0.92);
+    cursor: grab;
+    touch-action: none;
+  }
+  .strip.panning {
+    cursor: grabbing;
+  }
+  .strip.gliding .tile {
+    transition: left 0.2s ease;
+  }
+  .close {
+    position: absolute;
+    top: 6px;
+    right: 6px;
+    width: 22px;
+    height: 22px;
+    display: grid;
+    place-items: center;
+    border: 0;
+    border-radius: 50%;
+    background: rgb(0 0 0 / 0.7);
+    color: #fff;
+    cursor: pointer;
+  }
+  .close:hover {
+    background: rgb(255 255 255 / 0.25);
+  }
+  .tile {
+    position: absolute;
+    top: 0;
+    width: 148px;
+    height: 84px;
+    margin-left: -74px;
+    background: rgb(255 255 255 / 0.06);
+  }
+  .tile img {
+    display: block;
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+  }
+  .mid {
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    left: 50%;
+    width: 2px;
+    margin-left: -1px;
+    background: #fff;
+    box-shadow: 0 0 3px rgb(0 0 0 / 0.7);
+  }
+  .when {
+    position: absolute;
+    left: 50%;
+    bottom: 4px;
+    transform: translateX(-50%);
+    padding: 1px 7px;
+    border-radius: 5px;
+    background: rgb(0 0 0 / 0.75);
+    font-size: 12px;
+    font-weight: 600;
+  }
+  .tip.framed {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 5px;
+    padding: 4px 4px 5px;
+  }
+  .tip img {
+    display: block;
+    width: 168px;
+    max-height: 120px;
+    object-fit: contain;
+    border-radius: 5px;
+    background: #000;
   }
   .ch {
     font-weight: 400;

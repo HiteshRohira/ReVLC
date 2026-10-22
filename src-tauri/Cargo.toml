@@ -48,6 +48,8 @@ windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Globali
 gtk = "0.18"
 webkit2gtk = "2"
 tauri-plugin-single-instance = "2"
+# Lower priority for the threads making seek bar previews.
+libc = "0.2"
 
 [profile.release]
 codegen-units = 1

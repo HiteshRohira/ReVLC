@@ -342,6 +342,9 @@ pub struct Vlc {
     /// Hardware decoding turned off; see [`Vlc::play_media`].
     software_decoding: AtomicBool,
     pub version: String,
+    /// The opening frame of each file thumbnailed, by path and width; `None`
+    /// when it's too plain to recognise. See [`Vlc::thumbnail_at`].
+    openings: std::sync::Mutex<std::collections::HashMap<(String, u32), Option<Opening>>>,
 }
 
 // libVLC's media player API is thread-safe.
@@ -506,7 +509,7 @@ impl Vlc {
             // The web UI handles all keyboard and mouse input.
             (api.libvlc_video_set_key_input)(mp, 0);
             (api.libvlc_video_set_mouse_input)(mp, 0);
-            Ok(Self { api, core, inst, mp, software_decoding: AtomicBool::new(false), version })
+            Ok(Self { api, core, inst, mp, software_decoding: AtomicBool::new(false), version, openings: Default::default() })
         }
     }
 
@@ -1165,6 +1168,8 @@ impl Drop for FrameBuf {
 struct Grab {
     frame: std::cell::UnsafeCell<GrabFrame>,
     frames: std::sync::atomic::AtomicU32,
+    /// Whether the last frame shown looks like the file's opening frame.
+    like_opening: AtomicBool,
 }
 
 /// An owned CPU frame handed from libVLC to the GTK main thread.
@@ -1278,6 +1283,31 @@ struct GrabFrame {
     width: u32,
     height: u32,
     target_width: u32,
+    /// The file's opening frame, to tell frames from before the jump to the
+    /// start time by.
+    opening: Option<Opening>,
+}
+
+/// Whether two frames of the same size are near enough the same picture,
+/// from a sample of pixels.
+fn alike(a: &[u8], b: &[u8]) -> bool {
+    let step = (a.len() / 4096).max(1) * 4 + 1;
+    let (mut sum, mut n) = (0u64, 0u64);
+    for i in (0..a.len().min(b.len())).step_by(step) {
+        sum += a[i].abs_diff(b[i]) as u64;
+        n += 1;
+    }
+    n > 0 && sum < n * 3
+}
+
+/// Whether a frame has enough detail to be told apart from others: a black
+/// or plain first frame looks like every dark scene.
+fn detailed(a: &[u8]) -> bool {
+    let step = (a.len() / 4096).max(1) * 4 + 1;
+    let sample: Vec<f64> = a.iter().step_by(step).map(|&v| v as f64).collect();
+    let mean = sample.iter().sum::<f64>() / sample.len().max(1) as f64;
+    let var = sample.iter().map(|v| (v - mean).powi(2)).sum::<f64>() / sample.len().max(1) as f64;
+    var.sqrt() > 20.0
 }
 
 unsafe extern "C" fn grab_format(
@@ -1318,7 +1348,12 @@ unsafe extern "C" fn grab_lock(opaque: *mut c_void, planes: *mut *mut c_void) ->
 
 unsafe extern "C" fn grab_display(opaque: *mut c_void, _picture: *mut c_void) {
     let g = unsafe { &*(opaque as *const Grab) };
-    g.frames.fetch_add(1, std::sync::atomic::Ordering::Release);
+    // Only the video output thread touches the frame.
+    let f = unsafe { &*g.frame.get() };
+    if let (Some(buf), Some(opening)) = (&f.buf, &f.opening) {
+        g.like_opening.store(alike(opening, buf.as_slice()), Ordering::Release);
+    }
+    g.frames.fetch_add(1, Ordering::Release);
 }
 
 impl Vlc {
@@ -1329,19 +1364,58 @@ impl Vlc {
     /// frame since the last keyframe: seconds of 4K or 8K AV1. Decoders get
     /// few threads, since one frame doesn't need many.
     pub fn thumbnail(&self, path: &str, out: &Path, fraction: f64, width: u32) -> Result<(), String> {
+        let length = self.parse(path, 3000).map(|m| m.duration).unwrap_or(0);
+        let start = if length > 0 { ((length as f64 * fraction) as i64).clamp(0, (length - 1000).max(0)) } else { 0 };
+        self.thumbnail_at(path, out, start, width, false, false)
+    }
+
+    /// Like [`Vlc::thumbnail`], at `start` ms into the media. With `fast`,
+    /// the decoder skips its loop filter: a little quality for speed, for the
+    /// small frames of the seek bar. (Dropping the clock sync or cache made
+    /// the first frames come from the start of the file, before the seek.)
+    /// With `precise`, the frame is the one at `start` rather than the
+    /// keyframe before it: slower, but close frames differ.
+    pub fn thumbnail_at(&self, path: &str, out: &Path, start: i64, width: u32, fast: bool, precise: bool) -> Result<(), String> {
+        // No input cache to fill first: the file is local.
+        let quick = if fast { [":file-caching=0", ":avcodec-skiploopfilter=4"].as_slice() } else { &[] };
+        // libVLC plays a few frames from the beginning before it jumps to the
+        // start time, and they can be the ones shown after the jump: frames
+        // like the file's opening are passed over.
+        let opening = if start > 10_000 { self.opening(path, width, quick) } else { None };
+        let frame = self.grab(path, start, width, quick, 2, precise, opening)?;
+        save_frame(&frame, out)
+    }
+
+    /// The opening frame of `path`, made once and kept; `None` if it's too
+    /// plain (black, say) to tell apart from other frames.
+    fn opening(&self, path: &str, width: u32, extra: &[&str]) -> Option<Opening> {
+        let key = (path.to_string(), width);
+        if let Some(known) = self.openings.lock().unwrap_or_else(|e| e.into_inner()).get(&key) {
+            return known.clone();
+        }
+        let frame = self.grab(path, 0, width, extra, 2, false, None).ok();
+        let opening = frame.and_then(|f| f.buf).map(|b| b.as_slice().to_vec()).filter(|v| detailed(v)).map(std::sync::Arc::new);
+        self.openings.lock().unwrap_or_else(|e| e.into_inner()).insert(key, opening.clone());
+        opening
+    }
+
+    /// Decodes with `extra` media options, taking the frame `settle` frames
+    /// after playback reaches `start`, and one unlike `opening` if any.
+    #[allow(clippy::too_many_arguments)]
+    fn grab(&self, path: &str, start: i64, width: u32, extra: &[&str], settle: u32, precise: bool, opening: Option<Opening>) -> Result<GrabFrame, String> {
+        let check = opening.is_some();
         use std::sync::atomic::Ordering::Acquire;
         use std::time::{Duration, Instant};
 
-        let length = self.parse(path, 3000).map(|m| m.duration).unwrap_or(0);
-        let start = if length > 0 { ((length as f64 * fraction) as i64).clamp(0, (length - 1000).max(0)) } else { 0 };
         let grab = Box::into_raw(Box::new(Grab {
-            frame: std::cell::UnsafeCell::new(GrabFrame { buf: None, width: 0, height: 0, target_width: width }),
+            frame: std::cell::UnsafeCell::new(GrabFrame { buf: None, width: 0, height: 0, target_width: width, opening }),
             frames: Default::default(),
+            like_opening: Default::default(),
         }));
         let wait = |deadline: Duration, done: &dyn Fn() -> bool| {
             let begin = Instant::now();
             while !done() && begin.elapsed() < deadline {
-                std::thread::sleep(Duration::from_millis(15));
+                std::thread::sleep(Duration::from_millis(5));
             }
             done()
         };
@@ -1360,16 +1434,17 @@ impl Vlc {
                 drop(Box::from_raw(grab));
                 return Err("could not create the thumbnail player".into());
             }
-            for opt in [
+            for opt in extra.iter().map(|o| o.to_string()).chain([
                 ":no-audio".to_string(),
                 ":no-spu".to_string(),
                 ":no-sub-autodetect-file".to_string(),
                 ":avcodec-threads=2".to_string(),
                 // dav1d's thread count; its tile setting doesn't add any.
                 ":dav1d-thread-frames=2".to_string(),
-                ":input-fast-seek".to_string(),
                 format!(":start-time={:.3}", start as f64 / 1000.0),
-            ] {
+            ])
+            .chain((!precise).then(|| ":input-fast-seek".to_string()))
+            {
                 let o = cstr(&opt);
                 (api.libvlc_media_add_option_flag)(media, o.as_ptr(), OPTION_TRUSTED | OPTION_UNIQUE);
             }
@@ -1380,20 +1455,44 @@ impl Vlc {
             (api.libvlc_media_player_play)(mp);
 
             // A few frames in, past any grey first frame of an open GOP.
+            // libVLC can show a frame or two from the start of the file before
+            // the start time takes effect, so wait for the position to get
+            // there (to its keyframe, which may be a little before), then a
+            // few frames more, past any grey first frame of an open GOP.
             let g = &*grab;
-            let ok = wait(Duration::from_secs(10), &|| g.frames.load(Acquire) >= 3);
+            let landed = wait(Duration::from_secs(10), &|| {
+                g.frames.load(Acquire) >= 1 && (api.libvlc_media_player_get_time)(mp) >= start / 2
+            });
+            let seen = g.frames.load(Acquire);
+            let settled = landed && wait(Duration::from_secs(10), &|| g.frames.load(Acquire) >= seen + settle);
+            // Frames from the beginning can still be on their way after the
+            // jump: wait for one unlike the opening. In a scene that looks
+            // like it, that never comes; then take what's there.
+            if settled && check {
+                wait(Duration::from_secs(3), &|| !g.like_opening.load(Acquire));
+            }
+            let ok = settled;
             (api.libvlc_media_player_stop)(mp);
             (api.libvlc_media_player_release)(mp);
             // Stopped and released: the video output is gone, so the frame is ours.
             let g = Box::from_raw(grab).frame.into_inner();
-            let Some(buf) = g.buf.as_ref().filter(|_| ok && g.width > 0) else {
+            if !ok {
                 return Err(format!("no frame decoded from {path}"));
-            };
-            let rgb: Vec<u8> = buf.as_slice().as_chunks::<4>().0.iter().flat_map(|p| [p[2], p[1], p[0]]).collect();
-            let img = image::RgbImage::from_raw(g.width, g.height, rgb).ok_or("bad frame size")?;
-            img.save_with_format(out, image::ImageFormat::Jpeg).map_err(|e| e.to_string())
+            }
+            Ok(g)
         }
     }
+}
+
+/// A file's opening frame, in the grab layout (RV32).
+type Opening = std::sync::Arc<Vec<u8>>;
+
+/// Writes a grabbed frame (RV32, so BGRX) out as a JPEG.
+fn save_frame(g: &GrabFrame, out: &Path) -> Result<(), String> {
+    let buf = g.buf.as_ref().filter(|_| g.width > 0).ok_or("no frame")?;
+    let rgb: Vec<u8> = buf.as_slice().as_chunks::<4>().0.iter().flat_map(|p| [p[2], p[1], p[0]]).collect();
+    let img = image::RgbImage::from_raw(g.width, g.height, rgb).ok_or("bad frame size")?;
+    img.save_with_format(out, image::ImageFormat::Jpeg).map_err(|e| e.to_string())
 }
 
 fn errmsg(api: &Api) -> String {
@@ -1406,4 +1505,3 @@ fn errmsg(api: &Api) -> String {
         }
     }
 }
-

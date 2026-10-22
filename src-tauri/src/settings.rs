@@ -27,6 +27,8 @@ pub struct Settings {
     pub stop_after_each: bool,
     pub pause_when_minimized: bool,
     pub seekbar_chapters: bool,
+    /// Show a frame from the video above the seek bar while hovering or dragging.
+    pub seekbar_preview: bool,
     /// Download and install new versions in the background.
     pub auto_update: bool,
     /// Send anonymous usage and playback-quality statistics.
@@ -94,6 +96,7 @@ impl Default for Settings {
             stop_after_each: false,
             pause_when_minimized: false,
             seekbar_chapters: true,
+            seekbar_preview: true,
             auto_update: true,
             analytics: true,
 

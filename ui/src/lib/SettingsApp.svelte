@@ -46,7 +46,7 @@
 
   // Keys reset by each tab's "Restore defaults".
   const TAB_KEYS: Record<Exclude<Tab, "shortcuts">, (keyof Settings)[]> = {
-    general: ["resume", "stopAfterEach", "pauseWhenMinimized", "seekbarChapters", "autoUpdate", "analytics"],
+    general: ["resume", "stopAfterEach", "pauseWhenMinimized", "seekbarChapters", "seekbarPreview", "autoUpdate", "analytics"],
     video: ["video", "startFullscreen", "alwaysOnTop", "deinterlace", "deinterlaceMode", "snapshotPath", "snapshotPrefix", "snapshotFormat", "snapshotSequential"],
     audio: ["audio", "audioDevice", "audioLanguage", "timeStretch", "replayGain", "spdif"],
     subtitles: ["subtitleLanguage", "subAutodetect", "subAutodetectFuzzy", "subEncoding", "font", "fontSize", "fontColor", "fontOpacity", "bold", "outlineThickness", "outlineColor", "backgroundOpacity", "backgroundColor", "shadowOpacity", "subMargin", "showTitle", "titleTimeout", "titlePosition"],
@@ -195,6 +195,7 @@
           </div>
         </Row>
         <Row label="Show chapters on the seek bar" help="Split the seek bar where the file has chapter markers.">{@render toggle("seekbarChapters")}</Row>
+        <Row label="Preview frames on the seek bar" help="Show a frame of the video while hovering or dragging the seek bar. Made in the background for local files.">{@render toggle("seekbarPreview")}</Row>
       </div>
       <h3>Playback</h3>
       <div class="group">

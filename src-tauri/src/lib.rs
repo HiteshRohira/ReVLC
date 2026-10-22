@@ -10,6 +10,7 @@ mod meta;
 mod playlist;
 mod playlist_file;
 mod quality;
+mod scrub;
 mod settings;
 mod store;
 mod telemetry;
@@ -69,6 +70,12 @@ struct Core {
     thumbs: Thumbnails,
     /// Where cached thumbnails and artwork go.
     thumbs_dir: PathBuf,
+    /// Where seek bar preview frames go.
+    scrub_dir: PathBuf,
+    /// Bumped whenever previews are asked for again, which ends the previous run.
+    scrub_run: AtomicU64,
+    /// The preview frames still to make, which the pointer reorders.
+    scrub_jobs: Arc<Mutex<VecDeque<ScrubJob>>>,
     meta: Mutex<MetaCache>,
     bookmarks: Mutex<Bookmarks>,
     /// A–B loop points in ms.
@@ -1200,6 +1207,119 @@ async fn snapshot(player: tauri::State<'_, Player>) -> Result<Snapshot, String> 
     .await
 }
 
+/// Seek bar preview frames of what's playing: one every `step` ms through
+/// the whole video, frame `k` being the file `{prefix}{k}.jpg`.
+#[derive(Clone, Serialize)]
+struct ScrubInfo {
+    /// Tells this run's events from an earlier one's.
+    run: u64,
+    prefix: String,
+    step: i64,
+    /// The frames that exist already.
+    ready: Vec<i64>,
+}
+
+/// A frame to make: where it goes, how far in, and its number.
+struct ScrubJob {
+    out: PathBuf,
+    at: i64,
+    k: i64,
+}
+
+impl Core {
+    /// The current video's URI and length, if previews can be made for it.
+    fn scrub_source(&self) -> Option<(String, i64)> {
+        let uri = self.current_uri()?;
+        let length = self.vlc.length();
+        // Only real files can be read by the second player.
+        let ok = self.settings().seekbar_preview && !uri.contains("://") && length > 0 && self.vlc.has_video() && self.vlc.seekable();
+        ok.then_some((uri, length))
+    }
+
+    /// Starts making every preview frame of the current video that isn't
+    /// cached yet, coarse to fine, on a few low-priority threads, telling
+    /// the UI after each. A new call ends the previous run.
+    fn scrub_prepare(self: &Arc<Self>) -> Option<ScrubInfo> {
+        const WORKERS: usize = 6;
+        let run = self.scrub_run.fetch_add(1, Ordering::SeqCst) + 1;
+        let (uri, length) = self.scrub_source()?;
+        let step = scrub::step(length);
+        let count = ((length - 1) / step + 1) as usize;
+        let prefix = scrub::prefix(&self.scrub_dir, &uri, length, step);
+        let path = |k: i64| PathBuf::from(format!("{prefix}{k}.jpg"));
+        let ready: Vec<i64> = (0..count as i64).filter(|&k| path(k).exists()).collect();
+        let have: HashSet<i64> = ready.iter().copied().collect();
+        *self.scrub_jobs.lock().unwrap_or_else(|e| e.into_inner()) = scrub::order(count)
+            .into_iter()
+            .map(|k| k as i64)
+            .filter(|k| !have.contains(k))
+            .map(|k| ScrubJob { out: path(k), at: scrub::time_at(length, step, k), k })
+            .collect();
+        let _ = std::fs::create_dir_all(&self.scrub_dir);
+        let uri = Arc::new(uri);
+        for _ in 0..WORKERS {
+            let (core, uri) = (self.clone(), uri.clone());
+            let _ = thread::Builder::new().name("scrub".into()).spawn(move || {
+                background_priority();
+                loop {
+                    if core.scrub_run.load(Ordering::SeqCst) != run {
+                        return;
+                    }
+                    let Some(job) = core.scrub_jobs.lock().unwrap_or_else(|e| e.into_inner()).pop_front() else { return };
+                    // Decode into a temporary file, so a half-written frame is never shown.
+                    let tmp = job.out.with_extension(format!("part{}", job.k));
+                    // Exact frames: a few seconds apart, keyframes would repeat.
+                    match core.vlc.thumbnail_at(&uri, &tmp, job.at, scrub::WIDTH, true, true) {
+                        Ok(()) if std::fs::rename(&tmp, &job.out).is_ok() => {
+                            if core.scrub_run.load(Ordering::SeqCst) != run {
+                                return;
+                            }
+                            let _ = core.app.emit("player://scrub", serde_json::json!({ "run": run, "k": job.k }));
+                        }
+                        _ => {
+                            let _ = std::fs::remove_file(&tmp);
+                        }
+                    }
+                }
+            });
+        }
+        Some(ScrubInfo { run, prefix, step, ready })
+    }
+
+    /// Moves the frames `from..=to` still to make to the front of the queue,
+    /// the middle first: they're what the user is looking at.
+    fn scrub_focus(&self, from: i64, to: i64) {
+        let mid = (from + to) / 2;
+        let mut queue = self.scrub_jobs.lock().unwrap_or_else(|e| e.into_inner());
+        let (mut wanted, rest): (Vec<ScrubJob>, Vec<ScrubJob>) = queue.drain(..).partition(|j| (from..=to).contains(&j.k));
+        wanted.sort_by_key(|j| (j.k - mid).abs());
+        queue.extend(wanted);
+        queue.extend(rest);
+    }
+}
+
+#[tauri::command]
+async fn scrub_prepare(player: tauri::State<'_, Player>) -> Result<Option<ScrubInfo>, String> {
+    let core = player.core()?.clone();
+    tauri::async_runtime::spawn_blocking(move || core.scrub_prepare()).await.map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn scrub_focus(player: tauri::State<'_, Player>, from: i64, to: i64) -> Res {
+    player.core()?.scrub_focus(from, to);
+    Ok(())
+}
+
+/// Lowers the calling thread's priority, so preview frames give way to
+/// playback. libVLC's threads for the frame's player inherit it.
+fn background_priority() {
+    #[cfg(target_os = "linux")]
+    // SAFETY: setpriority on this thread's own id.
+    unsafe {
+        libc::setpriority(libc::PRIO_PROCESS as _, libc::syscall(libc::SYS_gettid) as libc::id_t, 10);
+    }
+}
+
 // Commands that change what plays run off the main thread: they wait for
 // the transition lock, and the event thread can hold it while libVLC needs
 // the main thread to close the previous video.
@@ -1850,6 +1970,9 @@ fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
         library: Mutex::new(Library::load(&data_dir)),
         thumbs: Thumbnails::default(),
         thumbs_dir: cache_dir.join("thumbs"),
+        scrub_dir: cache_dir.join("scrub"),
+        scrub_run: AtomicU64::new(0),
+        scrub_jobs: Arc::default(),
         meta: Mutex::new(MetaCache::load(&cache_dir)),
         bookmarks: Mutex::new(Bookmarks::load(&data_dir)),
         ab_loop: Mutex::default(),
@@ -1876,6 +1999,8 @@ fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     }
     // libVLC's player has its own title-display default; apply ours.
     core.vlc.set_title_display(settings.show_title, settings.title_position, settings.title_timeout);
+    let scrub_dir = core.scrub_dir.clone();
+    thread::spawn(move || scrub::prune(&scrub_dir));
     let thumbs = core.clone();
     thread::Builder::new().name("thumbnails".into()).spawn(move || make_thumbnails(thumbs))?;
     let saver = core.clone();
@@ -2002,6 +2127,8 @@ pub fn run() {
             updater::update_install,
             updater::update_restart,
             snapshot,
+            scrub_prepare,
+            scrub_focus,
             open,
             play_index,
             toggle_pause,

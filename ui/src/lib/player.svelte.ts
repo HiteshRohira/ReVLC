@@ -195,6 +195,11 @@ class Player {
   library = $state<Library>({ folders: [], items: [] });
   /** Bumped when a thumbnail file changes, to bust the web view's image cache. */
   thumbVersion = $state(0);
+  /**
+   * Seek bar preview frames of what's playing, one every `step` ms: frame `k`
+   * is the file `{prefix}{k}.jpg`, once `ready` has it.
+   */
+  scrub = $state<{ run: number; prefix: string; step: number; ready: Set<number> } | null>(null);
   engine = $state("");
   engineError = $state<string | null>(null);
   notices = $state<Notice[]>([]);
@@ -228,6 +233,10 @@ class Player {
       listen<Chapter[]>("player://chapters", (e) => (this.chapters = e.payload)),
       listen<Title[]>("player://titles", (e) => (this.titles = e.payload)),
       listen<Bookmark[]>("player://bookmarks", (e) => (this.bookmarks = e.payload)),
+      listen<{ run: number; k: number }>("player://scrub", (e) => {
+        const s = this.scrub;
+        if (s && s.run === e.payload.run) this.scrub = { ...s, ready: new Set(s.ready).add(e.payload.k) };
+      }),
       listen<string>("library://thumb", () => {
         this.thumbVersion++;
         this.#refreshLibrarySoon();
@@ -252,6 +261,28 @@ class Player {
     for (const n of snap.early.notices) this.notify(n.kind, n.text);
     if (snap.early.resume) this.offerResume(snap.early.resume);
     await Promise.all([this.loadHistory(), this.loadLibrary()]);
+  }
+
+  /** Starts making seek bar preview frames for what's playing (none when off or not a local video). */
+  async prepareScrub() {
+    this.scrub = null;
+    try {
+      const info = await invoke<{ run: number; prefix: string; step: number; ready: number[] } | null>("scrub_prepare");
+      this.scrub = info && { ...info, ready: new Set(info.ready) };
+    } catch {
+      this.scrub = null;
+    }
+  }
+
+  /** Has preview frames `from..=to` made next. */
+  focusScrub(from: number, to: number) {
+    invoke("scrub_focus", { from, to }).catch(() => {});
+  }
+
+  /** The file of preview frame `k`, if it's been made. */
+  scrubFrame(k: number) {
+    const s = this.scrub;
+    return s?.ready.has(k) ? `${s.prefix}${k}.jpg` : null;
   }
 
   /** Lists the library; `rescan` looks for new files instead of reusing the last scan. */

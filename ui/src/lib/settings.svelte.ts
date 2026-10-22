@@ -9,6 +9,7 @@ export interface Settings {
   stopAfterEach: boolean;
   pauseWhenMinimized: boolean;
   seekbarChapters: boolean;
+  seekbarPreview: boolean;
   autoUpdate: boolean;
   analytics: boolean;
 
