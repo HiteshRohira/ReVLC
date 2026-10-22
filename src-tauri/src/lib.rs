@@ -13,6 +13,8 @@ mod quality;
 mod settings;
 mod store;
 mod telemetry;
+#[cfg(target_os = "linux")]
+mod surface_linux;
 #[cfg(target_os = "macos")]
 mod surface_macos;
 #[cfg(windows)]
@@ -1324,7 +1326,7 @@ fn run_app_item(app: &AppHandle, id: &str) -> bool {
             tauri::async_runtime::spawn(async move { updater::check(&app, true).await });
         }
         "github" => {
-            let opener = if cfg!(windows) { "explorer" } else { "open" };
+            let opener = if cfg!(windows) { "explorer" } else if cfg!(target_os = "macos") { "open" } else { "xdg-open" };
             let _ = std::process::Command::new(opener).arg("https://github.com/HiteshRohira/ReVLC").spawn();
         }
         "quit" => app.exit(0),
@@ -1403,7 +1405,15 @@ fn font_families() -> Vec<String> {
     {
         system_windows::font_families()
     }
-    #[cfg(not(any(target_os = "macos", windows)))]
+    #[cfg(target_os = "linux")]
+    {
+        use gtk::prelude::*;
+        let context = gtk::Label::new(None).pango_context();
+        let mut fonts: Vec<String> = context.list_families().iter().map(|f| f.name().to_string()).collect();
+        fonts.sort_by_key(|f| f.to_lowercase());
+        fonts
+    }
+    #[cfg(not(any(target_os = "macos", windows, target_os = "linux")))]
     Vec::new()
 }
 
@@ -1785,7 +1795,18 @@ fn preferred_languages() -> Vec<String> {
     {
         system_windows::preferred_languages()
     }
-    #[cfg(not(any(target_os = "macos", windows)))]
+    #[cfg(target_os = "linux")]
+    {
+        let mut langs = Vec::new();
+        for lang in gtk::glib::language_names() {
+            let code = lang.split(['-', '_', '.', '@']).next().unwrap_or_default().to_lowercase();
+            if !code.is_empty() && code != "c" && !langs.contains(&code) {
+                langs.push(code);
+            }
+        }
+        langs
+    }
+    #[cfg(not(any(target_os = "macos", windows, target_os = "linux")))]
     Vec::new()
 }
 
@@ -1909,7 +1930,15 @@ fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
                 Err(e) => eprintln!("revlc: could not create the video window: {e}"),
             }
         }
-        #[cfg(not(any(target_os = "macos", windows)))]
+        #[cfg(target_os = "linux")]
+        match surface_linux::attach(&webview.inner()) {
+            Ok(xid) => attach.vlc.set_xwindow(xid),
+            Err(e) => {
+                eprintln!("revlc: could not create the video drawable: {e}");
+                return;
+            }
+        }
+        #[cfg(not(any(target_os = "macos", windows, target_os = "linux")))]
         let _ = webview;
         // Off the main thread, like the commands that open media.
         thread::spawn(move || attach.mark_ready());
@@ -1921,10 +1950,12 @@ fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    #[cfg(target_os = "linux")]
+    surface_linux::init();
     let builder = tauri::Builder::default();
     // Windows starts a new process for each file opened from Explorer; it
     // hands its files to the running copy and exits.
-    #[cfg(windows)]
+    #[cfg(any(windows, target_os = "linux"))]
     let builder = builder.plugin(tauri_plugin_single_instance::init(|app, args, _cwd| {
         if let Some(window) = app.get_webview_window("main") {
             let _ = window.unminimize();

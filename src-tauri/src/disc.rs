@@ -82,7 +82,7 @@ pub fn detect() -> Vec<Disc> {
 }
 
 /// Discs currently inserted (mounted volumes that look like one).
-#[cfg(not(windows))]
+#[cfg(not(any(windows, target_os = "linux")))]
 pub fn detect() -> Vec<Disc> {
     let Ok(entries) = std::fs::read_dir("/Volumes") else { return Vec::new() };
     let mut discs: Vec<Disc> = entries
@@ -97,6 +97,24 @@ pub fn detect() -> Vec<Disc> {
         })
         .collect();
     discs.sort_by(|a, b| natural_cmp(&a.name, &b.name));
+    discs
+}
+
+/// Data discs mounted by udisks, regardless of their user's mount directory.
+#[cfg(target_os = "linux")]
+pub fn detect() -> Vec<Disc> {
+    let mounts = std::fs::read_to_string("/proc/mounts").unwrap_or_default();
+    let mut discs = Vec::new();
+    for line in mounts.lines() {
+        let Some(mount) = line.split_whitespace().nth(1) else { continue };
+        let path = mount.replace("\\040", " ").replace("\\011", "\t").replace("\\012", "\n").replace("\\134", "\\");
+        let p = Path::new(&path);
+        if let Some(kind) = kind_of(p) {
+            discs.push(Disc { kind, name: disc_name(p), path });
+        }
+    }
+    discs.sort_by(|a, b| natural_cmp(&a.name, &b.name));
+    discs.dedup_by(|a, b| a.path == b.path);
     discs
 }
 

@@ -126,6 +126,7 @@ api! {
     libvlc_media_player_stop: fn(*mut Player);
     libvlc_media_player_set_nsobject: fn(*mut Player, *mut c_void);
     libvlc_media_player_set_hwnd: fn(*mut Player, *mut c_void);
+    libvlc_media_player_set_xwindow: fn(*mut Player, c_uint);
     libvlc_media_player_get_length: fn(*mut Player) -> i64;
     libvlc_media_player_get_time: fn(*mut Player) -> i64;
     libvlc_media_player_set_time: fn(*mut Player, i64);
@@ -422,28 +423,30 @@ impl Vlc {
     /// copies some options (title display, deinterlacing) when it's made.
     pub fn load(resource_dir: Option<&Path>, extra_args: &[String], config: &[(&str, ConfigValue)]) -> Result<Self, LoadError> {
         let dirs = candidate_dirs(resource_dir);
-        let dir = dirs
-            .iter()
-            .find(|d| lib_dir(d).join(lib_names().1).exists())
-            .ok_or_else(|| {
-                LoadError::new(
-                    "not_found",
-                    format!(
-                        "libVLC 3 was not found. Install VLC 3 from videolan.org or set REVLC_VLC_DIR. Looked in: {}",
-                        dirs.iter().map(|d| d.display().to_string()).collect::<Vec<_>>().join(", ")
-                    ),
-                )
-            })?;
+        let dir = dirs.iter().find(|d| lib_dir(d).join(lib_names().1).exists());
+        if dir.is_none() && !cfg!(target_os = "linux") {
+            return Err(LoadError::new(
+                "not_found",
+                format!(
+                    "libVLC 3 was not found. Install VLC 3 from videolan.org or set REVLC_VLC_DIR. Looked in: {}",
+                    dirs.iter().map(|d| d.display().to_string()).collect::<Vec<_>>().join(", ")
+                ),
+            ));
+        }
+        let location = dir.map_or_else(|| "the system library path".into(), |d| d.display().to_string());
 
         // SAFETY: called once during startup, before libVLC starts its threads.
-        unsafe {
-            std::env::set_var("VLC_PLUGIN_PATH", dir.join("plugins"));
-            std::env::set_var("VLC_DATA_PATH", dir.join("share"));
+        // System VLC on Linux knows its distro's plugin and data paths.
+        if let Some(dir) = dir {
+            unsafe {
+                std::env::set_var("VLC_PLUGIN_PATH", dir.join("plugins"));
+                std::env::set_var("VLC_DATA_PATH", dir.join("share"));
+            }
         }
 
         let (core_name, lib_name) = lib_names();
         let load = |name: &str| -> Result<&'static Library, LoadError> {
-            let path = lib_dir(dir).join(name);
+            let path = dir.map_or_else(|| PathBuf::from(name), |d| lib_dir(d).join(name));
             // SAFETY: loading libVLC runs its initialisers, which are safe to run.
             let lib = unsafe { Library::new(&path) }
                 .map_err(|e| LoadError::new("load", format!("Couldn't load {}: {e}", path.display())))?;
@@ -476,14 +479,14 @@ impl Vlc {
         let version = unsafe { CStr::from_ptr((api.libvlc_get_version)()) }.to_string_lossy().into_owned();
         // `put_config` relies on how libVLC 3 lays out its instance.
         if !version.starts_with("3.") {
-            return Err(LoadError::new("version", format!("ReVLC needs libVLC 3, but {} has libVLC {version}", dir.display())));
+            return Err(LoadError::new("version", format!("ReVLC needs libVLC 3, but {location} has libVLC {version}")));
         }
         unsafe {
             let inst = (api.libvlc_new)(argv.len() as c_int, argv.as_ptr());
             if inst.is_null() {
                 return Err(LoadError::new(
                     "init",
-                    format!("libVLC loaded from {} but couldn't start: {}", dir.display(), errmsg(&api)),
+                    format!("libVLC loaded from {location} but couldn't start: {}", errmsg(&api)),
                 ));
             }
             for (name, value) in config {
@@ -605,6 +608,11 @@ impl Vlc {
     #[cfg(windows)]
     pub fn set_hwnd(&self, hwnd: *mut c_void) {
         unsafe { (self.api.libvlc_media_player_set_hwnd)(self.mp, hwnd) }
+    }
+
+    #[cfg(target_os = "linux")]
+    pub fn set_xwindow(&self, xid: u32) {
+        unsafe { (self.api.libvlc_media_player_set_xwindow)(self.mp, xid) }
     }
 
     /// Identifies the media the player has: changes each time it opens one.

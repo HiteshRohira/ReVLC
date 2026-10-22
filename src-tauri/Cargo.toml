@@ -43,6 +43,12 @@ webview2-com = "0.39"
 windows = { version = "0.62", features = ["Win32_Media_DirectShow", "Win32_System_Com", "Win32_System_Com_StructuredStorage", "Win32_System_Ole", "Win32_System_Variant"] }
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Globalization", "Win32_Graphics_Gdi", "Win32_Storage_FileSystem", "Win32_System_LibraryLoader", "Win32_System_Registry", "Win32_System_SystemInformation", "Win32_System_WindowsProgramming", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging"] }
 
+[target.'cfg(target_os = "linux")'.dependencies]
+# Match Tauri's GTK/WebKit versions for the native video surface.
+gtk = "0.18"
+webkit2gtk = "2"
+tauri-plugin-single-instance = "2"
+
 [profile.release]
 codegen-units = 1
 lto = true

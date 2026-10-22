@@ -1,0 +1,62 @@
+# Branch artifacts only. This never creates or modifies a GitHub release.
+name: Linux build
+
+on:
+  push:
+    branches: ['feat/linux-*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  linux:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+      - name: Install Linux dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev build-essential libssl-dev librsvg2-dev libx11-dev patchelf \
+            libvlc5 libvlccore9 vlc-plugin-base vlc-plugin-video-output \
+            xvfb xdotool openbox xcompmgr ffmpeg imagemagick python3-pil dbus-x11
+      - run: npm ci
+      - run: npm run check
+      - run: npm run build
+      - name: Clippy
+        working-directory: src-tauri
+        run: cargo clippy --locked --all-targets -- -D warnings
+      - name: Tests
+        working-directory: src-tauri
+        run: cargo test --locked
+      - name: Build the Mint / Ubuntu package
+        run: bash scripts/build-linux.sh
+      - name: Install and exercise the package
+        run: |
+          sudo apt-get install -y ./src-tauri/target/release/bundle/deb/*.deb
+          dbus-run-session -- xvfb-run -a -s '-screen 0 1280x800x24' bash scripts/qa/linux-smoke.sh "$RUNNER_TEMP/linux-smoke"
+      - name: Package checksum
+        run: |
+          cd src-tauri/target/release/bundle/deb
+          sha256sum *.deb > SHA256SUMS
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ReVLC-linux-mint-x64
+          path: |
+            src-tauri/target/release/bundle/deb/*.deb
+            src-tauri/target/release/bundle/deb/SHA256SUMS
+            ${{ runner.temp }}/linux-smoke/screenshots/
+            ${{ runner.temp }}/linux-smoke/logs/
+          if-no-files-found: warn

@@ -15,6 +15,12 @@ VLC_VERSION="${VLC_VERSION:-3.0.24}"
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 DEST="$ROOT/src-tauri/vlc"
 
+if [[ "$(uname -s)" == Linux ]]; then
+  echo "Linux uses system libVLC 3. On Mint/Ubuntu, install:"
+  echo "  sudo apt install libvlc5 libvlccore9 vlc-plugin-base vlc-plugin-video-output"
+  exit 0
+fi
+
 # A plugin cache makes libVLC start faster: without one it opens every
 # plugin on each launch. VLC.app's own cache lists the plugins we drop, so
 # libVLC writes a fresh one; it stays valid because bundling keeps each

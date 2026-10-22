@@ -10,7 +10,7 @@
   import Row from "./Row.svelte";
   import Select from "./Select.svelte";
   import WindowControls from "./WindowControls.svelte";
-  import { isMac } from "./platform";
+  import { isMac, isWindows } from "./platform";
   import { updater } from "./updater.svelte";
 
   // VLC's default snapshot folder.
@@ -317,7 +317,7 @@
     {:else if tab === "input"}
       <h3>Decoding</h3>
       <div class="group">
-        <Row label="Hardware-accelerated decoding" help={isMac ? "Uses the Mac's video decoder (VideoToolbox). Saves battery." : "Uses the graphics card's video decoder (Direct3D 11). Saves battery."}>{@render toggle("hardwareDecoding")}</Row>
+        <Row label="Hardware-accelerated decoding" help={isMac ? "Uses the Mac's video decoder (VideoToolbox). Saves battery." : isWindows ? "Uses the graphics card's video decoder (Direct3D 11). Saves battery." : "Uses the graphics card's video decoder when supported by your Linux drivers. Saves battery."}>{@render toggle("hardwareDecoding")}</Row>
         <Row label="Skip H.264 loop filter" help="Speeds up software decoding of H.264 at some cost in quality.">{@render choice("skipLoopFilter", LOOP_FILTER)}</Row>
       </div>
       <h3>Caching</h3>

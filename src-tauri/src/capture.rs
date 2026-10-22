@@ -72,7 +72,7 @@ pub fn item(capture: &Capture) -> Item {
 }
 
 /// The playlist item that opens `capture`.
-#[cfg(not(windows))]
+#[cfg(not(any(windows, target_os = "linux")))]
 pub fn item(capture: &Capture) -> Item {
     let mut options = vec![":live-caching=300".to_string()];
     let (uri, title) = match capture.kind {
@@ -90,6 +90,25 @@ pub fn item(capture: &Capture) -> Item {
         && let Some(audio) = &capture.audio
     {
         options.push(format!(":input-slave=avaudiocapture://{audio}"));
+    }
+    Item { uri, title: title.to_string(), options, trusted: true }
+}
+
+#[cfg(target_os = "linux")]
+pub fn item(capture: &Capture) -> Item {
+    let mut options = vec![":live-caching=300".to_string()];
+    let (uri, title) = match capture.kind {
+        CaptureKind::Camera => (format!("v4l2://{}", capture.device), "Camera"),
+        CaptureKind::Microphone => (format!("pulse://{}", capture.device), "Microphone"),
+        CaptureKind::Screen => {
+            options.push(format!(":screen-fps={}", capture.fps.unwrap_or(30).clamp(1, 60)));
+            ("screen://".to_string(), "Screen")
+        }
+    };
+    if !matches!(capture.kind, CaptureKind::Microphone)
+        && let Some(audio) = &capture.audio
+    {
+        options.push(format!(":input-slave=pulse://{audio}"));
     }
     Item { uri, title: title.to_string(), options, trusted: true }
 }
@@ -219,7 +238,24 @@ pub fn devices() -> Devices {
     Devices { video: dshow(&VIDEO_INPUT), audio: dshow(&AUDIO_INPUT), screens }
 }
 
-#[cfg(not(any(target_os = "macos", windows)))]
+#[cfg(target_os = "linux")]
+pub fn devices() -> Devices {
+    let mut video: Vec<Device> = std::fs::read_dir("/sys/class/video4linux")
+        .into_iter().flatten().flatten()
+        .map(|entry| {
+            let id = format!("/dev/{}", entry.file_name().to_string_lossy());
+            let name = std::fs::read_to_string(entry.path().join("name")).unwrap_or_else(|_| id.clone()).trim().to_string();
+            Device { id, name }
+        }).collect();
+    video.sort_by(|a, b| a.id.cmp(&b.id));
+    Devices {
+        video,
+        audio: vec![Device { id: "default".into(), name: "Default microphone".into() }],
+        screens: vec![Device { id: String::new(), name: "Desktop (X11)".into() }],
+    }
+}
+
+#[cfg(not(any(target_os = "macos", windows, target_os = "linux")))]
 pub fn devices() -> Devices {
     Devices::default()
 }
@@ -229,7 +265,7 @@ mod tests {
     use super::*;
 
     #[test]
-    #[cfg(not(windows))]
+    #[cfg(not(any(windows, target_os = "linux")))]
     fn capture_items() {
         let cam = item(&Capture { kind: CaptureKind::Camera, device: "abc".into(), audio: Some("mic".into()), fps: None });
         assert_eq!(cam.uri, "avcapture://abc");
@@ -238,6 +274,20 @@ mod tests {
         assert_eq!(screen.uri, "screen://");
         assert!(screen.options.contains(&":screen-fps=15".to_string()));
         assert!(screen.options.contains(&":screen-display-id=1".to_string()));
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn capture_items_linux() {
+        let cam = item(&Capture { kind: CaptureKind::Camera, device: "/dev/video0".into(), audio: Some("default".into()), fps: None });
+        assert_eq!(cam.uri, "v4l2:///dev/video0");
+        assert!(cam.options.contains(&":input-slave=pulse://default".to_string()));
+        let mic = item(&Capture { kind: CaptureKind::Microphone, device: "default".into(), audio: None, fps: None });
+        assert_eq!(mic.uri, "pulse://default");
+        let screen = item(&Capture { kind: CaptureKind::Screen, device: "".into(), audio: None, fps: Some(120) });
+        assert_eq!(screen.uri, "screen://");
+        assert!(screen.options.contains(&":screen-fps=60".to_string()));
+        assert!(!screen.options.iter().any(|o| o.contains("display-id")));
     }
 
     #[test]
