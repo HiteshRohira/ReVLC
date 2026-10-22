@@ -28,7 +28,7 @@ pub fn init() {
 /// owned pixels. No external video child window can cover the controls.
 pub fn attach(webview: &webkit2gtk::WebView, frames: Arc<Mutex<Option<PresentedFrame>>>) -> Result<(), String> {
     let native_draw = webview.class().upcast_ref::<gtk::Widget>().as_ref().draw.ok_or("WebKit's GTK draw method is missing")?;
-    if let Some(settings) = webview.settings() {
+    if let Some(settings) = WebViewExt::settings(webview) {
         // Our composition needs WebKit's Cairo output, including its alpha.
         settings.set_hardware_acceleration_policy(HardwareAccelerationPolicy::Never);
     }
