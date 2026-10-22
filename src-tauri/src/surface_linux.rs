@@ -1,15 +1,15 @@
-//! GTK composites CPU video frames below the transparent WebKit controls.
-//! A separate native VLC child window would cover the windowless web view.
+//! Composite libVLC's CPU frames and WebKit's transparent controls in one
+//! GTK draw. WebKit clears its background, so a sibling underlay is erased.
 
 use std::cell::RefCell;
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use gtk::cairo::{Format, ImageSurface};
+use gtk::cairo::{Format, ImageSurface, Operator};
 use gtk::glib::{ControlFlow, Propagation};
 use gtk::prelude::*;
-use webkit2gtk::WebViewExt;
+use webkit2gtk::{HardwareAccelerationPolicy, SettingsExt, WebViewExt};
 
 use crate::vlc::PresentedFrame;
 
@@ -24,58 +24,64 @@ pub fn init() {
     gtk::gdk::set_allowed_backends("x11");
 }
 
-/// GTK owns all widgets and Cairo surfaces on its main thread. The video
-/// callbacks only publish owned pixels, never touching a GTK object.
+/// GTK and Cairo stay on the main thread; video callbacks only hand over
+/// owned pixels. No external video child window can cover the controls.
 pub fn attach(webview: &webkit2gtk::WebView, frames: Arc<Mutex<Option<PresentedFrame>>>) -> Result<(), String> {
-    let parent = webview.parent().and_then(|p| p.downcast::<gtk::Box>().ok()).ok_or("web view's GTK box is missing")?;
-    let overlay = gtk::Overlay::new();
-    overlay.set_hexpand(true);
-    overlay.set_vexpand(true);
-    let video = gtk::DrawingArea::new();
-    // Paint in the same GTK window as WebKit, so its transparent pixels
-    // reveal the video and its controls remain above it.
-    video.set_has_window(false);
-    video.set_hexpand(true);
-    video.set_vexpand(true);
+    let native_draw = webview.class().upcast_ref::<gtk::Widget>().as_ref().draw.ok_or("WebKit's GTK draw method is missing")?;
+    if let Some(settings) = webview.settings() {
+        // Our composition needs WebKit's Cairo output, including its alpha.
+        settings.set_hardware_acceleration_policy(HardwareAccelerationPolicy::Never);
+    }
+    webview.set_background_color(&gtk::gdk::RGBA::new(0.0, 0.0, 0.0, 0.0));
     let surface: Rc<RefCell<Option<ImageSurface>>> = Rc::default();
     let drawing = surface.clone();
-    video.connect_draw(move |area, cr| {
+    webview.connect_draw(move |view, cr| {
         if cr.save().is_err() {
             return Propagation::Proceed;
         }
+        // WebKit uses SOURCE when clearing its surface. Capture that draw
+        // in a group, then place the resulting alpha layer over the video.
+        cr.push_group();
+        // SAFETY: this is the view's own GtkWidget draw vfunc, called on
+        // the GTK thread with the active draw context. Stop the signal
+        // afterwards so GTK does not call that default handler twice.
+        unsafe { native_draw(view.as_ptr().cast(), cr.to_raw_none()) };
+        let controls = cr.pop_group();
+        cr.set_operator(Operator::Over);
         cr.set_source_rgb(0.0, 0.0, 0.0);
         let _ = cr.paint();
         if let Some(image) = drawing.borrow().as_ref() {
-            let (w, h) = (area.allocated_width() as f64, area.allocated_height() as f64);
+            let (w, h) = (view.allocated_width() as f64, view.allocated_height() as f64);
             let (iw, ih) = (image.width() as f64, image.height() as f64);
             let scale = (w / iw).min(h / ih);
-            cr.translate((w - iw * scale) / 2.0, (h - ih * scale) / 2.0);
-            cr.scale(scale, scale);
-            if cr.set_source_surface(image, 0.0, 0.0).is_ok() {
-                let _ = cr.paint();
+            if cr.save().is_ok() {
+                cr.translate((w - iw * scale) / 2.0, (h - ih * scale) / 2.0);
+                cr.scale(scale, scale);
+                if cr.set_source_surface(image, 0.0, 0.0).is_ok() {
+                    let _ = cr.paint();
+                }
+                let _ = cr.restore();
             }
         }
+        if let Ok(controls) = controls
+            && cr.set_source(&controls).is_ok()
+        {
+            let _ = cr.paint();
+        }
         let _ = cr.restore();
-        Propagation::Proceed
+        Propagation::Stop
     });
-    let weak_video = video.downgrade();
+    let weak_view = webview.downgrade();
     gtk::glib::timeout_add_local(Duration::from_millis(16), move || {
-        let Some(video) = weak_video.upgrade() else { return ControlFlow::Break };
+        let Some(view) = weak_view.upgrade() else { return ControlFlow::Break };
         let frame = frames.lock().unwrap_or_else(|e| e.into_inner()).take();
         if let Some(frame) = frame
             && let Ok(image) = ImageSurface::create_for_data(frame.pixels, Format::Rgb24, frame.width, frame.height, frame.stride)
         {
             *surface.borrow_mut() = Some(image);
-            video.queue_draw();
+            view.queue_draw();
         }
         ControlFlow::Continue
     });
-    overlay.add(&video);
-    parent.remove(webview);
-    overlay.add_overlay(webview);
-    parent.pack_start(&overlay, true, true, 0);
-    webview.set_background_color(&gtk::gdk::RGBA::new(0.0, 0.0, 0.0, 0.0));
-    overlay.show_all();
-    webview.grab_focus();
     Ok(())
 }
