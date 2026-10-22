@@ -1,15 +1,15 @@
 {
-  "version": "0.2.7",
-  "notes": "Fixes the playback engine failing to start on some Windows 10 PCs. If the engine ever does fail, the error screen now says why.",
-  "pub_date": "2026-10-21T20:13:10Z",
+  "version": "0.2.8",
+  "notes": "Fixes external subtitles disappearing when you change subtitle settings, the resume prompt sometimes missing on launch, broken files being marked as watched, stale thumbnails for replaced files, and keyboard shortcuts stopping after fullscreen on macOS. Videos in very long folder paths now play on Windows.",
+  "pub_date": "2026-10-22T11:55:46Z",
   "platforms": {
     "darwin-aarch64": {
-      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSVlR1Wml6L0lBejBJcmNJQXd0emhabElrd1IxdGJNSUtyMmJ5SGROSGoxZ0tRQTZOcm9iRHZjNmdhS0hVVVdLZlE2TmdVTkJCL0VCTXVld052SENkZmdjUHBJRmswMkFJPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkyNjEzMzIwCWZpbGU6UmVWTEMuYXBwLnRhci5negl2ZXJzaW9uOjAuMi43Ck5hckxob3UyQU9ycjJFZlBtTi9oZCtDMlRzS1N0NlplQkdrN1VGTGd6aG9VM0huRUd1RklsWkFzMktIVVVuMFNvZlU1TlhTK3pranpFQnlEbWExK0F3PT0K",
-      "url": "https://github.com/HiteshRohira/ReVLC/releases/download/v0.2.7-alpha/ReVLC-0.2.7-alpha-arm64.app.tar.gz"
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSVlR1Wml6L0lBenpEc1IwNnI1THU4amFNb3ZHZ1N6bkRVOG9ReWFNUGFLd3J6MmIwbFUzZUpEM1Q0STYvWk05Ym4zUnpPd0JkaU1kWDc2ZnhOSkZvU3dGK0xKK3lXcmdFPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkyNjY5ODk0CWZpbGU6UmVWTEMuYXBwLnRhci5negl2ZXJzaW9uOjAuMi44Ci8wVURyS3hCR29CbzFscndkQVpMY3pwdFp3ZmxJNFF6N0pPL0RqRmJSTmZ5eTFCMHltaHU3ZUt3d1BEc0NFN3ZqRHRFNmtnY0VJcHBDOVJaUHJIOENRPT0K",
+      "url": "https://github.com/HiteshRohira/ReVLC/releases/download/v0.2.8-alpha/ReVLC-0.2.8-alpha-arm64.app.tar.gz"
     },
     "windows-x86_64": {
-      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSVlR1Wml6L0lBejVIZXRjUGRiSCswNmc4N09ublJJaGFKMWlyNWUrbHZwczRxV3lIcXNQc1dXWWFRSnZpUUZ3NTdrTG8vY3hNVkcvWnk3M1pVd1BVL09JOGlsOC9RQUFJPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkyNjEzNTAzCWZpbGU6UmVWTENfMC4yLjdfeDY0LXNldHVwLmV4ZQl2ZXJzaW9uOjAuMi43Ck5walN2M0tZaiswdUExc05KM1crZ3BJbzF1a2o5b0pYNmdxbDhWcDZpeDBDVWtjSEpLTHFJVm4wVW1ackt0cTIrcjg2cHBCUEZ3aFZzaHVwS3N6T0FnPT0K",
-      "url": "https://github.com/HiteshRohira/ReVLC/releases/download/v0.2.7-alpha/ReVLC-0.2.7-alpha-x64-setup.exe"
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSVlR1Wml6L0lBenlyVk5XRktwM2hDdjU4OFVqZVhsa080NmN3T2xWeSsxLzl1V2lIOVFDQXl6a1NsWjh1SmI0cXlMRjBWdGgvdUNPbDVRQ1FXcGkvY1k5eVAySlNqekE0PQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkyNjcwMTI0CWZpbGU6UmVWTENfMC4yLjhfeDY0LXNldHVwLmV4ZQl2ZXJzaW9uOjAuMi44CkNlOGdHUm9GQW9lLzVQckFpVEVTaHRZUjErd25RQWdyVHh1WVI1TnFiUkZna1NMWTdUbHMrcU5aS21RMmhaUzVsbWZseFRUS0VRMkY3aW04UFpETkNBPT0K",
+      "url": "https://github.com/HiteshRohira/ReVLC/releases/download/v0.2.8-alpha/ReVLC-0.2.8-alpha-x64-setup.exe"
     }
   }
 }
