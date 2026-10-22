@@ -27,9 +27,13 @@ jobs:
           workspaces: src-tauri
           cache-on-failure: true
       - name: Install Linux dependencies
+        timeout-minutes: 5
+        env:
+          DEBIAN_FRONTEND: noninteractive
+          NEEDRESTART_MODE: a
         run: |
-          sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev build-essential libssl-dev librsvg2-dev libx11-dev patchelf \
+          sudo --preserve-env=DEBIAN_FRONTEND,NEEDRESTART_MODE apt-get -o Acquire::http::Timeout=30 -o Acquire::Retries=2 update
+          sudo --preserve-env=DEBIAN_FRONTEND,NEEDRESTART_MODE apt-get -o Acquire::http::Timeout=30 -o Acquire::Retries=2 install -y libwebkit2gtk-4.1-dev build-essential libssl-dev librsvg2-dev libx11-dev patchelf \
             libvlc5 libvlccore9 vlc-plugin-base vlc-plugin-video-output \
             xvfb xdotool x11-utils openbox xcompmgr ffmpeg imagemagick python3-pil dbus-x11
       - run: npm ci
