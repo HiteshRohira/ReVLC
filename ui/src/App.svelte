@@ -206,13 +206,7 @@
         ACTION_BY_ID.get(e.payload)?.run(host);
         wake();
       }),
-      appWindow.onResized(async () => {
-        const fullscreen = await appWindow.isFullscreen();
-        // Entering or leaving fullscreen can hand keyboard focus to the
-        // native video view, and the shortcuts stop working.
-        if (fullscreen !== ui.fullscreen) getCurrentWebview().setFocus();
-        ui.fullscreen = fullscreen;
-      }),
+      appWindow.onResized(async () => (ui.fullscreen = await appWindow.isFullscreen())),
     ];
     return () => unlisteners.forEach((p) => p.then((off) => off()));
   });

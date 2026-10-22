@@ -4,12 +4,14 @@
 use std::ffi::c_void;
 use std::ptr::NonNull;
 
-use objc2::{MainThreadMarker, MainThreadOnly};
+use objc2::{MainThreadMarker, MainThreadOnly, Message, sel};
 use objc2::rc::Retained;
 use block2::RcBlock;
 use objc2_app_kit::{
-    NSAutoresizingMaskOptions, NSColor, NSCursor, NSEvent, NSEventMask, NSView, NSWindow, NSWindowOrderingMode,
+    NSAutoresizingMaskOptions, NSColor, NSCursor, NSEvent, NSEventMask, NSView, NSWindow,
+    NSWindowDidEnterFullScreenNotification, NSWindowDidExitFullScreenNotification, NSWindowOrderingMode,
 };
+use objc2_foundation::{NSNotification, NSNotificationCenter, NSObjectNSDelayedPerforming};
 
 /// Creates the video view below `webview` and returns it as an `NSView*`.
 /// Must run on the main thread. The view lives as long as the window.
@@ -50,6 +52,21 @@ pub fn attach(
     let mask = NSEventMask::MouseMoved | NSEventMask::LeftMouseDragged | NSEventMask::ScrollWheel;
     // The monitor lives for the whole app.
     std::mem::forget(unsafe { NSEvent::addLocalMonitorForEventsMatchingMask_handler(mask, &handler) });
+
+    // After entering or leaving fullscreen, the web page can lose focus
+    // while the web view stays first responder, and the shortcuts stop
+    // working. Once the transition has settled, resign and take it again,
+    // which refocuses the page.
+    let (web, win) = (webview.retain(), window.retain());
+    let refocus = RcBlock::new(move |_: NonNull<NSNotification>| unsafe {
+        win.performSelector_withObject_afterDelay(sel!(makeFirstResponder:), None, 0.3);
+        win.performSelector_withObject_afterDelay(sel!(makeFirstResponder:), Some(&web), 0.35);
+    });
+    let center = NSNotificationCenter::defaultCenter();
+    for name in unsafe { [NSWindowDidEnterFullScreenNotification, NSWindowDidExitFullScreenNotification] } {
+        // The observers live for the whole app.
+        std::mem::forget(unsafe { center.addObserverForName_object_queue_usingBlock(Some(name), Some(window), None, &refocus) });
+    }
 
     Ok(Retained::into_raw(video) as *mut c_void)
 }
