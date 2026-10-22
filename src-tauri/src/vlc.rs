@@ -1268,7 +1268,7 @@ impl Vlc {
             let Some(buf) = g.buf.as_ref().filter(|_| ok && g.width > 0) else {
                 return Err(format!("no frame decoded from {path}"));
             };
-            let rgb: Vec<u8> = buf.as_slice().chunks_exact(4).flat_map(|p| [p[2], p[1], p[0]]).collect();
+            let rgb: Vec<u8> = buf.as_slice().as_chunks::<4>().0.iter().flat_map(|p| [p[2], p[1], p[0]]).collect();
             let img = image::RgbImage::from_raw(g.width, g.height, rgb).ok_or("bad frame size")?;
             img.save_with_format(out, image::ImageFormat::Jpeg).map_err(|e| e.to_string())
         }

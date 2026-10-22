@@ -73,6 +73,6 @@ pub fn attach(parent: *mut c_void) -> Result<*mut c_void, String> {
         if SetWindowSubclass(parent, Some(parent_proc), 1, video as usize) == 0 {
             return Err("could not follow the window's size".into());
         }
-        Ok(video as *mut c_void)
+        Ok(video)
     }
 }

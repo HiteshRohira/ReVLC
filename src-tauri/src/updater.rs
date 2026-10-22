@@ -246,13 +246,13 @@ pub async fn update_restart(app: AppHandle) {
         let updater = app.state::<Updater>();
         let installer = updater.installer.lock().unwrap_or_else(|e| e.into_inner()).take();
         let update = updater.update.lock().unwrap_or_else(|e| e.into_inner()).clone();
-        if let (Some(update), Some(installer)) = (update, installer) {
-            if let Err(e) = update.install(installer) {
-                eprintln!("revlc: update install failed: {e}");
-                updater.set(&app, |s| s.status = Status::Available);
-                notice(&app, "error", format!("Could not install the update: {e}"));
-                return;
-            }
+        if let (Some(update), Some(installer)) = (update, installer)
+            && let Err(e) = update.install(installer)
+        {
+            eprintln!("revlc: update install failed: {e}");
+            updater.set(&app, |s| s.status = Status::Available);
+            notice(&app, "error", format!("Could not install the update: {e}"));
+            return;
         }
     }
     app.request_restart();

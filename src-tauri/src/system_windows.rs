@@ -22,7 +22,7 @@ pub fn font_families() -> Vec<String> {
     unsafe {
         let dc = GetDC(std::ptr::null_mut());
         let mut query: LOGFONTW = std::mem::zeroed();
-        query.lfCharSet = DEFAULT_CHARSET as u8;
+        query.lfCharSet = DEFAULT_CHARSET;
         EnumFontFamiliesExW(dc, &query, Some(add), &mut fonts as *mut Vec<String> as LPARAM, 0);
         ReleaseDC(std::ptr::null_mut(), dc);
     }
