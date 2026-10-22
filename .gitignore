@@ -8,3 +8,4 @@ src-tauri/vlc/
 
 # Release files collected by scripts/release-files.sh
 /release/
+__pycache__/

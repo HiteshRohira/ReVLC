@@ -6,8 +6,12 @@ That audit found 10 macOS and 11 Windows issues, with 83 + 184 screenshots and
 37 recordings. Both machines were left exactly as they were found.
 
 The setup: you (the orchestrator, on the Mac) start two QA threads, one on this
-Mac and one on the Windows PC. You watch them, then merge their reports into
-one answer for the user. The QA threads only test. They never change code.
+Mac and one on the Windows PC. You watch them, then merge their Markdown
+reports into one answer and one HTML report for the user. The QA threads only
+test. They never change code.
+
+The helper scripts live in `scripts/qa/` (section 4.6). They're for QA runs
+only and are never bundled with the app.
 
 ## 0. Before you start (orchestrator, about 3 min)
 
@@ -26,12 +30,17 @@ Each item here prevented a delay from last time (see section 6).
   - `command -v ffmpeg ffprobe`
   - `~/.tauri/revlc-updater.key` exists, so `npm run build:app` can sign the
     updater archive.
-- [ ] **Fixtures and helpers are present.** `~/revlc-qa/media/` exists. Copy
-      the newest run's helpers into the new run folder (or `~/revlc-qa/tools/`)
-      and name them in the prompt, so the thread reuses them instead of
-      rewriting them:
-  - Mac: `logs/shot.sh`, `logs/desktop.swift` (and the compiled `logs/desktop`), `logs/generate-media.py`, `ReVLC-QA-Debug.app`
-  - Windows (in `C:\Users\hites\revlc-qa\win-<date>\`): `qa-desktop.ps1`, `qa-cdp.mjs`, `qa-native-tests.mjs`, `qa-capture-webview.mjs`, `patch-vlc-fixture.cjs`, `generate-entry-cap.cjs`, the DPI script, and `tools\ffmpeg-*-essentials_build\bin\`
+- [ ] **Branch has the QA scripts.** The branch under test must contain
+      `scripts/qa/` (merged from master). If it doesn't, tell both threads to
+      run the scripts from a master checkout instead
+      (`git -C <repo> show master:scripts/qa/...`, or a second worktree).
+- [ ] **Fixtures are present.** `~/revlc-qa/media/` exists. If not, the thread
+      runs `scripts/qa/generate-media.py` (about 4 s). On the PC,
+      `scripts\qa\windows\generate-media.ps1` makes the Windows set. Both only
+      add missing files.
+- [ ] **ffmpeg on the PC.** It's under
+      `C:\Users\hites\revlc-qa\win-2026-10-22\tools\ffmpeg-*-essentials_build\bin\`.
+      The scripts find it there, or through `QA_FFMPEG`.
 - [ ] **Facts in the prompt are current.**
   - PR head SHA
   - the change list, pasted from the PR body
@@ -79,12 +88,21 @@ the run started.
 
 ### Monitoring
 
-- Mac: `mcp__t3-code__t3_thread_wait` with `timeoutMs: 600000` works. It returns
-  `timedOut: true` while the thread is still running.
-- Windows: `mcp__t3-windows__t3_thread_wait` fails with "The operation timed
-  out" after about 60 s, whatever `timeoutMs` you pass. Don't use it. Poll with
-  `mcp__t3-windows__t3_thread_read` (`view: "messages"`, `afterPosition` = the
-  last position you saw, small `limit`, `maxCharsPerItem` ≈ 600).
+- Use `t3_thread_wait` on both. It costs far fewer tokens than polling with
+  reads.
+  - Mac: `mcp__t3-code__t3_thread_wait` with `timeoutMs: 600000` works. It
+    returns `timedOut: true` while the thread is still running.
+  - Windows: `mcp__t3-windows__t3_thread_wait` currently fails with "The
+    operation timed out" after about 60 s, whatever `timeoutMs` you pass. That
+    error is the relay connection timing out, not the thread failing. Just
+    call it again. It returns normally when the thread finishes in under a
+    minute.
+  - A fix is expected in the next T3 release. Related upstream issue:
+    pingdotgg/t3code#11168 (long MCP waits die at the client timeout because
+    nothing is sent to keep the connection alive).
+- Read a thread only when a wait returns, or roughly every 10 min for a status
+  line for the user. Use `view: "messages"`, `afterPosition` = the last
+  position you saw, a small `limit`, and `maxCharsPerItem` ≈ 600.
 - Big activity reads overflow the tool result. Page with `limit` 30–60 and
   `afterPosition`, and cap `maxCharsPerItem`. If a result gets saved to a file,
   pull out what you need with `jq`.
@@ -114,8 +132,18 @@ the run started.
     settings.json, analytics.json) and `~/Library/Caches/app.revlc` (thumbs/,
     meta.json, WebKit/).
   - Windows: `%APPDATA%\app.revlc` and `%LOCALAPPDATA%\app.revlc`.
-  - Back up into the run's evidence folder (`…/backup/`), not `/tmp`.
-  - Verify the restore with a hash manifest (see 4.4).
+  - `python3 -I scripts/qa/appdata.py backup|seed|restore RUN_DIR` does all of
+    this on both OSes: backup into `RUN_DIR/backup/` (never `/tmp`), a clean
+    seeded start, then restore with a hash check (see 4.4).
+- **Analytics off, always.** Every QA launch runs with analytics off, so agent
+  runs don't pollute PostHog. Release builds send events. Debug builds only
+  send with `REVLC_ANALYTICS_SEND`.
+  - Before the first launch, run `appdata.py seed`. It writes `settings.json`
+    with `"analytics": false`, `"autoUpdate": false`, `"audio": false`.
+  - After any step that recreates the data dir (onboarding, a fresh install, a
+    restore), check that `"analytics": false` is still set before launching.
+  - To test analytics behaviour itself, use `scripts/qa/windows/analytics-race.mjs`.
+    It routes sends to a local proxy that never forwards anything.
 - **Installed app on Windows.** The PC has ReVLC 0.2.6 installed in
   `%LOCALAPPDATA%\ReVLC` (1,179 files). Before installing a test build, back up:
   - the install folder's file hashes
@@ -186,16 +214,25 @@ recordings.
 - A locked screen or disconnected session blanks the web view and drops
   synthetic input. Check before trusting a screenshot; never report a blank UI
   without that check.
+- Analytics stays off for every launch: run `scripts/qa/appdata.py seed` before
+  the first launch (it writes `"analytics": false`), and re-check settings.json
+  after anything that recreates the data dir. Never let a QA run send to
+  PostHog; analytics tests go through windows/analytics-race.mjs's local proxy.
 - Don't flag these accepted trade-offs: {ACCEPTED_TRADEOFFS}.
 - No localhost links in your report.
 
 ## Working efficiently
 - Preflight (≤3 min), before anything else: screen unlocked; ffmpeg/ffprobe
-  found (reuse {HELPER_DIR} and {FFMPEG_DIR}; [Windows] don't use winget for
-  ffmpeg, it timed out last time); data dirs backed up; [Windows] installed
-  ReVLC version and install path recorded.
-- Reuse the helpers in {HELPER_DIR} (screenshots, recording, key/mouse input,
-  [Windows] CDP driver and WebView capture) instead of writing new ones.
+  found ([Windows] the essentials build under `%USERPROFILE%\revlc-qa\…\tools`
+  or `QA_FFMPEG`; don't use winget, it timed out last time);
+  `appdata.py backup` then `appdata.py seed`; [Windows] installed ReVLC version
+  and install path recorded.
+- Use the helpers in `scripts/qa/` instead of writing new ones (see the
+  playbook, section 4.6). Set `QA_RUN` to your evidence folder first.
+  [Mac] `mac/shot.sh`, `mac/desktop.swift` (held keys, drags),
+  `mac/make-debug-app.sh`. [Windows] `windows/qa-desktop.ps1` (Shot, Record,
+  Focus-ReVLC, Nsis-*), `windows/cdp.mjs` (evaluate JS, `--capture` WebView
+  PNG), `windows/native-tests.mjs`, `windows/set-scale.ps1`.
 - Start the release build first, in the background, as soon as dependencies
   are installed. It's the longest step and the installed-app tests wait on it.
   [Windows] Set `CARGO_TARGET_DIR=%USERPROFILE%\revlc-qa\cargo-target` so later
@@ -205,12 +242,13 @@ recordings.
   `…/revlc <video> <subs.srt>`) or ([Windows]) with CDP
   `invoke("open",{uris,play:true})`. Only drive the native file picker when the
   picker itself is under test.
-- Run ffmpeg with its working directory set to the fixture folder. fMP4 HLS
-  writes `init.mp4` relative to the cwd, and last time it landed in the repo.
-- 200k cap: test through the app with a `000-before-cap.mp4` / 200,005 empty
-  files / `zzz-after-cap.mp4` folder, not a compiled harness.
-- Stalled-stream tests: have the local server hold the segment until a flag
-  file is deleted, not for a fixed sleep. A 45 s hold was too short last time.
+- Fixtures: use the generators (they run ffmpeg in the fixture folder; fMP4
+  HLS writes `init.mp4` relative to the cwd, which once landed in the repo).
+- 200k cap: test through the app with the `--entry-cap` / generate-entry-cap
+  folder (000-before-cap.mp4, 200,005 empty files, zzz-after-cap.mp4), not a
+  compiled harness.
+- Stalled streams: `scripts/qa/slow-hls-server.py` holds a segment until you
+  delete its flag file. Don't use a fixed sleep: 45 s was too short last time.
 - Append each finding to `logs/findings.md` as soon as it's confirmed (ID,
   severity, repro, expected/actual, evidence, cause). Write the PASS/FAIL
   table from your test log as you go. The final report is then assembly, not
@@ -222,8 +260,8 @@ recordings.
   sample them): no covering windows, no blank frames, the right window.
   Retake now. Restore data once, at the very end, then verify. Don't start new
   tests after the restore.
-- Final report in Markdown only (`report.md` + the thread message). No HTML
-  version unless asked.
+- Report in Markdown only, in the exact format under "Final report" below. Don't
+  build HTML: the orchestrator merges both platforms into one HTML report.
 
 ## Evidence
 - Save everything under [Mac] `~/revlc-qa/mac-{DATE}/` [Windows]
@@ -231,14 +269,16 @@ recordings.
   `recordings/`, `logs/`, `backup/`.
 - Screenshots named `NN-what-it-shows.png`, 40+ covering every screen and state
   you touch. Name bug evidence `NN-bug-…`.
-  [Mac] `screencapture -x` via a wrapper that refuses when the screen is locked.
-  [Windows] PowerShell System.Drawing CopyFromScreen after SetProcessDPIAware;
-  for UI-only states also capture the WebView directly over CDP (see playbook).
+  [Mac] `scripts/qa/mac/shot.sh <name>` (refuses when the screen is locked).
+  [Windows] `Shot <name>` from qa-desktop.ps1 (desktop, shows video); for
+  UI-only states also `node scripts/qa/windows/cdp.mjs --capture <name>`
+  (WebView only, immune to covering windows).
 - Recordings: at least 6 short silent clips (playback/seek, resume after
   relaunch, video+subtitle open, drag-and-drop, key-hold, library/home,
   settings, installer/updater if testable). [Mac] `screencapture -x -v -V <s>
-  -k`. [Windows] ffmpeg `-f gdigrab -i desktop`. Check each with ffprobe (right
-  length, no audio stream).
+  -k`. [Windows] `Record <name> <seconds>` from qa-desktop.ps1. Then run
+  `python3 -I scripts/qa/check-recordings.py $QA_RUN` (makes MP4 copies, fails
+  on any clip with an audio stream).
 - Write `evidence-index.md` listing every file. Embed the key screenshots in
   your final message with absolute-path markdown so the user sees them in this
   thread, and list the recordings with paths.
@@ -260,9 +300,9 @@ spaces, file associations / "Open with".
 
 ## Test media
 Use the fixture set in [Mac] `~/revlc-qa/media/` [Windows]
-`%USERPROFILE%\revlc-qa\media\`; generate anything missing with ffmpeg (see
-playbook "Fixture set"). [Windows] If ffmpeg isn't on PATH, look under
-`%USERPROFILE%\revlc-qa\` for the essentials build from the last audit.
+`%USERPROFILE%\revlc-qa\media\`. Run [Mac] `python3 -I scripts/qa/generate-media.py`
+[Windows] `scripts\qa\windows\generate-media.ps1` first: it only adds what's
+missing. Add fixtures this branch's changes need on top.
 
 ## Build
 Read README, package.json, src-tauri and .github/workflows/{checks,release}.yml.
@@ -274,16 +314,31 @@ and report results. Test the debug app AND a release build:
 installer the way release.yml does (`bash scripts/build-app.sh` via Git Bash)
 and test the installed app. Say exactly which builds you tested.
 
-## Final report (in this thread)
-1. Summary: environment ([Windows] Windows version, GPU, DPI), build/test
-   results, what was tested, what couldn't be.
-2. Bugs table: ID, severity (critical/high/medium/low), title, repro steps,
-   expected vs actual, evidence paths, likely cause (file:line).
-3. UI bugs and inconsistencies (separate list, screenshots inline).
-4. Each branch change above: PASS / FAIL / NOT TESTED with one line of evidence.
-5. Confirm data restored (hash check), app processes killed, [Windows] test
-   build uninstalled and registry restored, repo clean.
-Also save the report as `report.md` in the evidence folder.
+## Final report (in this thread, Markdown, exactly these sections)
+Save the same text as `report.md` in the evidence folder. Use absolute paths
+for every evidence file. Prefix IDs with [Mac] `M` [Windows] `W` (M1, M2…).
+
+### Environment
+OS version, machine, [Windows] GPU and DPI; commit tested; builds tested.
+### Checks
+| Check | Result | Notes |  (npm run check, clippy, cargo test, debug build, release build)
+### Bugs
+| ID | Severity | Title | Repro | Expected | Actual | Evidence | Likely cause |
+Severity is critical/high/medium/low. Evidence lists screenshot/recording paths.
+### UI issues
+Same columns as Bugs.
+### Branch changes
+| Change | Result | Evidence |  Result is PASS / FAIL / NOT TESTED, one per change above.
+### Not covered
+Bullets: what you couldn't test and why.
+### Key screenshots
+3–6 `![caption](absolute path)` lines, bug evidence first.
+### Recordings
+`- [title](absolute path) — seconds` for each clip.
+### Cleanup
+Data restored (appdata.py verify result), processes killed, [Windows] test
+build uninstalled, registry restored and install hashes checked, `git status`
+clean.
 ```
 
 Things the orchestrator should check before sending:
@@ -298,33 +353,32 @@ Things the orchestrator should check before sending:
 
 ### 4.1 macOS
 
-- **App-wrapper for the debug binary.** The computer-use tool (`cua.getApp`)
-  only accepts an app name, bundle path or bundle ID. It can't attach to the
-  bare `target/debug/revlc`.
-  - Copy the binary into a throwaway bundle outside the repo:
-    `~/revlc-qa/<run>/ReVLC-QA-Debug.app/Contents/MacOS/revlc`.
-  - Give it an `Info.plist` with `CFBundleExecutable=revlc`, a unique
-    `CFBundleIdentifier` (e.g. `app.revlc.qa-debug`) and
-    `CFBundlePackageType=APPL`.
+- **App-wrapper for the debug binary** (`scripts/qa/mac/make-debug-app.sh`).
+  The computer-use tool (`cua.getApp`) only accepts an app name, bundle path or
+  bundle ID. It can't attach to the bare `target/debug/revlc`.
+  - The script copies the binary into `$QA_RUN/ReVLC-QA-Debug.app` with its
+    own `CFBundleIdentifier` (`app.revlc.qa-debug`). Re-run it after every
+    debug build.
   - Launch that binary directly with `REVLC_VLC_ARGS=--no-audio`, then
     `cua.getApp("<path to .app>")`.
   - The debug build loads `http://localhost:1420`, so keep `npm run dev` (Vite)
     running in the background.
   - The release `.app` can be selected directly by its bundle path.
-- **Screenshots with a lock check.** `shot.sh NN-name` checks
+- **Screenshots with a lock check.** `scripts/qa/mac/shot.sh NN-name` checks
   `CGSSessionScreenIsLocked` in `ioreg`, refuses to capture if the screen is
-  locked, and logs `IOConsoleUsers`. Then it runs `screencapture -x`.
+  locked, and logs the refusal. Otherwise it captures the ReVLC window
+  (`screencapture -l`) or, with `--full`, the whole screen.
 - **Recordings.** `screencapture -x -v -V <seconds> -k <file>.mov &`. Start it
-  in the background, then drive the app. Afterwards, encode highlights to
-  smaller MP4s in parallel (`ffmpeg -c:v libx264 -crf 25 -an -movflags
-  +faststart`). Check them with `ffprobe` (duration, no audio stream).
-- **CGEvent helper (`desktop.swift`).** Small subcommands:
+  in the background, then drive the app. `scripts/qa/check-recordings.py`
+  then makes smaller MP4 copies and fails on any clip with an audio stream.
+- **CGEvent helper (`scripts/qa/mac/desktop.swift`).** `shot.sh` compiles it
+  into `$QA_RUN/bin/desktop`. Subcommands:
   - `windows`/`windowid` (find the ReVLC window)
   - `key <keycode> <count>`: posts real autorepeat events (`keyboardEventAutorepeat=1`). This is what proved that held Space/F toggle once while seek/volume repeat.
   - `click`, `move`, `drag`
-- **Clean first launch with seeded settings.** After the backup, empty the data
-  dir and write a `settings.json`:
-  `{"analytics":false,"autoUpdate":false,"audio":false,"snapshotPath":"<evidence>/screenshots","resume":"ask"}`.
+- **Clean first launch with seeded settings** (`appdata.py seed`). After the
+  backup, it empties the data dirs and writes a `settings.json`:
+  `{"analytics":false,"autoUpdate":false,"audio":false,"snapshotPath":"<run>/screenshots","resume":"ask"}`.
   The first launch then shows onboarding, can't send analytics or update, and
   saves snapshots into the evidence folder.
 - **Open files by argv:** `…/revlc <video> <subtitle.srt>`. It's faster and
@@ -335,9 +389,9 @@ Things the orchestrator should check before sending:
 - **Corrupt history.** Quit, write `[{"uri": tru` to `history.json`, launch.
   Capture at 1, 2 and 4 s plus a 15 s recording, because the notice is
   transient or missing. Check that `history-damaged-<time>.json` exists.
-- **Quit while buffering.** Run a local `http.server` that serves the TS HLS
-  fixture and holds one segment open. Quit once the UI shows Buffering, then
-  diff `history.json`.
+- **Quit while buffering** (`scripts/qa/slow-hls-server.py`). It serves the TS
+  HLS fixture and holds one segment until its flag file is deleted. Quit once
+  the UI shows Buffering, then diff `history.json`.
 - **Unicode subtitle font check.** Turn the title overlay off. Compare the
   default font (Helvetica Neue) with Hiragino Sans on an SRT containing
   `日本語`. This isolated a missing-glyph bug.
@@ -346,9 +400,9 @@ Things the orchestrator should check before sending:
 
 - **WebView2 over CDP.** Launch with
   `WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS="--remote-debugging-port=9223 --remote-allow-origins=*"`
-  (plus `REVLC_VLC_ARGS=--no-audio`). A small Node script (`qa-cdp.mjs`) then
-  does `Runtime.evaluate` against `http://127.0.0.1:9223/json`. From there you
-  can:
+  (plus `REVLC_VLC_ARGS=--no-audio`). `scripts/qa/windows/cdp.mjs` (shared code
+  in `cdp-lib.mjs`) then does `Runtime.evaluate` against
+  `http://127.0.0.1:9223/json`. From there you can:
   - read `document.body.innerText`
   - click buttons by text or aria-label
   - call backend commands directly: `window.__TAURI_INTERNALS__.invoke("open",{uris:[…],play:true})`, `"snapshot"`, `"seek"`, `"toggle_pause"`, `"settings_get"`
@@ -362,22 +416,24 @@ Things the orchestrator should check before sending:
   - WebView captures are immune to other windows covering the app. They show
     the web UI only, so use desktop captures when the video frame or
     subtitles matter.
-- **A test driver (`qa-native-tests.mjs`)** runs suites (`codecs`, `hls`,
+- **A test driver (`windows/native-tests.mjs`)** runs suites (`codecs`, `hls`,
   `library`, …) over one CDP socket and logs each check to
   `logs/native-tests.jsonl` as `{name, pass, elapsedMs, …}`. That log becomes
   the PASS/FAIL table.
-- **PowerShell helpers (`qa-desktop.ps1`).** Dot-source it in each command.
+- **PowerShell helpers (`windows/qa-desktop.ps1`).** Dot-source it in each
+  command, with `$env:QA_RUN` set.
   - `Shot <name>` (CopyFromScreen of the virtual screen after
     `SetProcessDPIAware`), `Record <name> <seconds>` (ffmpeg gdigrab),
     `Focus-ReVLC`, `Keys`, `Click`, `Eval-Js`.
   - UI Automation helpers for the NSIS installer/uninstaller (`Nsis-Inspect`,
     `Nsis-Click <automationId>`).
   - `PrintWindow` for capturing one specific window.
-- **DPI changes.** Drive Windows Settings → Display → Scale through UI
-  Automation (find the `Scale` ComboBox, expand it, select). Capture at 100%
+- **DPI changes** (`windows/set-scale.ps1 -Scale 150`). It drives Windows
+  Settings → Display → Scale through UI Automation. Capture at 100%
   and 150%, then restore the original (125% on this PC).
-- **Version-spoofed libVLC.** Copy `libvlc.dll` and `libvlccore.dll` into a
-  temp folder and patch the copied `libvlc.dll` so its version string reads
+- **Version-spoofed libVLC** (`windows/patch-vlc-fixture.cjs`). Copy
+  `libvlc.dll` and `libvlccore.dll` into a temp folder and patch the copied
+  `libvlc.dll` so its version string reads
   `4.0.24` instead of `3.0.24`. Point `REVLC_VLC_DIR` at the folder and check
   that it's refused with a readable message. A folder holding only `libvlc.dll`
   tests the missing-core error.
@@ -412,6 +468,9 @@ Things the orchestrator should check before sending:
 
 ### 4.4 Restore verification
 
+`scripts/qa/appdata.py` does steps 1–5 (`backup`, then `restore`, which also
+verifies):
+
 1. Back up with metadata.
 2. At the end, kill the app.
 3. Move the QA data aside into `logs/` so it's kept as evidence.
@@ -419,7 +478,7 @@ Things the orchestrator should check before sending:
 5. Compare a manifest of relative path → SHA-256, mode and mtime for the backup
    and the restored dir.
 
-On macOS don't compare `gid`: a copy into `/tmp` takes the `wheel` group while
+Don't compare `gid` on macOS: a copy into `/tmp` takes the `wheel` group while
 the originals are `staff`. On Windows also check that the install folder has
 the same file count and hashes (1,179 files last time) and no extra files.
 
@@ -439,23 +498,66 @@ The fixtures last time:
 - red/blue replacement pair
 - `.m3u` playlist
 
-The Mac generator is `~/revlc-qa/mac-2026-10-22/logs/generate-media.py`. The
-media lives in `~/revlc-qa/media/` and `%USERPROFILE%\revlc-qa\media\`. Reuse
-it and only add what a new change needs.
+Generators: `scripts/qa/generate-media.py` (macOS, `--entry-cap` for the 200k
+folder) and `scripts/qa/windows/generate-media.ps1` (adds HEVC, audio-only
+files, a series folder, a junction loop, and the Red 60 / Blue 90 pair), plus
+`windows/generate-entry-cap.cjs` and `windows/generate-longpath.cjs`. The
+media lives in `~/revlc-qa/media/` and `%USERPROFILE%\revlc-qa\media\`. Both
+generators skip existing files. Add what a new change needs on top.
+
+### 4.6 Scripts in `scripts/qa/`
+
+Every script takes `QA_RUN` (the run's evidence folder) and, where relevant,
+`QA_MEDIA` (fixtures). None of them is bundled with the app: the bundle only
+takes `src-tauri/vlc` and licences, and `tsconfig` only covers `ui/src`.
+
+| Script | What it does |
+|---|---|
+| `appdata.py backup\|seed\|restore\|verify RUN` | Back up both data dirs, start clean with analytics off, restore with a hash check (macOS and Windows) |
+| `generate-media.py [--entry-cap]` | macOS fixture set |
+| `slow-hls-server.py` | HLS server that stalls a segment until a flag file is removed |
+| `check-recordings.py RUN` | MP4 copies of `.mov` clips; fails on clips with audio |
+| `mac/shot.sh NAME` | Screenshot that refuses on a locked screen |
+| `mac/desktop.swift` | CGEvent helper: window ID, autorepeat key holds, clicks, drags |
+| `mac/make-debug-app.sh` | `.app` wrapper so computer-use can drive the debug build |
+| `windows/qa-desktop.ps1` | Shot, Shot-Window, Record, Focus-ReVLC, Click, Keys, Eval-Js, Nsis-* |
+| `windows/cdp.mjs`, `cdp-lib.mjs` | Evaluate JS / capture the WebView over CDP |
+| `windows/native-tests.mjs` | The 2026-10-22 suites (codecs, hls, library, heldkeys, resume, …); adapt per branch |
+| `windows/network-buffer.mjs` | Quit while an HTTP stream is held mid-seek |
+| `windows/analytics-race.mjs` | Analytics in-flight race through a non-forwarding proxy |
+| `windows/set-scale.ps1` | Display scale through Windows Settings |
+| `windows/generate-media.ps1`, `generate-entry-cap.cjs`, `generate-longpath.cjs` | Windows fixtures |
+| `windows/patch-vlc-fixture.cjs` | libVLC 4.x-spoof DLL for the version guard |
+| `windows/prepare-registry-restore.cjs` | Cut HKCU exports down to ReVLC's keys for `reg import` |
+
+Improve the scripts when a run finds a better way. Keep them generic: no run
+dates, no machine-specific paths beyond `%USERPROFILE%`/`~`.
 
 ## 5. Merging the two reports
 
-When both threads finish, read each one's final message. Pull the full
-findings list from the Windows `REPORT.md`; it shows up in the thread's
-activity near the end. Then write one answer:
+When both threads finish, read each one's final message. It's the fixed
+Markdown format from the prompt, so the sections line up. Then produce two
+things.
+
+**One HTML report, built by you (the orchestrator) only.** The QA threads
+never build HTML.
+- Build a single self-contained page: both platforms' sections side by side,
+  cross-platform bugs first, then the merged per-change table.
+- Embed Mac screenshots as downscaled `data:` URIs.
+- Check it with `html_preview`, then publish it with `html_render` before your
+  reply.
+
+**One chat answer:**
 
 1. **Headline.** Did each platform build and pass checks, and how many
    findings? Mention crashes, or say there were none. Say both machines were
    restored, with the hash-check result.
 2. **Builds and checks.** One line per platform. Include which builds were
    tested and any build-step failures.
-3. **Evidence locations.** Mac paths are clickable here. Windows screenshots
-   only show up in the PC's T3 thread; say so.
+3. **Evidence locations.** Mac paths are clickable here. Windows evidence stays
+   on the PC (`C:\Users\hites\revlc-qa\win-<date>\`). The user opens it
+   through T3 Code's access to the PC. Give the `C:\` paths and name the
+   Windows QA thread.
 4. **Bugs found on both platforms first.** Number them, and give a likely cause
    (`file:line`) for each. Confirmation on two platforms is the strongest
    signal.
@@ -493,29 +595,29 @@ All times UTC. Each row's fix is now in section 0 or the prompt template.
 | 2 | Win 08:15–08:16 | `npm` failed: PowerShell execution policy blocks `npm.ps1` | ~1 min | Prompt says `npm.cmd` |
 | 3 | Win 08:16–08:27 | Fresh worktree, so cold Cargo builds: clippy 1m17s, then test/debug builds; `build-app.sh` 6m41s. The debug app first ran at 08:21 (Mac: 08:16). | ~5 min to first UI test; installer at 08:27 | Shared `CARGO_TARGET_DIR`; start the release build first |
 | 4 | Win 08:29–08:31 | fMP4 fixture: ffmpeg wrote `init.mp4` into the repo worktree (cwd), so the HLS test failed falsely and the worktree was dirty | ~2 min | Run ffmpeg with cwd = fixture dir; reuse the existing fixtures |
-| 5 | Win 08:23, 08:24, 08:46 | CDP problems: fallback to `targets[0]` hit the Settings window; `evaluate` returning an object with an un-awaited promise hung until the 30 s timeout | ~2 min | The notes in 4.2; reuse the fixed `qa-cdp.mjs` |
+| 5 | Win 08:23, 08:24, 08:46 | CDP problems: fallback to `targets[0]` hit the Settings window; `evaluate` returning an object with an un-awaited promise hung until the 30 s timeout | ~2 min | `windows/cdp-lib.mjs` (targets by URL, plain return values) |
 | 6 | Win 08:26–08:28 | Chased a "snapshot not created" issue that was a focus problem | ~2 min | Time box; reuse helpers that focus the window first |
-| 7 | Win 08:34–08:37 | DPI change by driving the Settings UI through UI Automation, written from scratch | ~3 min | Reuse the saved scale script |
+| 7 | Win 08:34–08:37 | DPI change by driving the Settings UI through UI Automation, written from scratch | ~3 min | `windows/set-scale.ps1` |
 | 8 | Win 08:44–08:47 | Explorer drag-and-drop: several attempts (stale DPI coordinates, wrong foreground window) | ~2.5 min | Reuse the working drag sequence in `qa-desktop.ps1` |
 | 9 | Win 09:12–09:21 | Uninstall through the NSIS UI + registry restore. One `reg import` step timed out and was rerun. | ~8 min (needed, but slow) | Keep the restore script (`prepare-registry-restore.cjs` + `.reg` files) and rerun it; consider `uninstall.exe /S` |
 | 10 | Win 09:25–09:31 | After the full restore, found desktop captures with Explorer covering ReVLC. Moved the originals aside again, put the QA data back, retook with WebView capture, restored and hash-checked again. | ~6 min | Review captures before cleanup; use WebView capture for UI-only states |
-| 11 | Win 09:30–09:42 | Final report: a findings list built in Node, REPORT.md + REPORT.html, `html_preview`/`html_render`, a context compaction at 09:42 | ~12 min | `logs/findings.md` kept as you go; Markdown only |
+| 11 | Win 09:30–09:42 | Final report: a findings list built in Node, REPORT.md + REPORT.html, `html_preview`/`html_render`, a context compaction at 09:42 | ~12 min | `logs/findings.md` kept as you go; fixed Markdown format; only the orchestrator builds HTML |
 | 12 | Win 09:14 | Provider stream disconnected ("websocket closed by server") | 23 s, recovered | None needed |
 | 13 | Mac 08:16 | `cua.getApp("revlc")` launched the installed `/Applications/ReVLC.app` without `--no-audio` (and against the real data dir). It was killed straight away. | <1 min, **safety** | Never get the app by name; launch the binary path |
-| 14 | Mac 08:16–08:17 | The computer-use tool couldn't select the bare `target/debug/revlc` and needed the `.app` wrapper (plus a separate `npm run dev`) | ~1 min | Reuse `ReVLC-QA-Debug.app`; refresh its binary |
+| 14 | Mac 08:16–08:17 | The computer-use tool couldn't select the bare `target/debug/revlc` and needed the `.app` wrapper (plus a separate `npm run dev`) | ~1 min | `mac/make-debug-app.sh` |
 | 15 | Mac 08:17–08:19 | `npm run tauri build` ran 2 min, then exited non-zero: `TAURI_SIGNING_PRIVATE_KEY` isn't set. The key exists at `~/.tauri/revlc-updater.key`, but only `scripts/build-app.sh` loads it. | Noise in the report, a false "build failed" | Prompt says `npm run build:app` |
-| 16 | Mac 08:15 | The media generator failed once on a Python syntax error | <1 min | Reuse `generate-media.py` |
+| 16 | Mac 08:15 | The media generator failed once on a Python syntax error | <1 min | `scripts/qa/generate-media.py` |
 | 17 | Mac 08:20–08:27, 08:39 | Native file picker automation: clipboard paste timeout, multi-select ignored Cmd+A (needed Shift+Down), "Go to field unavailable" | ~3 min | Open by argv |
 | 18 | Mac 08:22–08:41 | Small computer-use errors: `keyNotFound("=")` (use `"equal"`), stale element IDs after relaunch and fullscreen | ~1 min | After a relaunch or fullscreen change, call `getApp`/`getAXState` again before clicking IDs |
 | 19 | Mac 08:41–08:43 | The first Finder drag didn't land; recording 16 was wasted | ~1.5 min | Use `finder.drag` after a fresh `getAXState`; check before recording |
 | 20 | Mac 08:50–08:52 | The scan-cap harness (compiling `library.rs` outside the crate) failed twice: missing `crate::meta`, then `serde_json` | ~2 min | Test the cap through the app (see 4.3) |
-| 21 | Mac 08:50–08:54 | The slow-HLS server held the segment for 45 s, the stream recovered before quit, and the test was rerun with 120 s | ~3.5 min | Hold until a flag file is removed |
-| 22 | Mac 08:56–08:58 | The restore check failed on `gid` (backup in `/tmp` had group `wheel`) and needed a manual comparison | ~2 min | Back up under the run folder; compare hash, mode, mtime only |
+| 21 | Mac 08:50–08:54 | The slow-HLS server held the segment for 45 s, the stream recovered before quit, and the test was rerun with 120 s | ~3.5 min | `slow-hls-server.py` (holds until a flag file is removed) |
+| 22 | Mac 08:56–08:58 | The restore check failed on `gid` (backup in `/tmp` had group `wheel`) and needed a manual comparison | ~2 min | `appdata.py` (backs up under the run folder; compares hash, mode, mtime) |
 | 23 | Mac 08:59–09:01 | A new test (Japanese glyphs) after the restore needed a second wipe and restore | ~2 min | No new tests after the restore |
 | 24 | Mac 08:56–09:08 | Evidence index, MP4 highlights, report | ~12 min | `findings.md` as you go; encode highlights while testing |
 | 25 | Mac | Not a delay: only `Application Support/app.revlc` was backed up. QA thumbnails (14:02 and 14:19 local) are still in `~/Library/Caches/app.revlc/thumbs`. | n/a | Back up and restore the Caches dir too (now in the rules) |
-| 26 | Orchestrator | `t3-windows` `t3_thread_wait` errored after about 60 s for any `timeoutMs` (3 tries, 08:15–08:36) | none (it switched to reads) | Section 1: poll Windows with `t3_thread_read` |
-| 27 | Orchestrator | Windows screenshots can't be shown in the Mac thread, so the merged report only linked them | n/a | Say so in the merge. A transfer step is an open question. |
+| 26 | Orchestrator | `t3-windows` `t3_thread_wait` errored after about 60 s for any `timeoutMs` (3 tries, 08:15–08:36). The orchestrator then switched to polling with reads, which costs more tokens. | tokens, not time | Keep calling wait and retry on the error (section 1). A fix is expected in the next T3 release. |
+| 27 | Win | Helper scripts were written from scratch on both machines, then patched in place several times | spread across rows 5–8, 14, 16, 20, 21 | Checked in as `scripts/qa/` (4.6) |
 
 Together, the preventable items come to about 25 min on Windows and about
 15 min on the Mac. A rerun with these fixes should take around 60 min.
