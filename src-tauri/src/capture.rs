@@ -97,9 +97,10 @@ pub fn item(capture: &Capture) -> Item {
 #[cfg(target_os = "linux")]
 pub fn item(capture: &Capture) -> Item {
     let mut options = vec![":live-caching=300".to_string()];
+    let pulse = |device: &str| format!("pulse://{}", if device == "default" { "" } else { device });
     let (uri, title) = match capture.kind {
         CaptureKind::Camera => (format!("v4l2://{}", capture.device), "Camera"),
-        CaptureKind::Microphone => (format!("pulse://{}", capture.device), "Microphone"),
+        CaptureKind::Microphone => (pulse(&capture.device), "Microphone"),
         CaptureKind::Screen => {
             options.push(format!(":screen-fps={}", capture.fps.unwrap_or(30).clamp(1, 60)));
             ("screen://".to_string(), "Screen")
@@ -108,7 +109,7 @@ pub fn item(capture: &Capture) -> Item {
     if !matches!(capture.kind, CaptureKind::Microphone)
         && let Some(audio) = &capture.audio
     {
-        options.push(format!(":input-slave=pulse://{audio}"));
+        options.push(format!(":input-slave={}", pulse(audio)));
     }
     Item { uri, title: title.to_string(), options, trusted: true }
 }
@@ -281,9 +282,9 @@ mod tests {
     fn capture_items_linux() {
         let cam = item(&Capture { kind: CaptureKind::Camera, device: "/dev/video0".into(), audio: Some("default".into()), fps: None });
         assert_eq!(cam.uri, "v4l2:///dev/video0");
-        assert!(cam.options.contains(&":input-slave=pulse://default".to_string()));
+        assert!(cam.options.contains(&":input-slave=pulse://".to_string()));
         let mic = item(&Capture { kind: CaptureKind::Microphone, device: "default".into(), audio: None, fps: None });
-        assert_eq!(mic.uri, "pulse://default");
+        assert_eq!(mic.uri, "pulse://");
         let screen = item(&Capture { kind: CaptureKind::Screen, device: "".into(), audio: None, fps: Some(120) });
         assert_eq!(screen.uri, "screen://");
         assert!(screen.options.contains(&":screen-fps=60".to_string()));

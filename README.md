@@ -184,11 +184,13 @@ Copyright (C) 2026 Hitesh Rohira
 
 ReVLC is free software under the GPL-3.0-or-later ([LICENSE](LICENSE)).
 
-The app bundles libVLC 3.0.24 (LGPL-2.1-or-later) and VLC plugins (mostly
+The macOS and Windows apps bundle libVLC 3.0.24 (LGPL-2.1-or-later) and VLC plugins (mostly
 GPL-2.0-or-later) from [VideoLAN](https://www.videolan.org/). Their source
 code, including the build recipes for the libraries the plugins contain
 (`contrib/` in the tarball), is in
 [VideoLAN's 3.0.24 download folder](https://download.videolan.org/pub/videolan/vlc/3.0.24/).
+The experimental Linux package uses the distribution's libVLC and VLC
+plugins; their source and notices come from the distribution.
 
 The licence texts for everything the app ships, and the notices for its Rust
 and JavaScript dependencies, are in [licenses/](licenses/). Installed copies

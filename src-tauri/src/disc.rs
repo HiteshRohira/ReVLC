@@ -166,7 +166,9 @@ pub fn items(kind: DiscKind, path: &str, menus: bool) -> Result<Vec<Item>, Strin
             vec![Item { uri: format!("bluray://{location}"), title: name.clone(), options, trusted: true }]
         }
         // libVLC reads an audio CD drive directly and lists its tracks.
-        DiscKind::Cd if has_cda(p) => vec![Item { uri: format!("cdda://{location}"), title: name.clone(), options: Vec::new(), trusted: true }],
+        DiscKind::Cd if has_cda(p) || (cfg!(target_os = "linux") && !p.is_dir()) => {
+            vec![Item { uri: format!("cdda://{location}"), title: name.clone(), options: Vec::new(), trusted: true }]
+        }
         DiscKind::Cd => files(p, &["aiff", "aif", "wav", "flac"]).into_iter().map(Item::new).collect(),
         DiscKind::Vcd => ["MPEGAV", "mpegav", "MPEG2", "mpeg2"]
             .iter()

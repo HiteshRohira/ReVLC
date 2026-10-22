@@ -39,6 +39,7 @@ pub fn attach(webview: &webkit2gtk::WebView) -> Result<u32, String> {
     parent.pack_start(&overlay, true, true, 0);
     webview.set_background_color(&gtk::gdk::RGBA::new(0.0, 0.0, 0.0, 0.0));
     overlay.show_all();
+    webview.grab_focus();
     video.realize();
     let window = video.window().ok_or("video drawable was not realized")?;
     // init() restricts GTK to X11, so this is always a GdkX11Window.

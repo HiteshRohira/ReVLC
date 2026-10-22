@@ -8,7 +8,7 @@ ReVLC comes with ABSOLUTELY NO WARRANTY, to the extent permitted by law.
 
 ## libVLC and VLC plugins
 
-ReVLC includes libVLC 3.0.24 and VLC plugins and data files (Lua scripts,
+The macOS and Windows packages include libVLC 3.0.24 and VLC plugins and data files (Lua scripts,
 HRTF data) from VideoLAN's official VLC 3.0.24 builds, unmodified, with a
 few plugins ReVLC doesn't need left out.
 
@@ -21,6 +21,11 @@ few plugins ReVLC doesn't need left out.
 Their complete source code, including the build recipes and patches for the
 third-party libraries (`contrib/` in the tarball), is available from
 VideoLAN: https://download.videolan.org/pub/videolan/vlc/3.0.24/
+
+The experimental Linux package uses your distribution's libVLC 3 and VLC
+plugin packages instead of bundling these libraries. Their version, source
+packages, patches and notices are provided by the distribution's package
+manager (`apt source vlc` on Mint/Ubuntu with source repositories enabled).
 
 "VLC" is a trademark of VideoLAN. ReVLC is an independent project and is not
 affiliated with or endorsed by VideoLAN.
