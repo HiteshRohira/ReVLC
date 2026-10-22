@@ -28,9 +28,6 @@
   const IDLE_HIDE_MS = 2500;
 
   let dropping = $state(false);
-  /** A resume point waiting for the user's answer ("Ask" setting). */
-  let resumePrompt = $state<number | null>(null);
-  let resumeTimer: ReturnType<typeof setTimeout> | undefined;
   let idle = $state(false);
   let idleTimer: ReturnType<typeof setTimeout> | undefined;
 
@@ -88,13 +85,10 @@
     });
   });
 
-  // A different item started: drop any stale resume offer. (Keyed on the
-  // URI: the item object is rebuilt when, e.g., its title is updated.)
+  // Keyed on the URI: the item object is rebuilt when, e.g., its title is updated.
   const currentUri = $derived(player.current?.uri ?? null);
-  $effect(() => {
-    currentUri;
-    resumePrompt = null;
-  });
+  // Only for what's playing: an offer for an item since replaced is stale.
+  const resumePrompt = $derived(player.resumeOffer && player.resumeOffer.uri === currentUri ? player.resumeOffer.ms : null);
 
   function wake() {
     idle = false;
@@ -175,8 +169,7 @@
 
   function answerResume(resume: boolean) {
     if (resume && resumePrompt !== null) invoke("resume_at", { ms: resumePrompt });
-    resumePrompt = null;
-    clearTimeout(resumeTimer);
+    player.offerResume(null);
   }
 
   function onVisibility() {
@@ -213,12 +206,13 @@
         ACTION_BY_ID.get(e.payload)?.run(host);
         wake();
       }),
-      listen<number>("player://resume-prompt", (e) => {
-        resumePrompt = e.payload;
-        clearTimeout(resumeTimer);
-        resumeTimer = setTimeout(() => (resumePrompt = null), 12000);
+      appWindow.onResized(async () => {
+        const fullscreen = await appWindow.isFullscreen();
+        // Entering or leaving fullscreen can hand keyboard focus to the
+        // native video view, and the shortcuts stop working.
+        if (fullscreen !== ui.fullscreen) getCurrentWebview().setFocus();
+        ui.fullscreen = fullscreen;
       }),
-      appWindow.onResized(async () => (ui.fullscreen = await appWindow.isFullscreen())),
     ];
     return () => unlisteners.forEach((p) => p.then((off) => off()));
   });

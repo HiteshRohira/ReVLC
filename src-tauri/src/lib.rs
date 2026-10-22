@@ -78,6 +78,12 @@ struct Core {
     /// Bumped by each settings change that reopens the video; only the last
     /// one of a burst does it.
     reloads: AtomicU64,
+    /// Subtitle files added to what's playing, to add again when a settings
+    /// change reopens it.
+    subtitles: Mutex<Vec<String>>,
+    /// What the UI is told before it's listening, handed over with its
+    /// first snapshot. `None` once it has been.
+    early: Mutex<Option<Early>>,
     /// The last library scan, reused for a little while.
     library_scan: Mutex<Option<LibraryScan>>,
     /// Playback quality measurements, for analytics.
@@ -249,6 +255,21 @@ struct Notice {
     text: String,
 }
 
+/// An offer to continue `uri` from `ms` (the "Ask" setting).
+#[derive(Clone, Serialize)]
+struct ResumeOffer {
+    uri: String,
+    ms: i64,
+}
+
+/// Notices and a resume offer from before the UI was listening (a
+/// damaged history, or a file opened on a cold launch).
+#[derive(Clone, Default, Serialize)]
+struct Early {
+    notices: Vec<Notice>,
+    resume: Option<ResumeOffer>,
+}
+
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct Snapshot {
@@ -259,6 +280,7 @@ struct Snapshot {
     titles: Vec<Title>,
     bookmarks: Vec<Bookmark>,
     engine: Result<String, String>,
+    early: Early,
 }
 
 impl Core {
@@ -360,8 +382,13 @@ impl Core {
             }
             *self.resume.lock().unwrap_or_else(|e| e.into_inner()) =
                 Some(PendingSeek::Seek { ms: self.vlc.time(), announce: false });
+            let subtitles_on = self.vlc.subtitle_track() >= 0;
             self.quality().close("settings_changed");
-            let _ = self.vlc.open(&item.uri, &item.options, item.trusted);
+            if self.vlc.open(&item.uri, &item.options, item.trusted).is_ok() {
+                for uri in self.subtitles().iter() {
+                    let _ = self.vlc.add_subtitle(uri, subtitles_on);
+                }
+            }
             (state, self.vlc.generation())
         };
         if state == State::Paused {
@@ -373,6 +400,19 @@ impl Core {
                 self.vlc.set_pause(true);
             }
         }
+    }
+
+    fn subtitles(&self) -> MutexGuard<'_, Vec<String>> {
+        self.subtitles.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Adds a subtitle file or URL to what's playing and selects it.
+    fn add_subtitle(&self, uri: String) -> Res {
+        // So it can't land on an item that's being replaced.
+        let _transition = self.transition();
+        self.vlc.add_subtitle(&uri, true)?;
+        self.subtitles().push(uri);
+        Ok(())
     }
 
     fn quality(&self) -> MutexGuard<'_, quality::Quality> {
@@ -404,6 +444,14 @@ impl Core {
         };
         // Queue thumbnails for anything that doesn't have one yet, or (on a
         // fresh scan) whose file has changed since (the old one shows meanwhile).
+        // A replaced file can be older than its thumbnail, so a change the
+        // metadata cache noticed counts too.
+        let changed: HashSet<String> = if scanned {
+            let cache = self.meta.lock().unwrap_or_else(|e| e.into_inner());
+            items.iter().filter(|item| cache.is_stale(&item.uri)).map(|item| item.uri.clone()).collect()
+        } else {
+            HashSet::new()
+        };
         let mut jobs = Vec::new();
         let mut retry = Vec::new();
         for item in &mut items {
@@ -412,7 +460,7 @@ impl Core {
             if made > 0 {
                 item.thumb = Some(thumb.to_string_lossy().into_owned());
             }
-            if made == 0 || (scanned && made < meta::modified(Path::new(&item.uri))) {
+            if made == 0 || (scanned && (made < meta::modified(Path::new(&item.uri)) || changed.contains(&item.uri))) {
                 if made > 0 {
                     retry.push(thumb.to_string_lossy().into_owned());
                 }
@@ -555,6 +603,11 @@ impl Core {
         self.current_item().map(|it| it.uri)
     }
 
+    /// The current item's title, for messages.
+    fn current_title(&self) -> String {
+        self.current_item().map_or_else(|| "this media".into(), |it| it.title)
+    }
+
     /// Records the current position, and grabs a thumbnail if there's video.
     fn save_progress(&self, thumbnail: bool) {
         let Some(uri) = self.current_uri() else { return };
@@ -682,7 +735,24 @@ impl Core {
     }
 
     fn notice(&self, kind: &'static str, text: impl Into<String>) {
-        let _ = self.app.emit("player://notice", Notice { kind, text: text.into() });
+        let notice = Notice { kind, text: text.into() };
+        match self.early().as_mut() {
+            Some(early) => early.notices.push(notice),
+            None => drop(self.app.emit("player://notice", notice)),
+        }
+    }
+
+    fn offer_resume(&self, ms: i64) {
+        let Some(uri) = self.current_uri() else { return };
+        let offer = ResumeOffer { uri, ms };
+        match self.early().as_mut() {
+            Some(early) => early.resume = Some(offer),
+            None => drop(self.app.emit("player://resume-prompt", offer)),
+        }
+    }
+
+    fn early(&self) -> MutexGuard<'_, Option<Early>> {
+        self.early.lock().unwrap_or_else(|e| e.into_inner())
     }
 
     fn play_index(&self, index: usize) -> Result<(), String> {
@@ -709,6 +779,7 @@ impl Core {
         }
         self.emit_playlist();
         self.emit_bookmarks();
+        self.subtitles().clear();
         let result = self.vlc.open(uri, &item.options, item.trusted);
         let resume_ms = match *self.resume.lock().unwrap_or_else(|e| e.into_inner()) {
             Some(PendingSeek::Seek { ms, .. }) => Some(ms),
@@ -824,7 +895,7 @@ impl Core {
                 self.notice("error", "Open a video first, then its subtitles");
                 break;
             }
-            self.vlc.add_subtitle(&file_uri(&uri))?;
+            self.add_subtitle(file_uri(&uri))?;
             self.notice("osd", "Subtitles added");
         }
         Ok(())
@@ -939,6 +1010,9 @@ fn pump_events(core: Arc<Core>, rx: Receiver<vlc::Event>) {
     let mut last_time_emit = Instant::now() - TIME_INTERVAL;
     let mut last_progress = Instant::now();
     let mut loop_jump: Option<Instant> = None;
+    // The last media that got past its start. Some broken files end
+    // without an error, having played nothing.
+    let mut played = None;
     while let Ok(first) = rx.recv() {
         // Let bursts of events (e.g. opening a file) arrive, then handle them together.
         thread::sleep(Duration::from_millis(20));
@@ -950,6 +1024,9 @@ fn pump_events(core: Arc<Core>, rx: Receiver<vlc::Event>) {
         let transition = core.transition();
         let generation = core.vlc.generation();
         let current = |ty: i32| batch.iter().any(|e| e.kind == ty && e.generation == generation);
+        if current(event::TIME_CHANGED) && core.vlc.time() > 0 {
+            played = Some(generation);
+        }
 
         // Web pages and remote playlists end by expanding into what they hold:
         // one stream plays in place, several replace the entry in the queue.
@@ -972,9 +1049,13 @@ fn pump_events(core: Arc<Core>, rx: Receiver<vlc::Event>) {
                 core.notice("error", e);
             }
         } else if current(event::END_REACHED) {
-            if let Some(uri) = core.current_uri() {
-                core.history().finish(&uri);
-                core.save_history();
+            if played == Some(generation) {
+                if let Some(uri) = core.current_uri() {
+                    core.history().finish(&uri);
+                    core.save_history();
+                }
+            } else {
+                core.notice("error", format!("Could not play {}", core.current_title()));
             }
             let stop_after_each = core.settings().stop_after_each;
             let sleep_now = std::mem::take(&mut core.sleep().after_item);
@@ -987,11 +1068,7 @@ fn pump_events(core: Arc<Core>, rx: Receiver<vlc::Event>) {
             }
         }
         if current(event::ERROR) {
-            let title = {
-                let playlist = core.playlist();
-                playlist.current.and_then(|i| playlist.items.get(i)).map(|it| it.title.clone())
-            };
-            core.notice("error", format!("Could not play {}", title.unwrap_or_else(|| "this media".into())));
+            core.notice("error", format!("Could not play {}", core.current_title()));
         }
         // The resume point belongs to what's open now: only its own start
         // may use it, and before anything else can be opened.
@@ -1003,9 +1080,7 @@ fn pump_events(core: Arc<Core>, rx: Receiver<vlc::Event>) {
                         core.notice("osd", format!("Resuming from {}", format_time(ms)));
                     }
                 }
-                Some(PendingSeek::Ask(ms)) => {
-                    let _ = core.app.emit("player://resume-prompt", ms);
-                }
+                Some(PendingSeek::Ask(ms)) => core.offer_resume(ms),
                 None => {}
             }
         }
@@ -1037,7 +1112,7 @@ fn pump_events(core: Arc<Core>, rx: Receiver<vlc::Event>) {
             last_progress = Instant::now();
             if let Some(uri) = core.current_uri() {
                 core.history().update(&uri, core.vlc.time(), core.vlc.length());
-                let _ = core.write_history(false);
+                core.save_history();
             }
         }
         if [event::PLAYING, event::LENGTH_CHANGED, event::MEDIA_CHANGED, event::TITLE_CHANGED].iter().any(|&e| has(e)) {
@@ -1105,6 +1180,7 @@ async fn snapshot(player: tauri::State<'_, Player>) -> Result<Snapshot, String> 
             titles: Vec::new(),
             bookmarks: Vec::new(),
             engine: Err(e),
+            early: Early::default(),
         });
     }
     // Discs can take a while to list their titles and chapters.
@@ -1117,6 +1193,7 @@ async fn snapshot(player: tauri::State<'_, Player>) -> Result<Snapshot, String> 
         chapters: core.vlc.chapters(),
         titles: core.vlc.titles(),
         engine: Ok(format!("libVLC {}", core.vlc.version)),
+        early: core.early().take().unwrap_or_default(),
     })
     .await
 }
@@ -1471,7 +1548,7 @@ fn set_subtitle_track(player: tauri::State<Player>, id: i32) -> Res {
 fn add_subtitle(player: tauri::State<Player>, uri: String) -> Res {
     let core = player.core()?;
     let uri = if uri.contains("://") { uri } else { file_uri(&uri) };
-    core.vlc.add_subtitle(&uri)
+    core.add_subtitle(uri)
 }
 
 #[tauri::command]
@@ -1758,6 +1835,8 @@ fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
         sleep: Mutex::default(),
         transition: Mutex::default(),
         reloads: AtomicU64::new(0),
+        subtitles: Mutex::new(Vec::new()),
+        early: Mutex::new(Some(Early::default())),
         library_scan: Mutex::default(),
         quality: Mutex::default(),
         history_saves,

@@ -884,10 +884,10 @@ impl Vlc {
         unsafe { (self.api.libvlc_video_set_spu)(self.mp, id) };
     }
 
-    /// Loads an external subtitle file or URL and selects it.
-    pub fn add_subtitle(&self, uri: &str) -> Result<(), String> {
+    /// Loads an external subtitle file or URL, selecting it if `select`.
+    pub fn add_subtitle(&self, uri: &str, select: bool) -> Result<(), String> {
         let c = cstr(uri);
-        match unsafe { (self.api.libvlc_media_player_add_slave)(self.mp, 0, c.as_ptr(), true) } {
+        match unsafe { (self.api.libvlc_media_player_add_slave)(self.mp, 0, c.as_ptr(), select) } {
             0 => Ok(()),
             _ => Err(format!("could not load subtitles from {uri}")),
         }

@@ -11,6 +11,7 @@
   import Select from "./Select.svelte";
   import WindowControls from "./WindowControls.svelte";
   import { isMac } from "./platform";
+  import { updater } from "./updater.svelte";
 
   // VLC's default snapshot folder.
   const SNAPSHOT_DEFAULT = isMac ? "Desktop" : "Pictures";
@@ -27,8 +28,15 @@
   let tab = $state<Tab>("general");
   let version = $state("");
   getVersion().then((v) => (version = v));
-  // Results show in the main window.
-  const checkForUpdates = () => invoke("update_check");
+  // The main window shows the result too, but it may be behind this one.
+  let checkResult = $state<string | null>(null);
+  async function checkForUpdates() {
+    checkResult = null;
+    await invoke("update_check");
+    updater.state = await invoke("update_state");
+    const { status } = updater.state;
+    checkResult = status === "idle" ? "ReVLC is up to date" : status === "error" ? "Couldn't check for updates" : updater.tip;
+  }
   let mainEl = $state<HTMLElement>();
   // Each tab starts at the top.
   $effect(() => {
@@ -58,7 +66,7 @@
     [3, "Files starting with the video's name"], [4, "Files with exactly the video's name"],
   ];
   const ENCODINGS = ["", "UTF-8", "UTF-16", "Windows-1252", "ISO-8859-15", "IBM850", "ISO-8859-2", "Windows-1250", "Windows-1251", "KOI8-R", "KOI8-U", "Windows-1256", "ISO-8859-7", "Windows-1253", "Windows-1255", "Windows-1254", "Windows-874", "Windows-1257", "GB18030", "Big5", "Shift_JIS", "EUC-JP", "CP949", "EUC-KR", "VISCII", "Windows-1258"];
-  const TITLE_POSITIONS: [number, string][] = [[8, "Bottom"], [4, "Top"], [0, "Center"], [9, "Bottom left"], [10, "Bottom right"], [5, "Top left"], [6, "Top right"]];
+  const TITLE_POSITIONS: [number, string][] = [[4, "Top"], [8, "Bottom"], [0, "Center"], [9, "Bottom left"], [10, "Bottom right"], [5, "Top left"], [6, "Top right"]];
   const DEINTERLACE_MODES = ["auto", "discard", "blend", "mean", "bob", "linear", "x", "yadif", "yadif2x", "phosphor", "ivtc"];
   const LOOP_FILTER: [number, string][] = [[0, "None"], [1, "Non-reference frames"], [2, "Bidirectional frames"], [3, "Non-key frames"], [4, "All frames"]];
 
@@ -118,6 +126,7 @@
 
   onMount(() => {
     settings.load();
+    updater.start();
   });
 </script>
 
@@ -169,7 +178,9 @@
 
   <main bind:this={mainEl}>
     {#if settings.error}<p class="save-error" role="alert">{settings.error}</p>{/if}
-    {#if !v || !info}
+    {#if settings.loadError}
+      <p class="save-error" role="alert">Settings are unavailable: {settings.loadError}</p>
+    {:else if !v || !info}
       <p class="muted">Loading…</p>
     {:else if tab === "general"}
       <h3>Appearance</h3>
@@ -202,7 +213,10 @@
           {@render toggle("autoUpdate")}
         </Row>
         <Row label="ReVLC {version}">
-          <button class="btn" onclick={checkForUpdates}>Check now</button>
+          {#if checkResult}<span class="muted" role="status">{checkResult}</span>{/if}
+          <button class="btn" onclick={checkForUpdates} disabled={updater.state.status === "checking"}>
+            {updater.state.status === "checking" ? "Checking…" : "Check now"}
+          </button>
         </Row>
       </div>
       <h3>Privacy</h3>

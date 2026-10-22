@@ -68,6 +68,8 @@ class SettingsStore {
   info = $state<Info | null>(null);
   /** Why the last change couldn't be saved, if it couldn't. */
   error = $state<string | null>(null);
+  /** Why the settings couldn't be read (e.g. the engine didn't start). */
+  loadError = $state<string | null>(null);
   #timer: ReturnType<typeof setTimeout> | undefined;
   #saving: Promise<unknown> = Promise.resolve();
 
@@ -81,8 +83,10 @@ class SettingsStore {
     });
     try {
       this.info = await invoke<Info>("settings_get");
-    } catch {
+      this.loadError = null;
+    } catch (e) {
       this.info = null;
+      this.loadError = String(e);
     }
   }
 
