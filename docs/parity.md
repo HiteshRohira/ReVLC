@@ -46,7 +46,7 @@ Main features come first. Ship, get feedback, then keep ticking boxes.
 - [x] Subtitle delay
 - [x] Text encoding override
 - [x] Font, size, colour, opacity, outline, shadow, background, position
-- [ ] Secondary subtitle track
+- [ ] Secondary subtitle track. Needs libVLC 4: libVLC 3 can only show one subtitle track at a time (VLC 3.0 desktop can't either).
 - [ ] Teletext
 - [ ] Online subtitle search
 
@@ -74,8 +74,8 @@ Main features come first. Ship, get feedback, then keep ticking boxes.
 - [ ] Logo and marquee overlays
 - [ ] Video track selection
 - [x] Always on top
-- [ ] Mini player, picture-in-picture
-- [ ] HDR shown as HDR on XDR displays (see plan M2)
+- [ ] Mini player, picture-in-picture. macOS's built-in picture-in-picture needs us to pass it video frames ourselves instead of letting libVLC draw into the window, which costs performance. A mini player is simpler and comes first.
+- [ ] HDR shown as HDR on XDR displays (see plan M2). libVLC 3 appears to convert HDR to SDR on macOS, so this probably needs libVLC 4.
 
 ## Convert, stream and record
 - [ ] Convert / save to another format
