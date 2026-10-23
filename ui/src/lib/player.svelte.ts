@@ -269,7 +269,8 @@ export const TELETEXT_KEYS: [string, number, string][] = [
 export const TELETEXT_INDEX = 0x69 << 16;
 
 export const DEFAULT_EFFECTS: Effects = {
-  equalizer: { enabled: false, preset: 0, preamp: 0, bands: Array(10).fill(0) },
+  // libVLC's "Flat" preset: its preamp makes up for the filter's 12 dB cut.
+  equalizer: { enabled: false, preset: 0, preamp: 12, bands: Array(10).fill(0) },
   stereo: "stereo",
   adjust: { enabled: false, brightness: 1, contrast: 1, hue: 0, saturation: 1, gamma: 1 },
   logo: { enabled: false, file: "", position: 6, opacity: 255 },

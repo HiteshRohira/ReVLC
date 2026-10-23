@@ -8,6 +8,8 @@ use serde::{Deserialize, Serialize};
 /// libVLC's equaliser limits, in dB.
 pub const EQ_MIN: f32 = -20.0;
 pub const EQ_MAX: f32 = 20.0;
+/// The preamp of libVLC's "Flat" preset, which leaves the level unchanged.
+pub const FLAT_PREAMP: f32 = 12.0;
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
@@ -23,8 +25,9 @@ pub struct Equalizer {
 
 impl Default for Equalizer {
     fn default() -> Self {
-        // VLC's equaliser starts on its first preset, "Flat".
-        Self { enabled: false, preset: Some(0), preamp: 0.0, bands: vec![0.0; 10] }
+        // VLC's equaliser starts on its first preset, "Flat". Its filter
+        // runs 12 dB down, so Flat's preamp of 12 dB leaves the level as is.
+        Self { enabled: false, preset: Some(0), preamp: FLAT_PREAMP, bands: vec![0.0; 10] }
     }
 }
 
@@ -237,6 +240,13 @@ mod tests {
         assert_eq!(&eq.bands[..4], &[-20.0, 3.0, 0.0, 0.0]);
         let long = Equalizer { bands: vec![1.0; 12], ..Default::default() }.normalized(10);
         assert_eq!(long.bands, vec![1.0; 10]);
+    }
+
+    #[test]
+    fn default_equalizer_is_flat() {
+        let eq = Equalizer::default();
+        assert!(eq.matches(FLAT_PREAMP, &[0.0; 10]));
+        assert_eq!(eq.preset, Some(0));
     }
 
     #[test]
