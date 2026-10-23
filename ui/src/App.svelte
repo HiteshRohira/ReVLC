@@ -92,6 +92,34 @@
   // Only for what's playing: an offer for an item since replaced is stale.
   const resumePrompt = $derived(player.resumeOffer && player.resumeOffer.uri === currentUri ? player.resumeOffer.ms : null);
 
+  // The mouse wheel over the video: volume (VLC's default), seeking, or nothing.
+  // A mouse notch is about 40 px; trackpads send many small deltas, which add
+  // up to steps. What's left over is dropped once scrolling pauses.
+  const WHEEL_STEP = 32;
+  let wheelTotal = 0;
+  let wheelAt = 0;
+  function onWheel(e: WheelEvent) {
+    const mode = settings.value?.wheel ?? "volume";
+    const target = e.target as HTMLElement;
+    // Only over the picture, not over menus, panels or lists that scroll.
+    if (mode === "none" || !showPlayer || !target.closest(".stage, .player") || target.closest(".bottom")) return;
+    wake();
+    if (e.timeStamp - wheelAt > 400) wheelTotal = 0;
+    wheelAt = e.timeStamp;
+    const lines = e.deltaMode === 1 ? WHEEL_STEP : e.deltaMode === 2 ? 400 : 1;
+    wheelTotal += e.deltaY * lines;
+    const steps = Math.trunc(wheelTotal / WHEEL_STEP);
+    if (steps === 0) return;
+    wheelTotal -= steps * WHEEL_STEP;
+    // Scrolling up (negative delta) turns it up or jumps forward.
+    if (mode === "volume") {
+      player.setVolume(player.state.volume - steps * 5);
+      player.notify("osd", `Volume ${player.state.volume}%`);
+    } else if (player.state.seekable) {
+      player.seekBy(-steps * 5_000);
+    }
+  }
+
   function wake() {
     idle = false;
     clearTimeout(idleTimer);
@@ -215,7 +243,7 @@
   });
 </script>
 
-<svelte:window onkeydown={onKeyDown} onpointermove={wake} onpointerdown={wake} />
+<svelte:window onkeydown={onKeyDown} onpointermove={wake} onpointerdown={wake} onwheel={onWheel} />
 <svelte:document onvisibilitychange={onVisibility} />
 
 <div class="app" class:video={showPlayer && player.state.hasVideo} class:hide-cursor={controlsHidden} class:fullscreen={ui.fullscreen}>
