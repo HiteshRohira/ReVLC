@@ -11,6 +11,7 @@
   import CaptureDialog from "./lib/CaptureDialog.svelte";
   import DiscDialog from "./lib/DiscDialog.svelte";
   import JumpDialog from "./lib/JumpDialog.svelte";
+  import MediaInfoDialog from "./lib/MediaInfoDialog.svelte";
   import UrlDialog from "./lib/UrlDialog.svelte";
   import TitleBar from "./lib/TitleBar.svelte";
   import WindowControls from "./lib/WindowControls.svelte";
@@ -34,7 +35,7 @@
   const showPlayer = $derived(theme.onboarded && player.active);
   // Hide the controls and cursor while video plays and the mouse is still.
   const controlsHidden = $derived(
-    idle && player.playing && player.state.hasVideo && ui.openMenus === 0 && !ui.playlistOpen,
+    idle && player.playing && player.state.hasVideo && ui.openMenus === 0 && !ui.playlistOpen && !ui.effectsOpen,
   );
 
   $effect(() => {
@@ -131,6 +132,7 @@
       player.navigate(menuKey);
     } else if (e.key === "Escape") {
       if (ui.menu) ui.menu = null;
+      else if (ui.effectsOpen) ui.effectsOpen = false;
       else if (ui.playlistOpen) ui.playlistOpen = false;
       else if (ui.helpOpen) ui.helpOpen = false;
       else exitFullscreen();
@@ -261,7 +263,8 @@
   {#if ui.dialog === "url"}<UrlDialog />
   {:else if ui.dialog === "jump"}<JumpDialog />
   {:else if ui.dialog === "disc"}<DiscDialog />
-  {:else if ui.dialog === "capture"}<CaptureDialog />{/if}
+  {:else if ui.dialog === "capture"}<CaptureDialog />
+  {:else if ui.dialog === "info"}<MediaInfoDialog />{/if}
 
   {#if ui.helpOpen}
     <div class="backdrop" role="presentation" onpointerdown={() => (ui.helpOpen = false)}>

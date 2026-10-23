@@ -1,6 +1,7 @@
 mod bookmarks;
 mod capture;
 mod disc;
+mod effects;
 mod history;
 mod library;
 #[cfg_attr(not(any(target_os = "macos", windows)), allow(dead_code))]
@@ -36,13 +37,14 @@ use tauri::{AppHandle, Emitter, Manager, RunEvent, WebviewUrl, WebviewWindowBuil
 use bookmarks::{Bookmark, Bookmarks};
 use capture::{Capture, Devices};
 use disc::{Disc, DiscKind};
+use effects::{Adjust, Effects, Equalizer, Logo, Marquee, StereoMode};
 use history::{History, UiEntry};
 use library::{Library, LibraryItem};
 use meta::MetaCache;
 use playlist::{Item, Playlist, Repeat, SortKey};
 use playlist_file::file_uri;
 use settings::{Resume, Settings};
-use vlc::{Chapter, Navigate, State, Title, Track, Vlc, event};
+use vlc::{Chapter, MediaInfo, Navigate, State, Stats, Title, Track, Vlc, event};
 
 struct Core {
     vlc: Vlc,
@@ -94,6 +96,11 @@ struct Core {
     history_write: Mutex<()>,
     /// Held while applying a settings change, so changes apply in order.
     settings_change: Mutex<()>,
+    /// Equaliser, stereo mode, video effects and zoom; they stay on from
+    /// one item to the next.
+    effects: Mutex<Effects>,
+    /// The teletext page last asked for, and the media generation it was for.
+    teletext_page: Mutex<Option<(u64, i32)>>,
 }
 
 struct LibraryScan {
@@ -245,8 +252,20 @@ struct PlayerState {
 struct Tracks {
     audio: Vec<Track>,
     audio_current: i32,
+    video: Vec<Track>,
+    video_current: i32,
     subtitles: Vec<Track>,
     subtitle_current: i32,
+    /// Whether what's playing has teletext, and whether a teletext track is selected.
+    teletext: bool,
+    teletext_on: bool,
+}
+
+#[derive(Clone, Serialize)]
+struct EqualizerInfo {
+    presets: Vec<String>,
+    /// Band centre frequencies in Hz.
+    bands: Vec<f32>,
 }
 
 #[derive(Clone, Serialize)]
@@ -279,6 +298,7 @@ struct Snapshot {
     chapters: Vec<Chapter>,
     titles: Vec<Title>,
     bookmarks: Vec<Bookmark>,
+    effects: Effects,
     engine: Result<String, String>,
     early: Early,
 }
@@ -716,8 +736,12 @@ impl Core {
         Tracks {
             audio: v.audio_tracks(),
             audio_current: v.audio_track(),
+            video: v.video_tracks(),
+            video_current: v.video_track(),
             subtitles: v.subtitle_tracks(),
             subtitle_current: v.subtitle_track(),
+            teletext: !v.teletext_tracks().is_empty(),
+            teletext_on: v.teletext_on(),
         }
     }
 
@@ -727,6 +751,20 @@ impl Core {
 
     fn emit_tracks(&self) {
         let _ = self.app.emit("player://tracks", self.tracks());
+    }
+
+    fn effects(&self) -> MutexGuard<'_, Effects> {
+        self.effects.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Changes the effects with `change`, applies them, and tells the UI.
+    fn update_effects(&self, change: impl FnOnce(&mut Effects)) {
+        let effects = {
+            let mut effects = self.effects();
+            change(&mut effects);
+            effects.clone()
+        };
+        let _ = self.app.emit("player://effects", effects);
     }
 
     fn emit_playlist(&self) {
@@ -1090,6 +1128,11 @@ fn pump_events(core: Arc<Core>, rx: Receiver<vlc::Event>) {
             if !device.is_empty() {
                 core.vlc.set_audio_device(&device);
             }
+            // The audio output picks its own stereo mode for each stream.
+            let stereo = core.effects().stereo;
+            if stereo != StereoMode::Stereo && core.vlc.stereo_mode() != stereo.code() {
+                core.vlc.set_stereo_mode(stereo.code());
+            }
         }
         if has(event::PAUSED) {
             core.save_progress(true);
@@ -1179,6 +1222,7 @@ async fn snapshot(player: tauri::State<'_, Player>) -> Result<Snapshot, String> 
             chapters: Vec::new(),
             titles: Vec::new(),
             bookmarks: Vec::new(),
+            effects: Effects::default(),
             engine: Err(e),
             early: Early::default(),
         });
@@ -1192,6 +1236,7 @@ async fn snapshot(player: tauri::State<'_, Player>) -> Result<Snapshot, String> 
         playlist: Some(core.playlist().clone()),
         chapters: core.vlc.chapters(),
         titles: core.vlc.titles(),
+        effects: core.effects().clone(),
         engine: Ok(format!("libVLC {}", core.vlc.version)),
         early: core.early().take().unwrap_or_default(),
     })
@@ -1586,6 +1631,144 @@ fn set_deinterlace(player: tauri::State<Player>, mode: Option<String>) -> Res {
 }
 
 #[tauri::command]
+fn set_video_track(player: tauri::State<Player>, id: i32) -> Res {
+    let core = player.core()?;
+    core.vlc.set_video_track(id);
+    core.emit_tracks();
+    Ok(())
+}
+
+#[tauri::command]
+fn set_stereo_mode(player: tauri::State<Player>, mode: StereoMode) -> Res {
+    let core = player.core()?;
+    // Kept even with nothing playing; it's applied when playback starts.
+    core.vlc.set_stereo_mode(mode.code());
+    core.update_effects(|e| e.stereo = mode);
+    Ok(())
+}
+
+#[tauri::command]
+fn equalizer_info(player: tauri::State<Player>) -> Result<EqualizerInfo, String> {
+    let vlc = &player.core()?.vlc;
+    Ok(EqualizerInfo { presets: vlc.equalizer_presets(), bands: vlc.equalizer_bands() })
+}
+
+fn apply_equalizer(core: &Core, eq: Equalizer) {
+    core.vlc.set_equalizer(eq.enabled.then_some((eq.preamp, eq.bands.as_slice())));
+    core.update_effects(|e| e.equalizer = eq);
+}
+
+/// Loads one of libVLC's presets and turns the equaliser on.
+#[tauri::command]
+fn set_equalizer_preset(player: tauri::State<Player>, index: u32) -> Res {
+    let core = player.core()?;
+    let (preamp, bands) = core.vlc.equalizer_preset(index).ok_or("no such preset")?;
+    let eq = Equalizer { enabled: true, preset: Some(index), preamp, bands }.normalized(core.vlc.equalizer_bands().len());
+    apply_equalizer(core, eq);
+    Ok(())
+}
+
+/// Sets the equaliser from the UI's values. Once they no longer match the
+/// preset they came from, it counts as a custom setting.
+#[tauri::command]
+fn set_equalizer(player: tauri::State<Player>, equalizer: Equalizer) -> Res {
+    let core = player.core()?;
+    let mut eq = equalizer.normalized(core.vlc.equalizer_bands().len());
+    if let Some(index) = eq.preset
+        && !core.vlc.equalizer_preset(index).is_some_and(|(preamp, bands)| eq.matches(preamp, &bands))
+    {
+        eq.preset = None;
+    }
+    apply_equalizer(core, eq);
+    Ok(())
+}
+
+#[tauri::command]
+fn set_adjust(player: tauri::State<Player>, adjust: Adjust) -> Res {
+    let core = player.core()?;
+    let adjust = adjust.normalized();
+    core.vlc.set_adjust(&adjust);
+    core.update_effects(|e| e.adjust = adjust);
+    Ok(())
+}
+
+#[tauri::command]
+fn set_logo(player: tauri::State<Player>, logo: Logo) -> Res {
+    let core = player.core()?;
+    let logo = logo.normalized();
+    core.vlc.set_logo(&logo);
+    core.update_effects(|e| e.logo = logo);
+    Ok(())
+}
+
+#[tauri::command]
+fn set_marquee(player: tauri::State<Player>, marquee: Marquee) -> Res {
+    let core = player.core()?;
+    let marquee = marquee.normalized();
+    core.vlc.set_marquee(&marquee);
+    core.update_effects(|e| e.marquee = marquee);
+    Ok(())
+}
+
+#[tauri::command]
+fn set_zoom(player: tauri::State<Player>, zoom: f32) -> Res {
+    let core = player.core()?;
+    let zoom = effects::zoom_preset(zoom);
+    core.vlc.set_zoom(zoom);
+    core.update_effects(|e| e.zoom = zoom);
+    Ok(())
+}
+
+/// Shows a teletext page, sends a coloured key, or with 0 turns teletext off.
+#[tauri::command]
+fn set_teletext(player: tauri::State<Player>, page: i32) -> Res {
+    let core = player.core()?;
+    core.vlc.set_teletext(page);
+    if (1..1000).contains(&page) {
+        *core.teletext_page.lock().unwrap_or_else(|e| e.into_inner()) = Some((core.vlc.generation(), page));
+    }
+    core.emit_tracks();
+    Ok(())
+}
+
+/// Teletext's background. The decoder reads it when it starts, so a
+/// teletext track on screen is selected again to apply it. That starts it on
+/// the track's own page, so the page the user went to is asked for again
+/// once the new decoder is there.
+#[tauri::command]
+async fn set_teletext_transparent(player: tauri::State<'_, Player>, transparent: bool) -> Res {
+    off_main(player, move |core| {
+        core.vlc.set_config("vbi-opaque", &vlc::ConfigValue::Bool(!transparent));
+        if core.vlc.teletext_on() {
+            let generation = core.vlc.generation();
+            let track = core.vlc.subtitle_track();
+            core.vlc.set_subtitle_track(-1);
+            core.vlc.set_subtitle_track(track);
+            let page = *core.teletext_page.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some((g, page)) = page.filter(|(g, _)| *g == generation) {
+                thread::sleep(Duration::from_millis(400));
+                if core.vlc.generation() == g && core.vlc.subtitle_track() == track {
+                    core.vlc.set_teletext(page);
+                }
+            }
+        }
+        core.update_effects(|e| e.teletext_transparent = transparent);
+        core.emit_tracks();
+    })
+    .await
+}
+
+#[tauri::command]
+fn media_info(player: tauri::State<Player>) -> Result<Option<MediaInfo>, String> {
+    Ok(player.core()?.vlc.media_info())
+}
+
+#[tauri::command]
+fn media_stats(player: tauri::State<Player>) -> Result<Option<Stats>, String> {
+    Ok(player.core()?.vlc.stats())
+}
+
+#[tauri::command]
 async fn take_snapshot(app: AppHandle, player: tauri::State<'_, Player>) -> Res {
     // VLC's default folder: the Desktop on macOS, Pictures on Windows.
     let default = if cfg!(target_os = "macos") { app.path().desktop_dir() } else { app.path().picture_dir() };
@@ -1842,6 +2025,8 @@ fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
         history_saves,
         history_write: Mutex::default(),
         settings_change: Mutex::default(),
+        effects: Mutex::default(),
+        teletext_page: Mutex::default(),
         data_dir,
     });
 
@@ -2000,6 +2185,19 @@ pub fn run() {
             set_aspect_ratio,
             set_crop,
             set_deinterlace,
+            set_video_track,
+            set_stereo_mode,
+            equalizer_info,
+            set_equalizer_preset,
+            set_equalizer,
+            set_adjust,
+            set_logo,
+            set_marquee,
+            set_zoom,
+            set_teletext,
+            set_teletext_transparent,
+            media_info,
+            media_stats,
             take_snapshot,
             hide_cursor,
             playlist_remove,

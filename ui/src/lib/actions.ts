@@ -72,6 +72,7 @@ export const ACTIONS: Action[] = [
     run: () => { player.notify("osd", s().muted ? "Unmuted" : "Muted"); player.setMuted(!s().muted); },
   },
   { id: "cycleAudio", label: "Next audio track", group: "Audio", keys: "B", run: () => player.cycle("audio") },
+  { id: "cycleStereo", label: "Next stereo mode", group: "Audio", keys: "", run: () => player.cycleStereoMode() },
   { id: "audioDelayUp", label: "Increase audio delay", group: "Audio", keys: "K", run: () => player.setAudioDelay(s().audioDelay + 50) },
   { id: "audioDelayDown", label: "Decrease audio delay", group: "Audio", keys: "J", run: () => player.setAudioDelay(s().audioDelay - 50) },
 
@@ -80,6 +81,10 @@ export const ACTIONS: Action[] = [
   { id: "cycleAspect", label: "Next aspect ratio", group: "Video", keys: "A", run: () => player.setAspect(cycle(ASPECT_RATIOS, player.aspect)) },
   { id: "cycleCrop", label: "Next crop", group: "Video", keys: "C", run: () => player.setCrop(cycle(CROPS, player.crop)) },
   { id: "deinterlace", label: "Toggle deinterlace", group: "Video", keys: "D", run: () => player.setDeinterlace(!player.deinterlace) },
+  { id: "cycleVideo", label: "Next video track", group: "Video", keys: "", run: () => player.cycle("video") },
+  { id: "cycleZoom", label: "Zoom", group: "Video", keys: "Z", run: () => player.cycleZoom() },
+  { id: "resetZoom", label: "Reset zoom", group: "Video", keys: "Shift+Z", run: () => player.setZoom(0) },
+  { id: "effects", label: "Effects and filters", group: "Video", keys: "Cmd+E", run: () => (ui.effectsOpen = !ui.effectsOpen) },
 
   { id: "toggleSubtitles", label: "Subtitles on / off", group: "Subtitles", keys: "V", run: () => player.toggleSubtitles() },
   {
@@ -99,8 +104,17 @@ export const ACTIONS: Action[] = [
   { id: "openCapture", label: "Open capture device", group: "App", keys: "", run: () => (ui.dialog = "capture") },
   { id: "savePlaylist", label: "Save playlist", group: "App", keys: "Cmd+S", run: () => savePlaylist() },
   { id: "queue", label: "Up next", group: "App", keys: "Cmd+L", run: () => (ui.playlistOpen = !ui.playlistOpen) },
+  { id: "mediaInfo", label: "Media information", group: "App", keys: "Cmd+I", run: () => openInfo("general") },
+  { id: "codecInfo", label: "Codec information", group: "App", keys: "Cmd+J", run: () => openInfo("codec") },
   { id: "help", label: "Keyboard shortcuts", group: "App", keys: "?", run: () => (ui.helpOpen = !ui.helpOpen) },
 ];
+
+/** Opens the media information dialog on `tab`, if something is playing. */
+function openInfo(tab: typeof ui.infoTab) {
+  if (!player.active) return player.notify("info", "Nothing is playing");
+  ui.infoTab = tab;
+  ui.dialog = "info";
+}
 
 /** Asks where to save the queue, as M3U, PLS or XSPF. */
 export async function savePlaylist() {

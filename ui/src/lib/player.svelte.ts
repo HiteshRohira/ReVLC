@@ -35,8 +35,99 @@ export interface Track {
 export interface Tracks {
   audio: Track[];
   audioCurrent: number;
+  video: Track[];
+  videoCurrent: number;
   subtitles: Track[];
   subtitleCurrent: number;
+  /** Whether what's playing has teletext, and whether a teletext track is selected. */
+  teletext: boolean;
+  teletextOn: boolean;
+}
+
+export type StereoMode = "stereo" | "reverse" | "left" | "right" | "dolby" | "mono";
+
+/** Mirrors src-tauri/src/effects.rs. */
+export interface Equalizer {
+  enabled: boolean;
+  /** The preset the values came from; null once a band is moved by hand. */
+  preset: number | null;
+  preamp: number;
+  bands: number[];
+}
+
+export interface Adjust {
+  enabled: boolean;
+  brightness: number;
+  contrast: number;
+  hue: number;
+  saturation: number;
+  gamma: number;
+}
+
+export interface Logo {
+  enabled: boolean;
+  file: string;
+  position: number;
+  opacity: number;
+}
+
+export interface Marquee {
+  enabled: boolean;
+  text: string;
+  position: number;
+  size: number;
+  color: number;
+  opacity: number;
+  timeout: number;
+}
+
+export interface Effects {
+  equalizer: Equalizer;
+  stereo: StereoMode;
+  adjust: Adjust;
+  logo: Logo;
+  marquee: Marquee;
+  /** 0 fits the window. */
+  zoom: number;
+  teletextTransparent: boolean;
+}
+
+export interface TrackInfo {
+  kind: "audio" | "video" | "text" | "unknown";
+  id: number;
+  codec: string;
+  codecName: string | null;
+  language: string | null;
+  description: string | null;
+  bitrate: number;
+  channels: number;
+  rate: number;
+  width: number;
+  height: number;
+  fps: number;
+  sar: string | null;
+  encoding: string | null;
+}
+
+export interface MediaInfo {
+  location: string;
+  meta: [string, string][];
+  tracks: TrackInfo[];
+}
+
+export interface Stats {
+  readBytes: number;
+  inputBitrate: number;
+  demuxReadBytes: number;
+  demuxBitrate: number;
+  demuxCorrupted: number;
+  demuxDiscontinuity: number;
+  decodedVideo: number;
+  decodedAudio: number;
+  displayedPictures: number;
+  lostPictures: number;
+  playedAbuffers: number;
+  lostAbuffers: number;
 }
 
 export interface Chapter {
@@ -139,6 +230,7 @@ interface Snapshot {
   chapters: Chapter[];
   titles: Title[];
   bookmarks: Bookmark[];
+  effects: Effects;
   engine: { Ok: string } | { Err: string };
   /** What was sent before the UI was listening. */
   early: { notices: { kind: Notice["kind"]; text: string }[]; resume: ResumeOffer | null };
@@ -163,6 +255,26 @@ export const SPEEDS = [0.25, 0.5, 0.75, 1, 1.25, 1.5, 1.75, 2, 3, 4];
 /** Sleep timer choices in minutes; "end" stops after the current item. */
 export const SLEEP_PRESETS: (number | "end" | null)[] = [null, 15, 30, 45, 60, 90, "end"];
 export const PLAYLIST_EXTENSIONS = ["m3u", "m3u8", "pls", "xspf"];
+export const STEREO_MODES: [StereoMode, string][] = [
+  ["stereo", "Stereo"], ["mono", "Mono"], ["left", "Left"], ["right", "Right"], ["reverse", "Reverse stereo"], ["dolby", "Dolby Surround"],
+];
+/** VLC's zoom presets; 0 fits the window. */
+export const ZOOMS: [number, string][] = [[0, "Fit to window"], [0.25, "1:4 Quarter"], [0.5, "1:2 Half"], [1, "1:1 Original"], [2, "2:1 Double"]];
+/** Teletext's coloured keys and index (libvlc_teletext_key_t). */
+export const TELETEXT_KEYS: [string, number, string][] = [
+  ["Red", 0x72 << 16, "#e5484d"], ["Green", 0x67 << 16, "#30a46c"], ["Yellow", 0x79 << 16, "#f5d90a"], ["Blue", 0x62 << 16, "#3e63dd"],
+];
+export const TELETEXT_INDEX = 0x69 << 16;
+
+export const DEFAULT_EFFECTS: Effects = {
+  equalizer: { enabled: false, preset: 0, preamp: 0, bands: Array(10).fill(0) },
+  stereo: "stereo",
+  adjust: { enabled: false, brightness: 1, contrast: 1, hue: 0, saturation: 1, gamma: 1 },
+  logo: { enabled: false, file: "", position: 6, opacity: 255 },
+  marquee: { enabled: false, text: "", position: 5, size: 0, color: 0xffffff, opacity: 255, timeout: 0 },
+  zoom: 0,
+  teletextTransparent: true,
+};
 
 const ACTIVE: PlayState[] = ["opening", "buffering", "playing", "paused"];
 
@@ -186,7 +298,8 @@ class Player {
     sleepAt: null,
     sleepAfterItem: false,
   });
-  tracks = $state<Tracks>({ audio: [], audioCurrent: -1, subtitles: [], subtitleCurrent: -1 });
+  tracks = $state<Tracks>({ audio: [], audioCurrent: -1, video: [], videoCurrent: -1, subtitles: [], subtitleCurrent: -1, teletext: false, teletextOn: false });
+  effects = $state<Effects>(structuredClone(DEFAULT_EFFECTS));
   playlist = $state<Playlist>({ items: [], current: null, repeat: "off", shuffle: false });
   chapters = $state<Chapter[]>([]);
   titles = $state<Title[]>([]);
@@ -228,6 +341,7 @@ class Player {
       listen<Chapter[]>("player://chapters", (e) => (this.chapters = e.payload)),
       listen<Title[]>("player://titles", (e) => (this.titles = e.payload)),
       listen<Bookmark[]>("player://bookmarks", (e) => (this.bookmarks = e.payload)),
+      listen<Effects>("player://effects", (e) => (this.effects = e.payload)),
       listen<string>("library://thumb", () => {
         this.thumbVersion++;
         this.#refreshLibrarySoon();
@@ -249,6 +363,7 @@ class Player {
     this.chapters = snap.chapters;
     this.titles = snap.titles;
     this.bookmarks = snap.bookmarks;
+    this.effects = snap.effects;
     for (const n of snap.early.notices) this.notify(n.kind, n.text);
     if (snap.early.resume) this.offerResume(snap.early.resume);
     await Promise.all([this.loadHistory(), this.loadLibrary()]);
@@ -354,6 +469,7 @@ class Player {
   }
 
   setAudioTrack = (id: number) => this.#call("set_audio_track", { id });
+  setVideoTrack = (id: number) => this.#call("set_video_track", { id });
   setSubtitleTrack = (id: number) => this.#call("set_subtitle_track", { id });
   addSubtitle = (uri: string) => this.#call("add_subtitle", { uri });
 
@@ -383,6 +499,34 @@ class Player {
   }
 
   snapshot = () => this.#call("take_snapshot");
+
+  setStereoMode(mode: StereoMode) {
+    this.notify("osd", `Stereo mode: ${STEREO_MODES.find(([m]) => m === mode)?.[1]}`);
+    return this.#call("set_stereo_mode", { mode });
+  }
+  cycleStereoMode() {
+    const i = STEREO_MODES.findIndex(([m]) => m === this.effects.stereo);
+    return this.setStereoMode(STEREO_MODES[(i + 1) % STEREO_MODES.length][0]);
+  }
+
+  setEqualizer = (equalizer: Equalizer) => this.#call("set_equalizer", { equalizer: $state.snapshot(equalizer) });
+  setEqualizerPreset = (index: number) => this.#call("set_equalizer_preset", { index });
+  setAdjust = (adjust: Adjust) => this.#call("set_adjust", { adjust: $state.snapshot(adjust) });
+  setLogo = (logo: Logo) => this.#call("set_logo", { logo: $state.snapshot(logo) });
+  setMarquee = (marquee: Marquee) => this.#call("set_marquee", { marquee: $state.snapshot(marquee) });
+
+  setZoom(zoom: number) {
+    this.notify("osd", `Zoom: ${ZOOMS.find(([z]) => z === zoom)?.[1] ?? "Fit to window"}`);
+    return this.#call("set_zoom", { zoom });
+  }
+  /** VLC's Z key: the next zoom preset. */
+  cycleZoom() {
+    const i = ZOOMS.findIndex(([z]) => z === this.effects.zoom);
+    return this.setZoom(ZOOMS[(i + 1) % ZOOMS.length][0]);
+  }
+
+  setTeletext = (page: number) => this.#call("set_teletext", { page });
+  setTeletextTransparent = (transparent: boolean) => this.#call("set_teletext_transparent", { transparent });
 
   remove = (index: number) => this.#call("playlist_remove", { index });
   move = (from: number, to: number) => this.#call("playlist_move", { from, to });
@@ -476,13 +620,16 @@ class Player {
   }
 
   /** Selects the next entry in a track list, wrapping around. */
-  cycle(kind: "audio" | "subtitles") {
-    const list = kind === "audio" ? this.tracks.audio : this.tracks.subtitles;
+  cycle(kind: "audio" | "video" | "subtitles") {
+    const { list, current, label, set } = {
+      audio: { list: this.tracks.audio, current: this.tracks.audioCurrent, label: "Audio", set: this.setAudioTrack },
+      video: { list: this.tracks.video, current: this.tracks.videoCurrent, label: "Video", set: this.setVideoTrack },
+      subtitles: { list: this.tracks.subtitles, current: this.tracks.subtitleCurrent, label: "Subtitles", set: this.setSubtitleTrack },
+    }[kind];
     if (list.length === 0) return;
-    const current = kind === "audio" ? this.tracks.audioCurrent : this.tracks.subtitleCurrent;
     const next = list[(list.findIndex((t) => t.id === current) + 1) % list.length];
-    this.notify("osd", `${kind === "audio" ? "Audio" : "Subtitles"}: ${next.name}`);
-    return kind === "audio" ? this.setAudioTrack(next.id) : this.setSubtitleTrack(next.id);
+    this.notify("osd", `${label}: ${trackName(next.name)}`);
+    return set(next.id);
   }
 }
 

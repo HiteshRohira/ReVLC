@@ -1,5 +1,6 @@
 <script lang="ts">
   import { Captions, ChevronLeft, ListVideo, Maximize, Minimize, Music2, Settings, SkipBack, SkipForward, Volume1, Volume2, VolumeX } from "@lucide/svelte";
+  import EffectsPanel from "./EffectsPanel.svelte";
   import QueuePanel from "./QueuePanel.svelte";
   import SeekBar from "./SeekBar.svelte";
   import SettingsMenu from "./SettingsMenu.svelte";
@@ -126,6 +127,7 @@
 </div>
 
 {#if ui.playlistOpen}<QueuePanel {onadd} />{/if}
+{#if ui.effectsOpen}<EffectsPanel />{/if}
 
 <style>
   .player {

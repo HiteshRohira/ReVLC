@@ -40,6 +40,7 @@ const AUDIO: &[(&str, &str)] = &[
     ("mute", "Mute"),
     ("-", ""),
     ("cycleAudio", "Next Audio Track"),
+    ("cycleStereo", "Next Stereo Mode"),
     ("audioDelayUp", "Increase Audio Delay"),
     ("audioDelayDown", "Decrease Audio Delay"),
 ];
@@ -50,6 +51,10 @@ const VIDEO: &[(&str, &str)] = &[
     ("cycleAspect", "Next Aspect Ratio"),
     ("cycleCrop", "Next Crop"),
     ("deinterlace", "Toggle Deinterlace"),
+    ("-", ""),
+    ("cycleVideo", "Next Video Track"),
+    ("cycleZoom", "Zoom"),
+    ("resetZoom", "Reset Zoom"),
 ];
 const SUBTITLES: &[(&str, &str)] = &[
     ("toggleSubtitles", "Subtitles On / Off"),
@@ -171,6 +176,9 @@ pub fn build<R: Runtime>(app: &AppHandle<R>, keys: &HashMap<String, String>) -> 
             &PredefinedMenuItem::maximize(app, Some("Zoom"))?,
             &sep()?,
             &item("queue", "Up Next")?,
+            &item("effects", "Effects and Filters…")?,
+            &item("mediaInfo", "Media Information…")?,
+            &item("codecInfo", "Codec Information…")?,
         ],
     )?;
     let help = Submenu::with_items(
