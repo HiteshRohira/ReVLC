@@ -171,11 +171,13 @@ mod tests {
 
     #[test]
     fn relative_paths_become_absolute() {
-        let mut cli = p(&["media/a.mkv", "/Movies/b.mkv", "https://example.com/c.m3u8"]);
+        // An absolute path needs a drive letter on Windows.
+        let absolute = if cfg!(windows) { r"C:\Movies\b.mkv" } else { "/Movies/b.mkv" };
+        let mut cli = p(&["media/a.mkv", absolute, "https://example.com/c.m3u8"]);
         let cwd = std::env::temp_dir();
         cli.resolve_paths(&cwd);
         assert_eq!(cli.files[0], cwd.join("media/a.mkv").to_string_lossy());
-        assert_eq!(&cli.files[1..], ["/Movies/b.mkv", "https://example.com/c.m3u8"]);
+        assert_eq!(&cli.files[1..], [absolute, "https://example.com/c.m3u8"]);
     }
 
     #[test]

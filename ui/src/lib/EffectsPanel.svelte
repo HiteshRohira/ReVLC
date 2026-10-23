@@ -176,9 +176,9 @@
 
       <h3>Text</h3>
       <div class="line"><span>Show text</span>{@render sw(fx.marquee.enabled, "Show text", (on) => setMarquee({ enabled: on }))}</div>
-      <input class="text" type="text" placeholder="Text, e.g. %H:%M or $t" value={fx.marquee.text} spellcheck="false" autocomplete="off" aria-label="Text"
+      <input class="text" type="text" placeholder="Text, e.g. Now %H:%M" value={fx.marquee.text} spellcheck="false" autocomplete="off" aria-label="Text"
         onkeydown={(e) => e.stopPropagation()} onchange={(e) => setMarquee({ text: e.currentTarget.value, enabled: e.currentTarget.value.trim() !== "" || fx.marquee.enabled })} />
-      <p class="note">VLC's codes work: %H:%M for the time, $t for the title, $T for the position.</p>
+      <p class="note">Time codes work, like %H:%M for the time of day or %d/%m/%Y for the date.</p>
       <div class="line"><span>Position</span><Select value={fx.marquee.position} options={POSITIONS} onchange={(v) => setMarquee({ position: Number(v) })} /></div>
       <div class="line"><span>Colour</span><Select value={fx.marquee.color} options={COLORS} onchange={(v) => setMarquee({ color: Number(v) })} /></div>
       <div class="line">

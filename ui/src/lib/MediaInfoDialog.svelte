@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { onMount } from "svelte";
   import { invoke } from "@tauri-apps/api/core";
   import { X } from "@lucide/svelte";
   import { player, type MediaInfo, type Stats, type TrackInfo } from "./player.svelte";
@@ -11,6 +12,29 @@
   let failed = $state(false);
 
   const close = () => (ui.dialog = null);
+
+  let dialog: HTMLElement;
+  let closeButton: HTMLButtonElement;
+
+  // Focus moves into the dialog while it's open, and back where it was after.
+  onMount(() => {
+    const before = document.activeElement as HTMLElement | null;
+    closeButton.focus();
+    return () => before?.focus();
+  });
+
+  // Escape closes; Tab stays inside the dialog, not on the player behind it.
+  function onKey(e: KeyboardEvent) {
+    if (e.key === "Escape") return close();
+    if (e.key !== "Tab") return;
+    const stops = [...dialog.querySelectorAll<HTMLElement>("button")].filter((el) => !el.matches(":disabled"));
+    const [first, last] = [stops[0], stops[stops.length - 1]];
+    const at = document.activeElement;
+    if (!dialog.contains(at) || (e.shiftKey && at === first) || (!e.shiftKey && at === last)) {
+      e.preventDefault();
+      (e.shiftKey ? last : first).focus();
+    }
+  }
 
   // Reread when the item changes, or when its tracks do (they appear as it opens).
   const uri = $derived(player.current?.uri);
@@ -69,13 +93,13 @@
   );
 </script>
 
-<svelte:window onkeydown={(e) => e.key === "Escape" && close()} />
+<svelte:window onkeydown={onKey} />
 
 <div class="backdrop" role="presentation" onpointerdown={(e) => e.target === e.currentTarget && close()}>
-  <div class="dialog" role="dialog" aria-modal="true" aria-label="Media information">
+  <div class="dialog" role="dialog" aria-modal="true" aria-label="Media information" bind:this={dialog}>
     <header>
       <h2>Media information</h2>
-      <button class="icon" data-tip="Close" aria-label="Close" onclick={close}><X size={18} /></button>
+      <button class="icon" data-tip="Close" aria-label="Close" onclick={close} bind:this={closeButton}><X size={18} /></button>
     </header>
     <div class="tabs" role="tablist">
       {#each TABS as [id, label]}

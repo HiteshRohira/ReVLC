@@ -155,7 +155,8 @@ impl Logo {
 }
 
 /// Text shown over the video (VLC's marquee filter). The text can use
-/// VLC's time and metadata codes, like `%H:%M` or `$t`.
+/// time codes, like `%H:%M` (libVLC 3's marquee doesn't expand VLC's `$`
+/// metadata codes).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct Marquee {
