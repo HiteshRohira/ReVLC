@@ -56,7 +56,7 @@ Main features come first. Ship, get feedback, then keep ticking boxes.
 - [x] Audio delay
 - [x] Output device selection
 - [x] Equaliser with presets
-- [ ] Compressor, spatialiser, stereo widener, normalisation, pitch
+- [x] Compressor, spatialiser, stereo widener, normalisation, pitch
 - [x] Stereo mode (left / right / reverse / mono)
 - [x] S/PDIF passthrough
 - [ ] Visualisations
@@ -68,9 +68,9 @@ Main features come first. Ship, get feedback, then keep ticking boxes.
 - [x] Snapshot (saved to the Desktop on macOS, Pictures on Windows)
 - [x] Fullscreen
 - [ ] Zoom and pan
-- [ ] Rotate / flip
+- [x] Rotate / flip
 - [x] Colour adjustments (brightness, contrast, hue, saturation, gamma)
-- [ ] Sharpen and other effects
+- [x] Sharpen and other effects
 - [x] Logo and marquee overlays
 - [x] Video track selection
 - [x] Always on top
