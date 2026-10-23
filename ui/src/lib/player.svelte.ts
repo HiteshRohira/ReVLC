@@ -81,6 +81,33 @@ export interface Marquee {
   timeout: number;
 }
 
+export type Transform = "none" | "rotate90" | "rotate180" | "rotate270" | "flipHorizontal" | "flipVertical" | "transpose" | "antiTranspose";
+
+/** A VLC filter: on or off, and its settings by key. */
+export interface Filter {
+  enabled: boolean;
+  values: Record<string, number>;
+}
+
+/** Mirrors effects::Param and effects::FilterSpec. */
+export interface FilterParam {
+  key: string;
+  label: string;
+  min: number;
+  max: number;
+  step: number;
+  default: number;
+  int: boolean;
+  unit: string;
+}
+
+export interface FilterSpec {
+  id: string;
+  label: string;
+  module: string;
+  params: FilterParam[];
+}
+
 export interface Effects {
   equalizer: Equalizer;
   stereo: StereoMode;
@@ -90,6 +117,9 @@ export interface Effects {
   /** 0 fits the window. */
   zoom: number;
   teletextTransparent: boolean;
+  transform: Transform;
+  /** Video and audio filters by FilterSpec id. */
+  filters: Record<string, Filter>;
 }
 
 export interface TrackInfo {
@@ -277,7 +307,14 @@ export const DEFAULT_EFFECTS: Effects = {
   marquee: { enabled: false, text: "", position: 5, size: 0, color: 0xffffff, opacity: 255, timeout: 0 },
   zoom: 0,
   teletextTransparent: true,
+  transform: "none",
+  filters: {},
 };
+
+export const TRANSFORMS: [Transform, string][] = [
+  ["none", "None"], ["rotate90", "Rotate 90°"], ["rotate180", "Rotate 180°"], ["rotate270", "Rotate 270°"],
+  ["flipHorizontal", "Flip horizontally"], ["flipVertical", "Flip vertically"], ["transpose", "Transpose"], ["antiTranspose", "Anti-transpose"],
+];
 
 const ACTIVE: PlayState[] = ["opening", "buffering", "playing", "paused"];
 
@@ -520,6 +557,12 @@ class Player {
   setAdjust = (adjust: Adjust) => this.#call("set_adjust", { adjust: $state.snapshot(adjust) });
   setLogo = (logo: Logo) => this.#call("set_logo", { logo: $state.snapshot(logo) });
   setMarquee = (marquee: Marquee) => this.#call("set_marquee", { marquee: $state.snapshot(marquee) });
+
+  setFilter = (id: string, filter: Filter) => this.#call("set_filter", { id, filter: $state.snapshot(filter) });
+  setTransform(transform: Transform) {
+    this.notify("osd", TRANSFORMS.find(([t]) => t === transform)?.[1] ?? "");
+    return this.#call("set_transform", { transform });
+  }
 
   setZoom(zoom: number) {
     this.notify("osd", `Zoom: ${ZOOMS.find(([z]) => z === zoom)?.[1] ?? "Fit to window"}`);

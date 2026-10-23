@@ -462,6 +462,34 @@ fn teletext_ids(text: &[(i32, bool)], listed: &[i32]) -> Vec<i32> {
 struct CoreApi {
     put_int: unsafe extern "C" fn(*mut c_void, *const c_char, i64),
     put_psz: unsafe extern "C" fn(*mut c_void, *const c_char, *const c_char),
+    /// var_Type, var_Create and var_SetChecked. vlc_value_t is an 8-byte
+    /// union passed by value, which the C ABIs pass like an i64.
+    var_type: unsafe extern "C" fn(*mut c_void, *const c_char) -> c_int,
+    var_create: unsafe extern "C" fn(*mut c_void, *const c_char, c_int) -> c_int,
+    var_set: unsafe extern "C" fn(*mut c_void, *const c_char, c_int, i64) -> c_int,
+    /// vlc_list_children and vlc_list_release.
+    list_children: unsafe extern "C" fn(*mut c_void) -> *mut VlcList,
+    list_release: unsafe extern "C" fn(*mut VlcList),
+}
+
+/// vlc_list_t: `count` held objects, one per 8-byte vlc_value_t.
+#[repr(C)]
+struct VlcList {
+    kind: c_int,
+    count: c_int,
+    values: *mut *mut c_void,
+}
+
+/// VLC variable types (VLC_VAR_*).
+const VAR_INTEGER: c_int = 0x30;
+const VAR_STRING: c_int = 0x40;
+const VAR_FLOAT: c_int = 0x50;
+
+/// A value for a VLC object variable.
+enum Var<'a> {
+    Int(i64),
+    Float(f32),
+    Str(&'a CStr),
 }
 
 /// A value for [`Vlc::set_config`].
@@ -619,6 +647,11 @@ impl Vlc {
             CoreApi {
                 put_int: *core_lib.get(b"config_PutInt\0").map_err(missing)?,
                 put_psz: *core_lib.get(b"config_PutPsz\0").map_err(missing)?,
+                var_type: *core_lib.get(b"var_Type\0").map_err(missing)?,
+                var_create: *core_lib.get(b"var_Create\0").map_err(missing)?,
+                var_set: *core_lib.get(b"var_SetChecked\0").map_err(missing)?,
+                list_children: *core_lib.get(b"vlc_list_children\0").map_err(missing)?,
+                list_release: *core_lib.get(b"vlc_list_release\0").map_err(missing)?,
             }
         };
 
@@ -1542,6 +1575,77 @@ impl Vlc {
                 lost_abuffers: s.lost_abuffers as i64,
             })
         }
+    }
+}
+
+/// Video and audio filters beyond what libVLC's API offers. libVLC 3's
+/// media player is a VLC object, and its audio output and video outputs
+/// are its children, so filters are set the way libVLC sets its own
+/// (adjust, logo, equaliser): as variables on the player, which new outputs
+/// inherit, and on the outputs that exist, which apply them at once.
+impl Vlc {
+    /// Sets an object variable, creating it if the object doesn't have it.
+    fn set_var(&self, obj: *mut c_void, name: &str, value: &Var) {
+        let n = cstr(name);
+        let (ty, bits) = match value {
+            Var::Int(v) => (VAR_INTEGER, *v),
+            Var::Float(v) => (VAR_FLOAT, v.to_bits() as i64),
+            Var::Str(v) => (VAR_STRING, v.as_ptr() as i64),
+        };
+        unsafe {
+            if (self.core.var_type)(obj, n.as_ptr()) == 0 {
+                (self.core.var_create)(obj, n.as_ptr(), ty);
+            }
+            (self.core.var_set)(obj, n.as_ptr(), ty, bits);
+        }
+    }
+
+    /// Calls `f` with each of the player's child objects of `kind`
+    /// ("audio output" or "video output"), held for the call.
+    fn each_child(&self, kind: &str, f: impl Fn(*mut c_void)) {
+        unsafe {
+            let list = (self.core.list_children)(self.mp);
+            if list.is_null() {
+                return;
+            }
+            for i in 0..(*list).count.max(0) as usize {
+                let obj = *(*list).values.add(i);
+                // vlc_object_t starts with `const char *object_type`.
+                let ty = *(obj as *const *const c_char);
+                if !ty.is_null() && CStr::from_ptr(ty).to_bytes() == kind.as_bytes() {
+                    f(obj);
+                }
+            }
+            (self.core.list_release)(list);
+        }
+    }
+
+    /// Sets the "video-filter" chain, like "transform{type=90}:sharpen".
+    /// The video on screen rebuilds its filters; new videos inherit it.
+    pub fn set_video_filters(&self, chain: &str) {
+        let c = cstr(chain);
+        self.set_var(self.mp, "video-filter", &Var::Str(&c));
+        self.each_child("video output", |vout| self.set_var(vout, "video-filter", &Var::Str(&c)));
+    }
+
+    /// Sets the audio filters' settings, then the "audio-filter" chain. Most
+    /// filters follow setting changes as they play; with `restart` the
+    /// chain is rebuilt so they all start again from the settings.
+    pub fn set_audio_filters(&self, chain: &str, params: &[crate::effects::AudioParam], restart: bool) {
+        let c = cstr(chain);
+        let empty = cstr("");
+        let apply = |obj: *mut c_void| {
+            for p in params {
+                let value = if p.int { Var::Int(p.value.round() as i64) } else { Var::Float(p.value) };
+                self.set_var(obj, p.name, &value);
+            }
+            if restart {
+                self.set_var(obj, "audio-filter", &Var::Str(&empty));
+            }
+            self.set_var(obj, "audio-filter", &Var::Str(&c));
+        };
+        apply(self.mp);
+        self.each_child("audio output", apply);
     }
 }
 

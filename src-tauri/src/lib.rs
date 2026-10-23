@@ -38,7 +38,7 @@ use tauri::{AppHandle, Emitter, Manager, RunEvent, WebviewUrl, WebviewWindowBuil
 use bookmarks::{Bookmark, Bookmarks};
 use capture::{Capture, Devices};
 use disc::{Disc, DiscKind};
-use effects::{Adjust, Effects, Equalizer, Logo, Marquee, StereoMode};
+use effects::{Adjust, Effects, Equalizer, Filter, FilterSpec, Logo, Marquee, StereoMode, Transform};
 use history::{History, UiEntry};
 use library::{Library, LibraryItem};
 use meta::MetaCache;
@@ -772,6 +772,21 @@ impl Core {
             effects.clone()
         };
         let _ = self.app.emit("player://effects", effects);
+    }
+
+    /// Applies the video filters (rotation, colour adjustments, effects).
+    fn apply_video_filters(&self) {
+        let chain = self.effects().video_chain();
+        self.vlc.set_video_filters(&chain);
+    }
+
+    /// Applies the audio filters (equaliser and effects); `restart` rebuilds them.
+    fn apply_audio_filters(&self, restart: bool) {
+        let (chain, params) = {
+            let effects = self.effects();
+            (effects.audio_chain(), effects.audio_params())
+        };
+        self.vlc.set_audio_filters(&chain, &params, restart);
     }
 
     fn emit_playlist(&self) {
@@ -1681,6 +1696,8 @@ fn equalizer_info(player: tauri::State<Player>) -> Result<EqualizerInfo, String>
 fn apply_equalizer(core: &Core, eq: Equalizer) {
     core.vlc.set_equalizer(eq.enabled.then_some((eq.preamp, eq.bands.as_slice())));
     core.update_effects(|e| e.equalizer = eq);
+    // libVLC replaces the audio filters with just the equaliser.
+    core.apply_audio_filters(false);
 }
 
 /// Loads one of libVLC's presets and turns the equaliser on.
@@ -1714,6 +1731,54 @@ fn set_adjust(player: tauri::State<Player>, adjust: Adjust) -> Res {
     let adjust = adjust.normalized();
     core.vlc.set_adjust(&adjust);
     core.update_effects(|e| e.adjust = adjust);
+    // libVLC keeps adjust in the video filter chain, along with the others.
+    core.apply_video_filters();
+    Ok(())
+}
+
+#[derive(Serialize)]
+struct FilterSpecs {
+    video: &'static [FilterSpec],
+    audio: &'static [FilterSpec],
+}
+
+/// The video and audio filters the effects panel offers.
+#[tauri::command]
+fn filter_specs() -> FilterSpecs {
+    FilterSpecs { video: effects::VIDEO_FILTERS, audio: effects::AUDIO_FILTERS }
+}
+
+/// Turns a video or audio filter on or off, or changes its settings.
+#[tauri::command]
+fn set_filter(player: tauri::State<Player>, id: String, filter: Filter) -> Res {
+    let core = player.core()?;
+    let audio = effects::AUDIO_FILTERS.iter().any(|s| s.id == id);
+    let (known, crossfeed_changed) = {
+        let mut effects = core.effects();
+        let crossfeed = |e: &Effects| e.audio_params().into_iter().find(|p| p.name == "stereowiden-crossfeed").map(|p| p.value);
+        let before = crossfeed(&effects);
+        let known = effects.set_filter(&id, filter);
+        (known, crossfeed(&effects) != before)
+    };
+    if !known {
+        return Err(format!("no such filter: {id}"));
+    }
+    if audio {
+        // VLC 3's stereo widener applies a new crossfeed as feedback, so it
+        // only takes crossfeed when it starts.
+        core.apply_audio_filters(crossfeed_changed);
+    } else {
+        core.apply_video_filters();
+    }
+    core.update_effects(|_| {});
+    Ok(())
+}
+
+#[tauri::command]
+fn set_transform(player: tauri::State<Player>, transform: Transform) -> Res {
+    let core = player.core()?;
+    core.update_effects(|e| e.transform = transform);
+    core.apply_video_filters();
     Ok(())
 }
 
@@ -2230,6 +2295,9 @@ pub fn run() {
             set_equalizer_preset,
             set_equalizer,
             set_adjust,
+            filter_specs,
+            set_filter,
+            set_transform,
             set_logo,
             set_marquee,
             set_zoom,

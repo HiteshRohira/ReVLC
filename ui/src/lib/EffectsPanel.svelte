@@ -3,15 +3,17 @@
   import { open as openDialog } from "@tauri-apps/plugin-dialog";
   import { RotateCcw, X } from "@lucide/svelte";
   import Select from "./Select.svelte";
-  import { player, DEFAULT_EFFECTS, type Adjust, type Equalizer, type Logo, type Marquee } from "./player.svelte";
+  import { player, DEFAULT_EFFECTS, TRANSFORMS, type Adjust, type Equalizer, type Filter, type FilterParam, type FilterSpec, type Logo, type Marquee } from "./player.svelte";
   import { ui } from "./ui.svelte";
 
-  const TABS = [["equalizer", "Equaliser"], ["colour", "Colour"], ["overlays", "Overlays"]] as const;
+  const TABS = [["equalizer", "Equaliser"], ["audio", "Audio"], ["colour", "Colour"], ["video", "Video"], ["overlays", "Overlays"]] as const;
   let tab = $state<(typeof TABS)[number][0]>("equalizer");
 
   let presets = $state<string[]>([]);
   let bands = $state<number[]>([]);
   invoke<{ presets: string[]; bands: number[] }>("equalizer_info").then((info) => ({ presets, bands } = info), () => {});
+  let specs = $state<{ video: FilterSpec[]; audio: FilterSpec[] }>({ video: [], audio: [] });
+  invoke<typeof specs>("filter_specs").then((s) => (specs = s), () => {});
 
   const fx = $derived(player.effects);
   const eq = $derived(fx.equalizer);
@@ -27,6 +29,21 @@
     player.effects.adjust = { ...fx.adjust, ...patch };
     player.setAdjust(player.effects.adjust);
   }
+  // A filter's settings as shown: missing ones take the default.
+  const filterOf = (spec: FilterSpec): Filter => {
+    const f = fx.filters[spec.id];
+    return { enabled: f?.enabled ?? false, values: Object.fromEntries(spec.params.map((p) => [p.key, f?.values[p.key] ?? p.default])) };
+  };
+  function setFilter(spec: FilterSpec, patch: Partial<Filter>) {
+    const next = { ...filterOf(spec), ...patch };
+    player.effects.filters = { ...fx.filters, [spec.id]: next };
+    player.setFilter(spec.id, next);
+  }
+  const paramText = (p: FilterParam, v: number) => {
+    const n = p.int ? String(Math.round(v)) : String(Math.round(v * 100) / 100);
+    return p.unit === "°" || p.unit.startsWith(":") ? `${n}${p.unit}` : p.unit ? `${n} ${p.unit}` : n;
+  };
+
   function setLogo(patch: Partial<Logo>) {
     player.effects.logo = { ...fx.logo, ...patch };
     player.setLogo(player.effects.logo);
@@ -65,6 +82,21 @@
 
 {#snippet sw(on: boolean, label: string, set: (on: boolean) => void)}
   <button class="switch" class:on role="switch" aria-checked={on} aria-label={label} onclick={() => set(!on)}></button>
+{/snippet}
+
+{#snippet filters(list: FilterSpec[])}
+  {#each list as spec (spec.id)}
+    {@const f = filterOf(spec)}
+    <div class="line"><span>{spec.label}</span>{@render sw(f.enabled, spec.label, (on) => setFilter(spec, { enabled: on }))}</div>
+    {#if f.enabled}
+      <div class="params">
+        {#each spec.params as p (p.key)}
+          {@render slider(p.label, f.values[p.key], p.min, p.max, p.step, paramText(p, f.values[p.key]),
+            (v) => setFilter(spec, { values: { ...f.values, [p.key]: v } }))}
+        {/each}
+      </div>
+    {/if}
+  {/each}
 {/snippet}
 
 {#snippet slider(label: string, value: number, min: number, max: number, step: number, text: string, set: (v: number) => void, disabled = false)}
@@ -117,6 +149,12 @@
         {/each}
       </div>
       <p class="note">dB, from −20 to +20. Stays on for everything you play until ReVLC quits.</p>
+    {:else if tab === "audio"}
+      {@render filters(specs.audio)}
+      <p class="note">Like the equaliser, these stay on for everything you play until ReVLC quits.</p>
+    {:else if tab === "video"}
+      <div class="line"><span>Rotate / flip</span><Select value={fx.transform} options={TRANSFORMS} onchange={(t) => player.setTransform(t)} /></div>
+      {@render filters(specs.video)}
     {:else if tab === "colour"}
       <div class="line"><span>Adjust colours</span>{@render sw(fx.adjust.enabled, "Adjust colours", (on) => setAdjust({ enabled: on }))}</div>
       {#each ADJUST as [key, label, min, max, step, format]}
@@ -158,7 +196,7 @@
     top: 0;
     right: 0;
     bottom: 0;
-    width: 360px;
+    width: 380px;
     display: flex;
     flex-direction: column;
     background: var(--panel);
@@ -209,7 +247,7 @@
     flex: 1;
     height: 28px;
     border-radius: 7px;
-    font-size: 12.5px;
+    font-size: 12px;
     color: var(--muted);
   }
   .tabs button.on {
@@ -240,6 +278,11 @@
   }
   .slider {
     padding: 6px 0;
+  }
+  .params {
+    margin: 0 0 8px;
+    padding: 2px 0 2px 12px;
+    border-left: 2px solid var(--border);
   }
   .slider .top {
     display: flex;
