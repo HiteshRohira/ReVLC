@@ -1,5 +1,7 @@
 <script lang="ts">
+  import { untrack } from "svelte";
   import { Captions, ChevronLeft, ListVideo, Maximize, Minimize, Music2, Settings, SkipBack, SkipForward, Volume1, Volume2, VolumeX } from "@lucide/svelte";
+  import EffectsPanel from "./EffectsPanel.svelte";
   import QueuePanel from "./QueuePanel.svelte";
   import SeekBar from "./SeekBar.svelte";
   import SettingsMenu from "./SettingsMenu.svelte";
@@ -44,10 +46,12 @@
     };
   });
 
+  // The count is written, not depended on: reading it here would make the
+  // effect rerun on its own write, which can loop (it froze the UI on Windows).
   $effect(() => {
     if (!ui.menu) return;
-    ui.openMenus++;
-    return () => ui.openMenus--;
+    untrack(() => ui.openMenus++);
+    return () => untrack(() => ui.openMenus--);
   });
 
   function onWindowPointer(e: PointerEvent) {
@@ -126,6 +130,7 @@
 </div>
 
 {#if ui.playlistOpen}<QueuePanel {onadd} />{/if}
+{#if ui.effectsOpen}<EffectsPanel />{/if}
 
 <style>
   .player {

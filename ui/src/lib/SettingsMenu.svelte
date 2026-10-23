@@ -1,15 +1,16 @@
 <script lang="ts">
   import { invoke } from "@tauri-apps/api/core";
   import { open as openDialog } from "@tauri-apps/plugin-dialog";
-  import { AudioLines, Bookmark, BookmarkPlus, Camera, Check, ChevronLeft, ChevronRight, Crop, FileUp, Gauge, ListTree, Moon, Repeat, Rows3, Settings2, X } from "@lucide/svelte";
-  import { player, trackName, formatTime, ASPECT_RATIOS, CROPS, SLEEP_PRESETS, SPEEDS, SUBTITLE_EXTENSIONS, type Track } from "./player.svelte";
+  import { AudioLines, Bookmark, BookmarkPlus, Camera, Check, ChevronLeft, ChevronRight, Crop, FileUp, Film, Gauge, Info, ListTree, Moon, Repeat, Rows3, Settings2, SlidersVertical, X } from "@lucide/svelte";
+  import { player, trackName, formatTime, ASPECT_RATIOS, CROPS, SLEEP_PRESETS, SPEEDS, STEREO_MODES, SUBTITLE_EXTENSIONS, TELETEXT_INDEX, TELETEXT_KEYS, ZOOMS, type Track } from "./player.svelte";
+  import { ui } from "./ui.svelte";
   import { effectiveBindings, formatBinding } from "./actions";
   import { settings } from "./settings.svelte";
 
   // "subtitles" is the subtitle button's menu; "settings" is the gear menu.
   let { kind = "settings", onclose }: { kind?: "settings" | "subtitles"; onclose: () => void } = $props();
 
-  type Page = "root" | "speed" | "audio" | "subtitles" | "crop" | "chapters" | "loop" | "bookmarks" | "sleep";
+  type Page = "root" | "speed" | "audio" | "video" | "subtitles" | "crop" | "chapters" | "loop" | "bookmarks" | "sleep";
   // svelte-ignore state_referenced_locally
   let page = $state<Page>(kind === "subtitles" ? "subtitles" : "root");
 
@@ -19,6 +20,15 @@
   const t = $derived(player.tracks);
   const name = (list: Track[], id: number) => trackName(list.find((x) => x.id === id)?.name ?? "Off");
   const speedLabel = $derived(Math.abs(s.rate - 1) < 0.01 ? "Normal" : `${Math.round(s.rate * 100) / 100}×`);
+  const zoomLabel = $derived(ZOOMS.find(([z]) => z === player.effects.zoom)?.[1] ?? "Fit to window");
+  const videoLabel = $derived(t.video.length > 2 ? name(t.video, t.videoCurrent) : player.effects.zoom ? zoomLabel : "Fit to window");
+  // The teletext page being typed.
+  let pageText = $state("");
+  function goToPage() {
+    const page = Number(pageText);
+    if (Number.isInteger(page) && page >= 100 && page <= 899) player.setTeletext(page);
+    pageText = "";
+  }
   const cropLabel = $derived(
     player.crop ? `Crop ${player.crop}` : player.aspect ? player.aspect : "Auto",
   );
@@ -79,6 +89,7 @@
   {#if page === "root"}
     {@render item("Playback speed", speedLabel, "speed", Gauge)}
     {@render item("Audio", name(t.audio, t.audioCurrent), "audio", AudioLines)}
+    {#if s.hasVideo || t.video.length > 1}{@render item("Video", videoLabel, "video", Film)}{/if}
     {@render item("Crop & aspect", cropLabel, "crop", Crop)}
     <hr />
     {#if hasChapters}{@render item("Chapters", chapterLabel, "chapters", ListTree)}{/if}
@@ -93,6 +104,12 @@
       <Camera size={18} /><span class="lab">Take snapshot</span><em>{key("snapshot")}</em>
     </button>
     <hr />
+    <button class="it" onclick={() => { ui.effectsOpen = true; onclose(); }}>
+      <SlidersVertical size={18} /><span class="lab">Effects and filters…</span><em>{key("effects")}</em>
+    </button>
+    <button class="it" onclick={() => { ui.infoTab = "general"; ui.dialog = "info"; onclose(); }}>
+      <Info size={18} /><span class="lab">Media information…</span><em>{key("mediaInfo")}</em>
+    </button>
     <button class="it" onclick={() => { invoke("open_settings"); onclose(); }}>
       <Settings2 size={18} /><span class="lab">More settings…</span><em>{formatBinding("Cmd+,")}</em>
     </button>
@@ -109,7 +126,25 @@
       <p class="empty">No audio tracks</p>
     {/each}
     <hr />
+    <h6>Stereo mode</h6>
+    <div class="cols">
+      {#each STEREO_MODES as [mode, label]}{@render choice(label, player.effects.stereo === mode, () => player.setStereoMode(mode))}{/each}
+    </div>
+    <hr />
     {@render delay("Audio delay", s.audioDelay, (v) => player.setAudioDelay(v))}
+  {:else if page === "video"}
+    {@render header("Video")}
+    {#if t.video.length > 1}
+      <h6>Track</h6>
+      {#each t.video as track (track.id)}
+        {@render choice(trackName(track.name), track.id === t.videoCurrent, () => player.setVideoTrack(track.id))}
+      {/each}
+      <hr />
+    {/if}
+    <h6>Zoom</h6>
+    {#each ZOOMS as [zoom, label]}
+      {@render choice(label, player.effects.zoom === zoom, () => player.setZoom(zoom), zoom === 0 ? key("resetZoom") : undefined)}
+    {/each}
   {:else if page === "subtitles"}
     <h5>Subtitles</h5>
     <hr />
@@ -121,6 +156,25 @@
       {/each}
     </div>
     <button class="it" onclick={loadSubtitle}><FileUp size={18} /><span class="lab">Add from file…</span></button>
+    {#if t.teletext}
+      <hr />
+      <button class="it" role="menuitemcheckbox" aria-checked={t.teletextOn} onclick={() => player.setTeletext(t.teletextOn ? 0 : 100)}>
+        <span class="lab">Teletext</span><span class="tog" class:on={t.teletextOn}></span>
+      </button>
+      {#if t.teletextOn}
+        <div class="ttx">
+          <input class="page tnum" inputmode="numeric" maxlength="3" placeholder="Page" aria-label="Go to teletext page (100–899)" bind:value={pageText}
+            onkeydown={(e) => { e.stopPropagation(); if (e.key === "Enter") goToPage(); }} />
+          {#each TELETEXT_KEYS as [label, code, color]}
+            <button class="key" style="--k: {color}" data-tip={label} aria-label="{label} key" onclick={() => player.setTeletext(code)}></button>
+          {/each}
+          <button class="mini" onclick={() => player.setTeletext(TELETEXT_INDEX)}>Index</button>
+        </div>
+        <button class="it" role="menuitemcheckbox" aria-checked={player.effects.teletextTransparent} onclick={() => player.setTeletextTransparent(!player.effects.teletextTransparent)}>
+          <span class="lab">Transparent background</span><span class="tog" class:on={player.effects.teletextTransparent}></span>
+        </button>
+      {/if}
+    {/if}
     <hr />
     {@render delay("Subtitle delay", s.subtitleDelay, (v) => player.setSubtitleDelay(v))}
   {:else if page === "chapters"}
@@ -388,6 +442,35 @@
     color: var(--text);
     font: inherit;
     outline: none;
+  }
+  .ttx {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 4px 16px 8px;
+  }
+  .page {
+    width: 54px;
+    height: 26px;
+    padding: 0 8px;
+    border-radius: 7px;
+    border: 1px solid var(--border);
+    background: rgb(0 0 0 / 0.3);
+    color: var(--text);
+    font: inherit;
+    outline: none;
+  }
+  .page:focus {
+    border-color: var(--acc);
+  }
+  .key {
+    width: 22px;
+    height: 22px;
+    border-radius: 6px;
+    background: var(--k);
+  }
+  .key:hover {
+    filter: brightness(1.15);
   }
   .cols {
     display: grid;

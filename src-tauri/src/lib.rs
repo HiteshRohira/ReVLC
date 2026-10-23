@@ -1,6 +1,8 @@
 mod bookmarks;
 mod capture;
+mod cli;
 mod disc;
+mod effects;
 mod history;
 mod library;
 #[cfg_attr(not(any(target_os = "macos", windows)), allow(dead_code))]
@@ -36,13 +38,14 @@ use tauri::{AppHandle, Emitter, Manager, RunEvent, WebviewUrl, WebviewWindowBuil
 use bookmarks::{Bookmark, Bookmarks};
 use capture::{Capture, Devices};
 use disc::{Disc, DiscKind};
+use effects::{Adjust, Effects, Equalizer, Filter, FilterSpec, Logo, Marquee, StereoMode, Transform};
 use history::{History, UiEntry};
 use library::{Library, LibraryItem};
 use meta::MetaCache;
 use playlist::{Item, Playlist, Repeat, SortKey};
 use playlist_file::file_uri;
 use settings::{Resume, Settings};
-use vlc::{Chapter, Navigate, State, Title, Track, Vlc, event};
+use vlc::{Chapter, MediaInfo, Navigate, State, Stats, Title, Track, Vlc, event};
 
 struct Core {
     vlc: Vlc,
@@ -94,6 +97,15 @@ struct Core {
     history_write: Mutex<()>,
     /// Held while applying a settings change, so changes apply in order.
     settings_change: Mutex<()>,
+    /// Equaliser, stereo mode, video effects and zoom; they stay on from
+    /// one item to the next.
+    effects: Mutex<Effects>,
+    /// The teletext page last asked for, and the media generation it was for.
+    teletext_page: Mutex<Option<(u64, i32)>>,
+    /// `--fullscreen`: video goes fullscreen when it starts, this session.
+    start_fullscreen: bool,
+    /// `--play-and-exit`: quit when the queue has played to its end.
+    play_and_exit: bool,
 }
 
 struct LibraryScan {
@@ -245,8 +257,20 @@ struct PlayerState {
 struct Tracks {
     audio: Vec<Track>,
     audio_current: i32,
+    video: Vec<Track>,
+    video_current: i32,
     subtitles: Vec<Track>,
     subtitle_current: i32,
+    /// Whether what's playing has teletext, and whether a teletext track is selected.
+    teletext: bool,
+    teletext_on: bool,
+}
+
+#[derive(Clone, Serialize)]
+struct EqualizerInfo {
+    presets: Vec<String>,
+    /// Band centre frequencies in Hz.
+    bands: Vec<f32>,
 }
 
 #[derive(Clone, Serialize)]
@@ -279,6 +303,9 @@ struct Snapshot {
     chapters: Vec<Chapter>,
     titles: Vec<Title>,
     bookmarks: Vec<Bookmark>,
+    effects: Effects,
+    /// `--fullscreen` was given.
+    start_fullscreen: bool,
     engine: Result<String, String>,
     early: Early,
 }
@@ -716,8 +743,12 @@ impl Core {
         Tracks {
             audio: v.audio_tracks(),
             audio_current: v.audio_track(),
+            video: v.video_tracks(),
+            video_current: v.video_track(),
             subtitles: v.subtitle_tracks(),
             subtitle_current: v.subtitle_track(),
+            teletext: !v.teletext_tracks().is_empty(),
+            teletext_on: v.teletext_on(),
         }
     }
 
@@ -727,6 +758,35 @@ impl Core {
 
     fn emit_tracks(&self) {
         let _ = self.app.emit("player://tracks", self.tracks());
+    }
+
+    fn effects(&self) -> MutexGuard<'_, Effects> {
+        self.effects.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Changes the effects with `change`, applies them, and tells the UI.
+    fn update_effects(&self, change: impl FnOnce(&mut Effects)) {
+        let effects = {
+            let mut effects = self.effects();
+            change(&mut effects);
+            effects.clone()
+        };
+        let _ = self.app.emit("player://effects", effects);
+    }
+
+    /// Applies the video filters (rotation, colour adjustments, effects).
+    fn apply_video_filters(&self) {
+        let chain = self.effects().video_chain();
+        self.vlc.set_video_filters(&chain);
+    }
+
+    /// Applies the audio filters (equaliser and effects); `restart` rebuilds them.
+    fn apply_audio_filters(&self, restart: bool) {
+        let (chain, params) = {
+            let effects = self.effects();
+            (effects.audio_chain(), effects.audio_params())
+        };
+        self.vlc.set_audio_filters(&chain, &params, restart);
     }
 
     fn emit_playlist(&self) {
@@ -773,7 +833,10 @@ impl Core {
         *self.ab_loop() = (None, None);
         *self.resume.lock().unwrap_or_else(|e| e.into_inner()) = None;
         if in_history(uri) {
-            self.set_resume(uri);
+            // A start time from the command line says where to start.
+            if !item.options.iter().any(|o| o.starts_with(":start-time=")) {
+                self.set_resume(uri);
+            }
             self.history().touch(uri, title);
             self.save_history();
         }
@@ -827,6 +890,12 @@ impl Core {
     /// new item. Folders add their media (and join the library); playlist
     /// files add their entries.
     fn add(&self, uris: Vec<String>, play: bool) -> Result<(), String> {
+        self.add_with_options(uris, play, &[])
+    }
+
+    /// [`Core::add`], giving each new item the libVLC `options` (from the
+    /// command line, like ":start-time=30").
+    fn add_with_options(&self, uris: Vec<String>, play: bool, options: &[String]) -> Result<(), String> {
         let mut items = Vec::new();
         let mut subtitles = Vec::new();
         for uri in uris.into_iter().map(playlist_file::native_path) {
@@ -852,15 +921,18 @@ impl Core {
                 items.push(Item::new(uri));
             }
         }
+        for item in &mut items {
+            item.options.extend(options.iter().cloned());
+        }
         self.add_with_subtitles(items, subtitles, play)
     }
 
     /// Plays files the system handed us on the main thread, from another
     /// thread (see the comment above `open`).
-    fn add_from_main(self: &Arc<Self>, uris: Vec<String>) {
+    fn add_from_main(self: &Arc<Self>, uris: Vec<String>, options: Vec<String>) {
         let core = self.clone();
         thread::spawn(move || {
-            if let Err(e) = core.add(uris, true) {
+            if let Err(e) = core.add_with_options(uris, true, &options) {
                 core.notice("error", e);
             }
         });
@@ -1059,6 +1131,10 @@ fn pump_events(core: Arc<Core>, rx: Receiver<vlc::Event>) {
             }
             let stop_after_each = core.settings().stop_after_each;
             let sleep_now = std::mem::take(&mut core.sleep().after_item);
+            // Like VLC's --play-and-exit: quit once there's nothing left to play.
+            if core.play_and_exit && core.playlist().next_index(true).is_none() {
+                core.app.exit(0);
+            }
             if sleep_now {
                 core.notice("info", "Sleep timer: stopped after this item");
             } else if !stop_after_each
@@ -1089,6 +1165,11 @@ fn pump_events(core: Arc<Core>, rx: Receiver<vlc::Event>) {
             let device = core.settings().audio_device.clone();
             if !device.is_empty() {
                 core.vlc.set_audio_device(&device);
+            }
+            // The audio output picks its own stereo mode for each stream.
+            let stereo = core.effects().stereo;
+            if stereo != StereoMode::Stereo && core.vlc.stereo_mode() != stereo.code() {
+                core.vlc.set_stereo_mode(stereo.code());
             }
         }
         if has(event::PAUSED) {
@@ -1179,6 +1260,8 @@ async fn snapshot(player: tauri::State<'_, Player>) -> Result<Snapshot, String> 
             chapters: Vec::new(),
             titles: Vec::new(),
             bookmarks: Vec::new(),
+            effects: Effects::default(),
+            start_fullscreen: false,
             engine: Err(e),
             early: Early::default(),
         });
@@ -1192,6 +1275,8 @@ async fn snapshot(player: tauri::State<'_, Player>) -> Result<Snapshot, String> 
         playlist: Some(core.playlist().clone()),
         chapters: core.vlc.chapters(),
         titles: core.vlc.titles(),
+        effects: core.effects().clone(),
+        start_fullscreen: core.start_fullscreen,
         engine: Ok(format!("libVLC {}", core.vlc.version)),
         early: core.early().take().unwrap_or_default(),
     })
@@ -1586,6 +1671,194 @@ fn set_deinterlace(player: tauri::State<Player>, mode: Option<String>) -> Res {
 }
 
 #[tauri::command]
+fn set_video_track(player: tauri::State<Player>, id: i32) -> Res {
+    let core = player.core()?;
+    core.vlc.set_video_track(id);
+    core.emit_tracks();
+    Ok(())
+}
+
+#[tauri::command]
+fn set_stereo_mode(player: tauri::State<Player>, mode: StereoMode) -> Res {
+    let core = player.core()?;
+    // Kept even with nothing playing; it's applied when playback starts.
+    core.vlc.set_stereo_mode(mode.code());
+    core.update_effects(|e| e.stereo = mode);
+    Ok(())
+}
+
+#[tauri::command]
+fn equalizer_info(player: tauri::State<Player>) -> Result<EqualizerInfo, String> {
+    let vlc = &player.core()?.vlc;
+    Ok(EqualizerInfo { presets: vlc.equalizer_presets(), bands: vlc.equalizer_bands() })
+}
+
+fn apply_equalizer(core: &Core, eq: Equalizer) {
+    core.vlc.set_equalizer(eq.enabled.then_some((eq.preamp, eq.bands.as_slice())));
+    core.update_effects(|e| e.equalizer = eq);
+    // libVLC replaces the audio filters with just the equaliser.
+    core.apply_audio_filters(false);
+}
+
+/// Loads one of libVLC's presets and turns the equaliser on.
+#[tauri::command]
+fn set_equalizer_preset(player: tauri::State<Player>, index: u32) -> Res {
+    let core = player.core()?;
+    let (preamp, bands) = core.vlc.equalizer_preset(index).ok_or("no such preset")?;
+    let eq = Equalizer { enabled: true, preset: Some(index), preamp, bands }.normalized(core.vlc.equalizer_bands().len());
+    apply_equalizer(core, eq);
+    Ok(())
+}
+
+/// Sets the equaliser from the UI's values. Once they no longer match the
+/// preset they came from, it counts as a custom setting.
+#[tauri::command]
+fn set_equalizer(player: tauri::State<Player>, equalizer: Equalizer) -> Res {
+    let core = player.core()?;
+    let mut eq = equalizer.normalized(core.vlc.equalizer_bands().len());
+    if let Some(index) = eq.preset
+        && !core.vlc.equalizer_preset(index).is_some_and(|(preamp, bands)| eq.matches(preamp, &bands))
+    {
+        eq.preset = None;
+    }
+    apply_equalizer(core, eq);
+    Ok(())
+}
+
+#[tauri::command]
+fn set_adjust(player: tauri::State<Player>, adjust: Adjust) -> Res {
+    let core = player.core()?;
+    let adjust = adjust.normalized();
+    core.vlc.set_adjust(&adjust);
+    core.update_effects(|e| e.adjust = adjust);
+    // libVLC keeps adjust in the video filter chain, along with the others.
+    core.apply_video_filters();
+    Ok(())
+}
+
+#[derive(Serialize)]
+struct FilterSpecs {
+    video: &'static [FilterSpec],
+    audio: &'static [FilterSpec],
+}
+
+/// The video and audio filters the effects panel offers.
+#[tauri::command]
+fn filter_specs() -> FilterSpecs {
+    FilterSpecs { video: effects::VIDEO_FILTERS, audio: effects::AUDIO_FILTERS }
+}
+
+/// Turns a video or audio filter on or off, or changes its settings.
+#[tauri::command]
+fn set_filter(player: tauri::State<Player>, id: String, filter: Filter) -> Res {
+    let core = player.core()?;
+    let audio = effects::AUDIO_FILTERS.iter().any(|s| s.id == id);
+    let (known, crossfeed_changed) = {
+        let mut effects = core.effects();
+        let crossfeed = |e: &Effects| e.audio_params().into_iter().find(|p| p.name == "stereowiden-crossfeed").map(|p| p.value);
+        let before = crossfeed(&effects);
+        let known = effects.set_filter(&id, filter);
+        (known, crossfeed(&effects) != before)
+    };
+    if !known {
+        return Err(format!("no such filter: {id}"));
+    }
+    if audio {
+        // VLC 3's stereo widener applies a new crossfeed as feedback, so it
+        // only takes crossfeed when it starts.
+        core.apply_audio_filters(crossfeed_changed);
+    } else {
+        core.apply_video_filters();
+    }
+    core.update_effects(|_| {});
+    Ok(())
+}
+
+#[tauri::command]
+fn set_transform(player: tauri::State<Player>, transform: Transform) -> Res {
+    let core = player.core()?;
+    core.update_effects(|e| e.transform = transform);
+    core.apply_video_filters();
+    Ok(())
+}
+
+#[tauri::command]
+fn set_logo(player: tauri::State<Player>, logo: Logo) -> Res {
+    let core = player.core()?;
+    let logo = logo.normalized();
+    core.vlc.set_logo(&logo);
+    core.update_effects(|e| e.logo = logo);
+    Ok(())
+}
+
+#[tauri::command]
+fn set_marquee(player: tauri::State<Player>, marquee: Marquee) -> Res {
+    let core = player.core()?;
+    let marquee = marquee.normalized();
+    core.vlc.set_marquee(&marquee);
+    core.update_effects(|e| e.marquee = marquee);
+    Ok(())
+}
+
+#[tauri::command]
+fn set_zoom(player: tauri::State<Player>, zoom: f32) -> Res {
+    let core = player.core()?;
+    let zoom = effects::zoom_preset(zoom);
+    core.vlc.set_zoom(zoom);
+    core.update_effects(|e| e.zoom = zoom);
+    Ok(())
+}
+
+/// Shows a teletext page, sends a coloured key, or with 0 turns teletext off.
+#[tauri::command]
+fn set_teletext(player: tauri::State<Player>, page: i32) -> Res {
+    let core = player.core()?;
+    core.vlc.set_teletext(page);
+    if (1..1000).contains(&page) {
+        *core.teletext_page.lock().unwrap_or_else(|e| e.into_inner()) = Some((core.vlc.generation(), page));
+    }
+    core.emit_tracks();
+    Ok(())
+}
+
+/// Teletext's background. The decoder reads it when it starts, so a
+/// teletext track on screen is selected again to apply it. That starts it on
+/// the track's own page, so the page the user went to is asked for again
+/// once the new decoder is there.
+#[tauri::command]
+async fn set_teletext_transparent(player: tauri::State<'_, Player>, transparent: bool) -> Res {
+    off_main(player, move |core| {
+        core.vlc.set_config("vbi-opaque", &vlc::ConfigValue::Bool(!transparent));
+        if core.vlc.teletext_on() {
+            let generation = core.vlc.generation();
+            let track = core.vlc.subtitle_track();
+            core.vlc.set_subtitle_track(-1);
+            core.vlc.set_subtitle_track(track);
+            let page = *core.teletext_page.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some((g, page)) = page.filter(|(g, _)| *g == generation) {
+                thread::sleep(Duration::from_millis(400));
+                if core.vlc.generation() == g && core.vlc.subtitle_track() == track {
+                    core.vlc.set_teletext(page);
+                }
+            }
+        }
+        core.update_effects(|e| e.teletext_transparent = transparent);
+        core.emit_tracks();
+    })
+    .await
+}
+
+#[tauri::command]
+fn media_info(player: tauri::State<Player>) -> Result<Option<MediaInfo>, String> {
+    Ok(player.core()?.vlc.media_info())
+}
+
+#[tauri::command]
+fn media_stats(player: tauri::State<Player>) -> Result<Option<Stats>, String> {
+    Ok(player.core()?.vlc.stats())
+}
+
+#[tauri::command]
 async fn take_snapshot(app: AppHandle, player: tauri::State<'_, Player>) -> Res {
     // VLC's default folder: the Desktop on macOS, Pictures on Windows.
     let default = if cfg!(target_os = "macos") { app.path().desktop_dir() } else { app.path().picture_dir() };
@@ -1797,7 +2070,11 @@ fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     let settings = Settings::load(&data_dir);
     // Extra libVLC options for debugging, e.g. REVLC_VLC_ARGS="--verbose=2".
     let args: Vec<String> = std::env::var("REVLC_VLC_ARGS").unwrap_or_default().split_whitespace().map(String::from).collect();
-    let vlc = Vlc::load(resource_dir.as_deref(), &args, &settings.vlc_config(&languages));
+    let mut cli = cli::parse(std::env::args().skip(1));
+    if let Ok(cwd) = std::env::current_dir() {
+        cli.resolve_paths(&cwd);
+    }
+    let vlc = Vlc::load(resource_dir.as_deref(), &args, &cli.vlc_args, &settings.vlc_config(&languages));
     telemetry::start(&data_dir, settings.analytics, vlc.as_ref().map_or("unavailable", |v| v.version.as_str()));
     let vlc = match vlc {
         Ok(vlc) => {
@@ -1842,8 +2119,18 @@ fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
         history_saves,
         history_write: Mutex::default(),
         settings_change: Mutex::default(),
+        effects: Mutex::default(),
+        teletext_page: Mutex::default(),
+        start_fullscreen: cli.fullscreen,
+        play_and_exit: cli.play_and_exit,
         data_dir,
     });
+    if !cli.ignored.is_empty() {
+        core.notice("error", format!("Ignored command-line options: {}", cli.ignored.join(" ")));
+    }
+    if !core.vlc.rejected_args.is_empty() {
+        core.notice("error", format!("libVLC didn't accept {}, so ReVLC started without them", core.vlc.rejected_args.join(" ")));
+    }
 
     // The UI sends the real bindings once it loads; start with the defaults.
     let keys: HashMap<String, String> = [("open", "Cmd+O"), ("openFolder", "Shift+Cmd+O"), ("openUrl", "Cmd+N"), ("queue", "Cmd+L")]
@@ -1872,9 +2159,9 @@ fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     thread::Builder::new().name("vlc-events".into()).spawn(move || pump_events(pump, rx))?;
 
     // Files passed on the command line, then any Finder opened before now.
-    let mut args: Vec<String> = std::env::args().skip(1).filter(|a| !a.starts_with('-')).collect();
-    args.append(&mut EARLY_OPENS.lock().unwrap_or_else(|e| e.into_inner()));
-    let _ = core.add(args, true);
+    let _ = core.add_with_options(cli.files, true, &cli.media_options);
+    let early = std::mem::take(&mut *EARLY_OPENS.lock().unwrap_or_else(|e| e.into_inner()));
+    let _ = core.add(early, true);
 
     let window = app.get_webview_window("main").ok_or("main window missing")?;
     #[cfg(windows)]
@@ -1925,17 +2212,19 @@ pub fn run() {
     // Windows starts a new process for each file opened from Explorer; it
     // hands its files to the running copy and exits.
     #[cfg(windows)]
-    let builder = builder.plugin(tauri_plugin_single_instance::init(|app, args, _cwd| {
+    let builder = builder.plugin(tauri_plugin_single_instance::init(|app, args, cwd| {
         if let Some(window) = app.get_webview_window("main") {
             let _ = window.unminimize();
             let _ = window.set_focus();
         }
-        let uris: Vec<String> = args.into_iter().skip(1).filter(|a| !a.starts_with('-')).collect();
-        if uris.is_empty() {
+        // libVLC has started, so only the files and their start times count.
+        let mut cli = cli::parse(args.into_iter().skip(1));
+        cli.resolve_paths(Path::new(&cwd));
+        if cli.files.is_empty() {
             return;
         }
         if let Some(Ok(core)) = app.try_state::<Player>().as_deref().map(Player::core) {
-            core.add_from_main(uris);
+            core.add_from_main(cli.files, cli.media_options);
         }
     }));
     let app = builder
@@ -2000,6 +2289,22 @@ pub fn run() {
             set_aspect_ratio,
             set_crop,
             set_deinterlace,
+            set_video_track,
+            set_stereo_mode,
+            equalizer_info,
+            set_equalizer_preset,
+            set_equalizer,
+            set_adjust,
+            filter_specs,
+            set_filter,
+            set_transform,
+            set_logo,
+            set_marquee,
+            set_zoom,
+            set_teletext,
+            set_teletext_transparent,
+            media_info,
+            media_stats,
             take_snapshot,
             hide_cursor,
             playlist_remove,
@@ -2046,7 +2351,7 @@ pub fn run() {
             match handle.try_state::<Player>() {
                 Some(player) => {
                     if let Ok(core) = player.core() {
-                        core.add_from_main(uris);
+                        core.add_from_main(uris, Vec::new());
                     }
                 }
                 None => EARLY_OPENS.lock().unwrap_or_else(|e| e.into_inner()).extend(uris),

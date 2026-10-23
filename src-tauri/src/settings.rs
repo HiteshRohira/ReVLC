@@ -18,6 +18,16 @@ pub enum Resume {
     Never,
 }
 
+/// What the mouse wheel does over the video (VLC's "Mouse wheel vertical axis control").
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Wheel {
+    #[default]
+    Volume,
+    Seek,
+    None,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct Settings {
@@ -27,6 +37,7 @@ pub struct Settings {
     pub stop_after_each: bool,
     pub pause_when_minimized: bool,
     pub seekbar_chapters: bool,
+    pub wheel: Wheel,
     /// Download and install new versions in the background.
     pub auto_update: bool,
     /// Send anonymous usage and playback-quality statistics.
@@ -94,6 +105,7 @@ impl Default for Settings {
             stop_after_each: false,
             pause_when_minimized: false,
             seekbar_chapters: true,
+            wheel: Wheel::Volume,
             auto_update: true,
             analytics: true,
 
@@ -222,6 +234,9 @@ mod tests {
         assert_eq!(s.font_size, 12);
         assert_eq!(s.network_caching, 1000);
         assert_eq!(s.resume, Resume::Ask);
+        assert_eq!(s.wheel, Wheel::Volume);
+        let s: Settings = serde_json::from_str(r#"{"wheel": "seek"}"#).unwrap();
+        assert_eq!(s.wheel, Wheel::Seek);
     }
 
     #[test]

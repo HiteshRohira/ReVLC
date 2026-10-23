@@ -9,6 +9,8 @@ export interface Settings {
   stopAfterEach: boolean;
   pauseWhenMinimized: boolean;
   seekbarChapters: boolean;
+  /** What the mouse wheel does over the video. */
+  wheel: "volume" | "seek" | "none";
   autoUpdate: boolean;
   analytics: boolean;
 
