@@ -2,7 +2,7 @@
 
 A modern, lightweight media player built on libVLC.
 
-**[revlc.vercel.app](https://revlc.vercel.app)** · [Download the alpha](https://github.com/HiteshRohira/ReVLC/releases/tag/v0.2.8-alpha)
+**[revlc.vercel.app](https://revlc.vercel.app)** · [Download the alpha](https://github.com/HiteshRohira/ReVLC/releases/tag/v0.2.9-alpha)
 
 ReVLC aims for full VLC feature parity with a cleaner, faster UI. It is early:
 see the [feature parity checklist](docs/parity.md) for what works today and
