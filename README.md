@@ -71,6 +71,39 @@ and run it; it installs for the current user, no admin rights needed. The
 installer isn't code-signed yet, so if SmartScreen warns about it, choose
 **More info** → **Run anyway**.
 
+## Command line
+
+ReVLC takes files, folders and URLs like VLC does, plus some of VLC's options:
+
+```sh
+# macOS
+/Applications/ReVLC.app/Contents/MacOS/revlc [options] [files or URLs…]
+# Windows
+"%LOCALAPPDATA%\ReVLC\revlc.exe" [options] [files or URLs…]
+```
+
+| Option | What it does |
+| --- | --- |
+| `--fullscreen`, `-f` | Go fullscreen when the video starts |
+| `--start-time=SECONDS` | Start what's opened at this point (instead of where you left off) |
+| `--stop-time=SECONDS`, `--run-time=SECONDS` | Stop at this point, or after this long |
+| `--play-and-exit` | Quit once the queue has played to its end |
+| `--no-audio`, `--no-video` | Play without sound, or without picture |
+| `--` | Everything after it is a file, even if it starts with `-` |
+
+Any other `--option` goes to libVLC, so most of VLC's command-line options
+work, such as `--network-caching=3000` or `--deinterlace-mode=yadif`. Give
+values with `=` (a number after an option, as in `--network-caching 3000`,
+works too). Options libVLC doesn't know are dropped with a notice rather than
+stopping ReVLC from starting. Options that would replace ReVLC's window or
+interface, send the video elsewhere, or move libVLC's settings and plugins
+(`--intf`, `--vout`, `--sout`, `--config`, `--reset-config`, `--help` and
+similar) are ignored, also with a notice.
+
+Options given on the command line override the same setting in Settings
+until ReVLC quits. On Windows, if ReVLC is already running, it plays the new
+files (with their `--start-time` and friends) and ignores the other options.
+
 ## Building
 
 Requirements: Rust, Node 20+. On Windows, run the scripts from Git Bash.

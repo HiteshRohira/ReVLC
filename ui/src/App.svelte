@@ -79,7 +79,8 @@
   let fullscreenedFor: string | null = null;
   $effect(() => {
     const uri = currentUri;
-    if (!uri || !player.state.hasVideo || !settings.value?.startFullscreen || fullscreenedFor === uri) return;
+    const start = settings.value?.startFullscreen || player.startFullscreen;
+    if (!uri || !player.state.hasVideo || !start || fullscreenedFor === uri) return;
     fullscreenedFor = uri;
     appWindow.isFullscreen().then((fs) => {
       if (!fs) appWindow.setFullscreen(true);

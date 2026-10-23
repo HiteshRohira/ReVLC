@@ -493,6 +493,8 @@ pub struct Vlc {
     /// Hardware decoding turned off; see [`Vlc::play_media`].
     software_decoding: AtomicBool,
     pub version: String,
+    /// Command-line options libVLC wouldn't start with (see [`Vlc::load`]).
+    pub rejected_args: Vec<String>,
 }
 
 // libVLC's media player API is thread-safe.
@@ -568,10 +570,18 @@ fn opt_cstr(s: Option<&str>) -> Option<CString> {
 }
 
 impl Vlc {
-    /// `extra_args` are passed to libVLC as command-line options. `config`
-    /// is applied before the media player is created, because the player
-    /// copies some options (title display, deinterlacing) when it's made.
-    pub fn load(resource_dir: Option<&Path>, extra_args: &[String], config: &[(&str, ConfigValue)]) -> Result<Self, LoadError> {
+    /// `extra_args` are passed to libVLC as command-line options; so are
+    /// `user_args`, unless libVLC rejects them (an unknown option makes it
+    /// fail to start), in which case it starts without them and they're kept
+    /// in [`Vlc::rejected_args`]. `config` is applied before the media player
+    /// is created, because the player copies some options (title display,
+    /// deinterlacing) when it's made.
+    pub fn load(
+        resource_dir: Option<&Path>,
+        extra_args: &[String],
+        user_args: &[String],
+        config: &[(&str, ConfigValue)],
+    ) -> Result<Self, LoadError> {
         let dirs = candidate_dirs(resource_dir);
         let dir = dirs
             .iter()
@@ -623,14 +633,23 @@ impl Vlc {
             .chain(extra_args.iter().cloned())
             .map(|a| cstr(&a))
             .collect();
-        let argv: Vec<*const c_char> = args.iter().map(|a| a.as_ptr()).collect();
+        let with_user: Vec<CString> = args.iter().cloned().chain(user_args.iter().map(|a| cstr(a))).collect();
+        let argv = |args: &[CString]| -> Vec<*const c_char> { args.iter().map(|a| a.as_ptr()).collect() };
         let version = unsafe { CStr::from_ptr((api.libvlc_get_version)()) }.to_string_lossy().into_owned();
         // `put_config` relies on how libVLC 3 lays out its instance.
         if !version.starts_with("3.") {
             return Err(LoadError::new("version", format!("ReVLC needs libVLC 3, but {} has libVLC {version}", dir.display())));
         }
         unsafe {
-            let inst = (api.libvlc_new)(argv.len() as c_int, argv.as_ptr());
+            let mut rejected_args = Vec::new();
+            let full = argv(&with_user);
+            let mut inst = (api.libvlc_new)(full.len() as c_int, full.as_ptr());
+            if inst.is_null() && !user_args.is_empty() {
+                eprintln!("revlc: libVLC rejected {}: {}", user_args.join(" "), errmsg(&api));
+                rejected_args = user_args.to_vec();
+                let base = argv(&args);
+                inst = (api.libvlc_new)(base.len() as c_int, base.as_ptr());
+            }
             if inst.is_null() {
                 return Err(LoadError::new(
                     "init",
@@ -655,7 +674,7 @@ impl Vlc {
             // The web UI handles all keyboard and mouse input.
             (api.libvlc_video_set_key_input)(mp, 0);
             (api.libvlc_video_set_mouse_input)(mp, 0);
-            Ok(Self { api, core, inst, mp, software_decoding: AtomicBool::new(false), version })
+            Ok(Self { api, core, inst, mp, software_decoding: AtomicBool::new(false), version, rejected_args })
         }
     }
 

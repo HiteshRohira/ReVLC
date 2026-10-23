@@ -231,6 +231,8 @@ interface Snapshot {
   titles: Title[];
   bookmarks: Bookmark[];
   effects: Effects;
+  /** `--fullscreen` was given on the command line. */
+  startFullscreen: boolean;
   engine: { Ok: string } | { Err: string };
   /** What was sent before the UI was listening. */
   early: { notices: { kind: Notice["kind"]; text: string }[]; resume: ResumeOffer | null };
@@ -300,6 +302,8 @@ class Player {
   });
   tracks = $state<Tracks>({ audio: [], audioCurrent: -1, video: [], videoCurrent: -1, subtitles: [], subtitleCurrent: -1, teletext: false, teletextOn: false });
   effects = $state<Effects>(structuredClone(DEFAULT_EFFECTS));
+  /** `--fullscreen` was given on the command line. */
+  startFullscreen = $state(false);
   playlist = $state<Playlist>({ items: [], current: null, repeat: "off", shuffle: false });
   chapters = $state<Chapter[]>([]);
   titles = $state<Title[]>([]);
@@ -364,6 +368,7 @@ class Player {
     this.titles = snap.titles;
     this.bookmarks = snap.bookmarks;
     this.effects = snap.effects;
+    this.startFullscreen = snap.startFullscreen;
     for (const n of snap.early.notices) this.notify(n.kind, n.text);
     if (snap.early.resume) this.offerResume(snap.early.resume);
     await Promise.all([this.loadHistory(), this.loadLibrary()]);

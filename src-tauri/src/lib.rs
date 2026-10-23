@@ -1,5 +1,6 @@
 mod bookmarks;
 mod capture;
+mod cli;
 mod disc;
 mod effects;
 mod history;
@@ -101,6 +102,10 @@ struct Core {
     effects: Mutex<Effects>,
     /// The teletext page last asked for, and the media generation it was for.
     teletext_page: Mutex<Option<(u64, i32)>>,
+    /// `--fullscreen`: video goes fullscreen when it starts, this session.
+    start_fullscreen: bool,
+    /// `--play-and-exit`: quit when the queue has played to its end.
+    play_and_exit: bool,
 }
 
 struct LibraryScan {
@@ -299,6 +304,8 @@ struct Snapshot {
     titles: Vec<Title>,
     bookmarks: Vec<Bookmark>,
     effects: Effects,
+    /// `--fullscreen` was given.
+    start_fullscreen: bool,
     engine: Result<String, String>,
     early: Early,
 }
@@ -811,7 +818,10 @@ impl Core {
         *self.ab_loop() = (None, None);
         *self.resume.lock().unwrap_or_else(|e| e.into_inner()) = None;
         if in_history(uri) {
-            self.set_resume(uri);
+            // A start time from the command line says where to start.
+            if !item.options.iter().any(|o| o.starts_with(":start-time=")) {
+                self.set_resume(uri);
+            }
             self.history().touch(uri, title);
             self.save_history();
         }
@@ -865,6 +875,12 @@ impl Core {
     /// new item. Folders add their media (and join the library); playlist
     /// files add their entries.
     fn add(&self, uris: Vec<String>, play: bool) -> Result<(), String> {
+        self.add_with_options(uris, play, &[])
+    }
+
+    /// [`Core::add`], giving each new item the libVLC `options` (from the
+    /// command line, like ":start-time=30").
+    fn add_with_options(&self, uris: Vec<String>, play: bool, options: &[String]) -> Result<(), String> {
         let mut items = Vec::new();
         let mut subtitles = Vec::new();
         for uri in uris.into_iter().map(playlist_file::native_path) {
@@ -890,15 +906,18 @@ impl Core {
                 items.push(Item::new(uri));
             }
         }
+        for item in &mut items {
+            item.options.extend(options.iter().cloned());
+        }
         self.add_with_subtitles(items, subtitles, play)
     }
 
     /// Plays files the system handed us on the main thread, from another
     /// thread (see the comment above `open`).
-    fn add_from_main(self: &Arc<Self>, uris: Vec<String>) {
+    fn add_from_main(self: &Arc<Self>, uris: Vec<String>, options: Vec<String>) {
         let core = self.clone();
         thread::spawn(move || {
-            if let Err(e) = core.add(uris, true) {
+            if let Err(e) = core.add_with_options(uris, true, &options) {
                 core.notice("error", e);
             }
         });
@@ -1097,6 +1116,10 @@ fn pump_events(core: Arc<Core>, rx: Receiver<vlc::Event>) {
             }
             let stop_after_each = core.settings().stop_after_each;
             let sleep_now = std::mem::take(&mut core.sleep().after_item);
+            // Like VLC's --play-and-exit: quit once there's nothing left to play.
+            if core.play_and_exit && core.playlist().next_index(true).is_none() {
+                core.app.exit(0);
+            }
             if sleep_now {
                 core.notice("info", "Sleep timer: stopped after this item");
             } else if !stop_after_each
@@ -1223,6 +1246,7 @@ async fn snapshot(player: tauri::State<'_, Player>) -> Result<Snapshot, String> 
             titles: Vec::new(),
             bookmarks: Vec::new(),
             effects: Effects::default(),
+            start_fullscreen: false,
             engine: Err(e),
             early: Early::default(),
         });
@@ -1237,6 +1261,7 @@ async fn snapshot(player: tauri::State<'_, Player>) -> Result<Snapshot, String> 
         chapters: core.vlc.chapters(),
         titles: core.vlc.titles(),
         effects: core.effects().clone(),
+        start_fullscreen: core.start_fullscreen,
         engine: Ok(format!("libVLC {}", core.vlc.version)),
         early: core.early().take().unwrap_or_default(),
     })
@@ -1980,7 +2005,11 @@ fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     let settings = Settings::load(&data_dir);
     // Extra libVLC options for debugging, e.g. REVLC_VLC_ARGS="--verbose=2".
     let args: Vec<String> = std::env::var("REVLC_VLC_ARGS").unwrap_or_default().split_whitespace().map(String::from).collect();
-    let vlc = Vlc::load(resource_dir.as_deref(), &args, &settings.vlc_config(&languages));
+    let mut cli = cli::parse(std::env::args().skip(1));
+    if let Ok(cwd) = std::env::current_dir() {
+        cli.resolve_paths(&cwd);
+    }
+    let vlc = Vlc::load(resource_dir.as_deref(), &args, &cli.vlc_args, &settings.vlc_config(&languages));
     telemetry::start(&data_dir, settings.analytics, vlc.as_ref().map_or("unavailable", |v| v.version.as_str()));
     let vlc = match vlc {
         Ok(vlc) => {
@@ -2027,8 +2056,16 @@ fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
         settings_change: Mutex::default(),
         effects: Mutex::default(),
         teletext_page: Mutex::default(),
+        start_fullscreen: cli.fullscreen,
+        play_and_exit: cli.play_and_exit,
         data_dir,
     });
+    if !cli.ignored.is_empty() {
+        core.notice("error", format!("Ignored command-line options: {}", cli.ignored.join(" ")));
+    }
+    if !core.vlc.rejected_args.is_empty() {
+        core.notice("error", format!("libVLC didn't accept {}, so ReVLC started without them", core.vlc.rejected_args.join(" ")));
+    }
 
     // The UI sends the real bindings once it loads; start with the defaults.
     let keys: HashMap<String, String> = [("open", "Cmd+O"), ("openFolder", "Shift+Cmd+O"), ("openUrl", "Cmd+N"), ("queue", "Cmd+L")]
@@ -2057,9 +2094,9 @@ fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     thread::Builder::new().name("vlc-events".into()).spawn(move || pump_events(pump, rx))?;
 
     // Files passed on the command line, then any Finder opened before now.
-    let mut args: Vec<String> = std::env::args().skip(1).filter(|a| !a.starts_with('-')).collect();
-    args.append(&mut EARLY_OPENS.lock().unwrap_or_else(|e| e.into_inner()));
-    let _ = core.add(args, true);
+    let _ = core.add_with_options(cli.files, true, &cli.media_options);
+    let early = std::mem::take(&mut *EARLY_OPENS.lock().unwrap_or_else(|e| e.into_inner()));
+    let _ = core.add(early, true);
 
     let window = app.get_webview_window("main").ok_or("main window missing")?;
     #[cfg(windows)]
@@ -2110,17 +2147,19 @@ pub fn run() {
     // Windows starts a new process for each file opened from Explorer; it
     // hands its files to the running copy and exits.
     #[cfg(windows)]
-    let builder = builder.plugin(tauri_plugin_single_instance::init(|app, args, _cwd| {
+    let builder = builder.plugin(tauri_plugin_single_instance::init(|app, args, cwd| {
         if let Some(window) = app.get_webview_window("main") {
             let _ = window.unminimize();
             let _ = window.set_focus();
         }
-        let uris: Vec<String> = args.into_iter().skip(1).filter(|a| !a.starts_with('-')).collect();
-        if uris.is_empty() {
+        // libVLC has started, so only the files and their start times count.
+        let mut cli = cli::parse(args.into_iter().skip(1));
+        cli.resolve_paths(Path::new(&cwd));
+        if cli.files.is_empty() {
             return;
         }
         if let Some(Ok(core)) = app.try_state::<Player>().as_deref().map(Player::core) {
-            core.add_from_main(uris);
+            core.add_from_main(cli.files, cli.media_options);
         }
     }));
     let app = builder
@@ -2244,7 +2283,7 @@ pub fn run() {
             match handle.try_state::<Player>() {
                 Some(player) => {
                     if let Ok(core) = player.core() {
-                        core.add_from_main(uris);
+                        core.add_from_main(uris, Vec::new());
                     }
                 }
                 None => EARLY_OPENS.lock().unwrap_or_else(|e| e.into_inner()).extend(uris),
