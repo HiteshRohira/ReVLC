@@ -97,7 +97,7 @@ fn auto_update(app: &AppHandle) -> bool {
 pub fn start(app: &AppHandle) {
     app.manage(Updater::default());
     // Development builds aren't installed apps.
-    if cfg!(debug_assertions) {
+    if cfg!(debug_assertions) || cfg!(target_os = "linux") {
         return;
     }
     let app = app.clone();
@@ -112,6 +112,14 @@ pub fn start(app: &AppHandle) {
 
 /// `manual` is a check the user asked for: it reports "up to date" and errors.
 pub async fn check(app: &AppHandle, manual: bool) {
+    // Experimental .deb builds are updated through packages. The published
+    // updater manifest has no Linux entry and must never replace this build.
+    if cfg!(target_os = "linux") {
+        if manual {
+            notice(app, "info", "Linux builds are updated by installing a newer .deb package.".into());
+        }
+        return;
+    }
     let updater = app.state::<Updater>();
     if manual {
         let _ = app.emit("update://manual-check", ());

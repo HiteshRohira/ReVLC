@@ -1,0 +1,81 @@
+# Branch artifacts only. This never creates or modifies a GitHub release.
+name: Linux build
+
+on:
+  push:
+    branches: ['feat/linux-*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  linux:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+          cache-on-failure: true
+      - name: Install Linux dependencies
+        timeout-minutes: 5
+        env:
+          DEBIAN_FRONTEND: noninteractive
+          NEEDRESTART_MODE: a
+        run: |
+          # The hosted runner's Azure mirror can stall for minutes per file.
+          # Keep the distro repositories, using Ubuntu's main HTTPS archive.
+          if [[ -f /etc/apt/apt-mirrors.txt ]]; then
+            echo 'https://archive.ubuntu.com/ubuntu/' | sudo tee /etc/apt/apt-mirrors.txt
+          fi
+          if [[ -f /etc/apt/apt-mirrors-security.txt ]]; then
+            echo 'https://security.ubuntu.com/ubuntu/' | sudo tee /etc/apt/apt-mirrors-security.txt
+          fi
+          sudo --preserve-env=DEBIAN_FRONTEND,NEEDRESTART_MODE apt-get -o Acquire::http::Timeout=30 -o Acquire::Retries=2 update
+          sudo --preserve-env=DEBIAN_FRONTEND,NEEDRESTART_MODE apt-get -o Acquire::http::Timeout=30 -o Acquire::Retries=2 install -y libwebkit2gtk-4.1-dev build-essential libssl-dev librsvg2-dev libx11-dev patchelf \
+            libvlc5 libvlccore9 vlc-plugin-base vlc-plugin-video-output \
+            xvfb xdotool x11-utils openbox xcompmgr ffmpeg imagemagick python3-pil dbus-x11
+      - run: npm ci
+      - run: npm run check
+      - run: npm run build
+      - name: Clippy
+        working-directory: src-tauri
+        run: cargo clippy --locked --all-targets -- -D warnings
+      - name: Tests
+        working-directory: src-tauri
+        run: cargo test --locked
+      - name: Build the Mint / Ubuntu package
+        run: bash scripts/build-linux.sh
+      - name: Collect package and checksum
+        run: |
+          mkdir -p "$RUNNER_TEMP/linux-artifact"
+          cp src-tauri/target/release/bundle/deb/*.deb "$RUNNER_TEMP/linux-artifact/"
+          cd "$RUNNER_TEMP/linux-artifact"
+          sha256sum *.deb > SHA256SUMS
+      - name: Install and exercise the package
+        run: |
+          sudo apt-get install -y ./src-tauri/target/release/bundle/deb/*.deb
+          xvfb-run -a -s '-screen 0 1280x800x24' dbus-run-session -- bash scripts/qa/linux-smoke.sh "$RUNNER_TEMP/linux-smoke"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ReVLC-linux-mint-x64
+          path: ${{ runner.temp }}/linux-artifact/
+          if-no-files-found: warn
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: Linux-smoke-evidence
+          path: |
+            ${{ runner.temp }}/linux-smoke/screenshots/
+            ${{ runner.temp }}/linux-smoke/logs/
+          if-no-files-found: warn

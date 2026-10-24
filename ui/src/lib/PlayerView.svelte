@@ -6,7 +6,7 @@
   import SeekBar from "./SeekBar.svelte";
   import SettingsMenu from "./SettingsMenu.svelte";
   import Transport from "./Transport.svelte";
-  import { player, formatTime, genericChapter, cleanTitle } from "./player.svelte";
+  import { player, formatTime, genericChapter, cleanTitle, thumbUrl } from "./player.svelte";
   import { ui } from "./ui.svelte";
   import { modKey } from "./platform";
 
@@ -67,8 +67,14 @@
   <div class="loading" role="status" aria-label="Buffering"><div class="ring"></div></div>
 {/if}
 
-<!-- Covers the video while the controls show, so it takes the double-click too. -->
-<div class="player" class:hidden role="presentation" ondblclick={(e) => e.target === e.currentTarget && onfullscreen()}>
+<!-- Covers the video while the controls show, so it takes clicks on the video too. -->
+<div
+  class="player"
+  class:hidden
+  role="presentation"
+  onclick={(e) => e.target === e.currentTarget && player.closeStrip?.()}
+  ondblclick={(e) => e.target === e.currentTarget && onfullscreen()}
+>
   {#if !s.hasVideo}
     <div class="audio">
       {#if !spinner}
@@ -76,6 +82,10 @@
         <h1>{cleanTitle(player.current?.title ?? "")}</h1>
       {/if}
     </div>
+  {/if}
+
+  {#if player.scrubShown}
+    <img class="scrubbed" src={thumbUrl(player.scrubShown, player.scrubVersion)} alt="" draggable="false" />
   {/if}
 
   <div class="top" data-tauri-drag-region>
@@ -273,6 +283,16 @@
     position: absolute;
     right: -88px;
     bottom: 48px;
+  }
+  /* The scrubbed-to frame over the video, scaled up from a small preview. */
+  .scrubbed {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    object-fit: contain;
+    background: #000;
+    pointer-events: none;
   }
   .loading {
     position: absolute;

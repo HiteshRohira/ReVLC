@@ -42,7 +42,8 @@
       "assetProtocol": {
         "enable": true,
         "scope": [
-          "$APPCACHE/thumbs/*"
+          "$APPCACHE/thumbs/*",
+          "$APPCACHE/scrub/*"
         ]
       }
     }
@@ -137,7 +138,7 @@
       "../LICENSE": "licenses/LICENSE",
       "../licenses/": "licenses/"
     },
-    "copyright": "Copyright (C) 2026 Hitesh Rohira. GPL-3.0-or-later. Includes libVLC (LGPL-2.1-or-later) and VLC plugins from VideoLAN.",
+    "copyright": "Copyright (C) 2026 Hitesh Rohira. GPL-3.0-or-later. Includes libVLC (LGPL-2.1-or-later) and VLC plugins from VideoLAN, and FFmpeg (GPL-3.0-or-later).",
     "macOS": {
       "minimumSystemVersion": "11.0",
       "signingIdentity": "-",

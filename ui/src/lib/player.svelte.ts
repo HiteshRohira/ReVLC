@@ -350,6 +350,17 @@ class Player {
   library = $state<Library>({ folders: [], items: [] });
   /** Bumped when a thumbnail file changes, to bust the web view's image cache. */
   thumbVersion = $state(0);
+  /**
+   * Seek bar preview frames of what's playing, one every `step` ms: frame `k`
+   * is the file `{prefix}{k}.jpg`, once `ready` has it.
+   */
+  scrub = $state<{ run: number; prefix: string; step: number; ready: Set<number> } | null>(null);
+  /** Bumped when a preview frame is made again, so the web view reloads it. */
+  scrubVersion = $state(0);
+  /** The preview frame shown over the video while the user scrubs, like YouTube. */
+  scrubShown = $state<string | null>(null);
+  /** Closes the seek bar's zoomed strip and plays from its chosen spot, while it's open. */
+  closeStrip: (() => void) | null = null;
   engine = $state("");
   engineError = $state<string | null>(null);
   notices = $state<Notice[]>([]);
@@ -383,6 +394,13 @@ class Player {
       listen<Chapter[]>("player://chapters", (e) => (this.chapters = e.payload)),
       listen<Title[]>("player://titles", (e) => (this.titles = e.payload)),
       listen<Bookmark[]>("player://bookmarks", (e) => (this.bookmarks = e.payload)),
+      listen<{ run: number; k: number }>("player://scrub", (e) => {
+        const s = this.scrub;
+        if (!s || s.run !== e.payload.run) return;
+        // A frame made again (it repeated its neighbour) keeps its file name.
+        if (s.ready.has(e.payload.k)) this.scrubVersion++;
+        else this.scrub = { ...s, ready: new Set(s.ready).add(e.payload.k) };
+      }),
       listen<Effects>("player://effects", (e) => (this.effects = e.payload)),
       listen<string>("library://thumb", () => {
         this.thumbVersion++;
@@ -410,6 +428,54 @@ class Player {
     for (const n of snap.early.notices) this.notify(n.kind, n.text);
     if (snap.early.resume) this.offerResume(snap.early.resume);
     await Promise.all([this.loadHistory(), this.loadLibrary()]);
+  }
+
+  /** Starts making seek bar preview frames for what's playing (none when off or not a local video). */
+  async prepareScrub() {
+    this.scrub = null;
+    try {
+      const info = await invoke<{ run: number; prefix: string; step: number; ready: number[] } | null>("scrub_prepare");
+      this.scrub = info && { ...info, ready: new Set(info.ready) };
+    } catch {
+      // No previews; the seek bar works without them.
+    }
+  }
+
+  /** Stops making preview frames and forgets them, until the next prepareScrub. */
+  cancelScrub() {
+    this.scrub = null;
+    invoke("scrub_cancel").catch(() => {});
+  }
+
+  /** Has preview frames `from..=to` made next. */
+  focusScrub(from: number, to: number) {
+    invoke("scrub_focus", { from, to }).catch(() => {});
+  }
+
+  /**
+   * The preview frame for `ms` into a video `length` ms long: the one there,
+   * or the nearest made so far within about 1/120 of the video. One from
+   * further away would show the wrong scene. Frames are made coarse to fine,
+   * so this soon finds one.
+   */
+  nearestScrubFrame(ms: number, length: number) {
+    const s = this.scrub;
+    if (!s) return null;
+    const at = Math.round(ms / s.step);
+    const reach = Math.max(1, Math.round(length / 120 / s.step));
+    for (let d = 0; d <= reach; d++) {
+      for (const k of [at - d, at + d]) {
+        const f = this.scrubFrame(k);
+        if (f) return f;
+      }
+    }
+    return null;
+  }
+
+  /** The file of preview frame `k`, if it's been made. */
+  scrubFrame(k: number) {
+    const s = this.scrub;
+    return s?.ready.has(k) ? `${s.prefix}${k}.jpg` : null;
   }
 
   /** Lists the library; `rescan` looks for new files instead of reusing the last scan. */

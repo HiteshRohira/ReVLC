@@ -11,6 +11,8 @@ from a backup and end with an exact restore. See docs/audit-playbook.md.
 
 macOS: ~/Library/Application Support/app.revlc and ~/Library/Caches/app.revlc.
 Windows: %APPDATA%\\app.revlc and %LOCALAPPDATA%\\app.revlc.
+Linux: $XDG_DATA_HOME/app.revlc, $XDG_CONFIG_HOME/app.revlc and
+$XDG_CACHE_HOME/app.revlc (using the XDG defaults when unset).
 The app must not be running. Backups go to RUN_DIR/backup/, never /tmp
 (a reboot clears it). Restore moves the QA data to RUN_DIR/logs/ as evidence,
 copies the originals back and checks every file's hash, mode and mtime.
@@ -31,7 +33,16 @@ def data_dirs():
         return {"support": lib / "Application Support/app.revlc", "caches": lib / "Caches/app.revlc"}
     if os.name == "nt":
         return {"roaming": Path(os.environ["APPDATA"]) / "app.revlc", "local": Path(os.environ["LOCALAPPDATA"]) / "app.revlc"}
-    sys.exit("macOS and Windows only")
+    if sys.platform.startswith("linux"):
+        def xdg(name, fallback):
+            value = Path(os.environ.get(name, ""))
+            return value if value.is_absolute() else Path.home() / fallback
+        config = xdg("XDG_CONFIG_HOME", ".config")
+        cache = xdg("XDG_CACHE_HOME", ".cache")
+        data = xdg("XDG_DATA_HOME", ".local/share")
+        # seed() writes settings to the first directory: Tauri's app_data_dir.
+        return {"data": data / "app.revlc", "config": config / "app.revlc", "caches": cache / "app.revlc"}
+    sys.exit("Unsupported platform")
 
 
 def running():

@@ -4,6 +4,7 @@ mod cli;
 mod disc;
 mod effects;
 mod history;
+mod keyframes;
 mod library;
 #[cfg_attr(not(any(target_os = "macos", windows)), allow(dead_code))]
 mod machine;
@@ -12,9 +13,12 @@ mod meta;
 mod playlist;
 mod playlist_file;
 mod quality;
+mod scrub;
 mod settings;
 mod store;
 mod telemetry;
+#[cfg(target_os = "linux")]
+mod surface_linux;
 #[cfg(target_os = "macos")]
 mod surface_macos;
 #[cfg(windows)]
@@ -70,6 +74,14 @@ struct Core {
     thumbs: Thumbnails,
     /// Where cached thumbnails and artwork go.
     thumbs_dir: PathBuf,
+    /// Where seek bar preview frames go.
+    scrub_dir: PathBuf,
+    /// Bumped whenever previews are asked for again, which ends the previous run.
+    scrub_run: AtomicU64,
+    /// The current run's preview frames still to make, which the pointer
+    /// reorders. Each run has its own queue, so a worker from an ended run
+    /// can never take (and make, from the wrong video) a later run's work.
+    scrub_jobs: Mutex<Arc<Mutex<VecDeque<ScrubJob>>>>,
     meta: Mutex<MetaCache>,
     bookmarks: Mutex<Bookmarks>,
     /// A–B loop points in ms.
@@ -373,6 +385,9 @@ impl Core {
         }
         // Saved first: if that fails, nothing has changed.
         settings.save(&self.data_dir)?;
+        if previous.seekbar_preview && !settings.seekbar_preview {
+            self.scrub_cancel();
+        }
         let vlc_changed = self.apply_vlc_settings(&settings, Some(&previous));
         if settings.audio_device != previous.audio_device {
             self.vlc.set_audio_device(&settings.audio_device);
@@ -880,6 +895,7 @@ impl Core {
     }
 
     fn stop_locked(&self) {
+        self.scrub_cancel();
         self.save_progress(true);
         self.quality().close("stopped");
         self.vlc.stop();
@@ -1283,6 +1299,271 @@ async fn snapshot(player: tauri::State<'_, Player>) -> Result<Snapshot, String> 
     .await
 }
 
+/// Seek bar preview frames of what's playing: one every `step` ms through
+/// the whole video, frame `k` being the file `{prefix}{k}.jpg`.
+#[derive(Clone, Serialize)]
+struct ScrubInfo {
+    /// Tells this run's events from an earlier one's.
+    run: u64,
+    prefix: String,
+    step: i64,
+    /// The frames that exist already.
+    ready: Vec<i64>,
+}
+
+/// The preview frames of one run: frame `k` of `count`, `step` ms apart, is
+/// the file `{prefix}{k}.jpg`.
+#[derive(Clone)]
+struct ScrubGrid {
+    run: u64,
+    uri: Arc<String>,
+    length: i64,
+    /// The selected video track, by position among the video tracks.
+    track: usize,
+    /// Whether libVLC may make frames: only when the file has one video
+    /// stream. Its thumbnail player decodes the file's default stream, which
+    /// needn't be the first or the selected one, and can't be told otherwise.
+    libvlc: bool,
+    step: i64,
+    count: i64,
+    prefix: Arc<String>,
+    /// The frames still to make with libVLC.
+    queue: Arc<Mutex<VecDeque<ScrubJob>>>,
+}
+
+impl ScrubGrid {
+    fn path(&self, k: i64) -> PathBuf {
+        PathBuf::from(format!("{}{k}.jpg", self.prefix))
+    }
+}
+
+/// What previews are made from: the current video's URI and length, the
+/// selected video track by position among its video streams (the way FFmpeg's
+/// `0:V:n` counts them; libVLC's track ids aren't stream numbers), how many
+/// video streams it has, and the file's size and modification time, which
+/// change when it's replaced by another file, maybe of the same length, so
+/// its old previews aren't reused.
+struct ScrubSource {
+    uri: String,
+    length: i64,
+    track: usize,
+    streams: usize,
+    signature: (u64, u128),
+}
+
+/// A frame to make: where it goes, how far in, and its number.
+struct ScrubJob {
+    out: PathBuf,
+    at: i64,
+    k: i64,
+    /// Exact whatever the plan: a redo of a frame that repeated its neighbour.
+    exact: bool,
+}
+
+impl Core {
+    /// What previews are made from, if they can be. See [`ScrubSource`].
+    fn scrub_source(&self) -> Option<ScrubSource> {
+        let uri = self.current_uri()?;
+        let length = self.vlc.length();
+        // Only real files can be read by the second player.
+        let ok = self.settings().seekbar_preview && !uri.contains("://") && length > 0 && self.vlc.has_video() && self.vlc.seekable();
+        if !ok {
+            return None;
+        }
+        let meta = std::fs::metadata(&uri).ok()?;
+        let modified = meta.modified().ok().and_then(|t| t.duration_since(UNIX_EPOCH).ok()).map_or(0, |d| d.as_nanos());
+        let current = self.vlc.video_track();
+        let tracks: Vec<i32> = self.vlc.video_tracks().iter().map(|t| t.id).filter(|&id| id >= 0).collect();
+        let track = tracks.iter().position(|&id| id == current).unwrap_or(0);
+        Some(ScrubSource { uri, length, track, streams: tracks.len(), signature: (meta.len(), modified) })
+    }
+
+    /// Ends the current preview run: its FFmpeg processes stop at their next
+    /// frame and its libVLC workers after the frame they're on. For turning
+    /// previews off, stopping, and another video or track.
+    fn scrub_cancel(&self) {
+        self.scrub_run.fetch_add(1, Ordering::SeqCst);
+        self.scrub_jobs.lock().unwrap_or_else(|e| e.into_inner()).lock().unwrap_or_else(|e| e.into_inner()).clear();
+    }
+
+    /// Starts making every preview frame of the current video that isn't
+    /// cached yet, telling the UI after each. With FFmpeg, one keyframe pass
+    /// covers most of them quickly and libVLC does the rest; without it,
+    /// libVLC does them all, coarse to fine. A new call ends the previous run.
+    fn scrub_prepare(self: &Arc<Self>) -> Option<ScrubInfo> {
+        self.scrub_cancel();
+        let run = self.scrub_run.load(Ordering::SeqCst);
+        let ScrubSource { uri, length, track, streams, signature } = self.scrub_source()?;
+        let step = scrub::step(length);
+        let count = (length - 1) / step + 1;
+        let prefix = scrub::prefix(&self.scrub_dir, &uri, length, signature, track, step);
+        let queue = Arc::default();
+        *self.scrub_jobs.lock().unwrap_or_else(|e| e.into_inner()) = Arc::clone(&queue);
+        let libvlc = streams <= 1;
+        let grid = ScrubGrid { run, uri: Arc::new(uri), length, track, libvlc, step, count, prefix: Arc::new(prefix.clone()), queue };
+        let ready: Vec<i64> = (0..count).filter(|&k| grid.path(k).exists()).collect();
+        let have: HashSet<i64> = ready.iter().copied().collect();
+        let _ = std::fs::create_dir_all(&self.scrub_dir);
+        if have.len() < count as usize {
+            match keyframes::ffmpeg() {
+                Some(ffmpeg) => {
+                    let core = self.clone();
+                    let _ = thread::Builder::new().name("scrub-pass".into()).spawn(move || core.scrub_pass(grid, &ffmpeg, have));
+                }
+                None if libvlc => self.scrub_fill(grid, &have),
+                // libVLC may make frames of another stream than the selected
+                // one: none at all beats frames of the wrong stream.
+                None => return None,
+            }
+        }
+        Some(ScrubInfo { run, prefix, step, ready })
+    }
+
+    /// Tells the UI preview frame `k` is made; false if the run has ended.
+    fn scrub_made(&self, grid: &ScrubGrid, k: i64) -> bool {
+        if self.scrub_run.load(Ordering::SeqCst) != grid.run {
+            return false;
+        }
+        let _ = self.app.emit("player://scrub", serde_json::json!({ "run": grid.run, "k": k }));
+        true
+    }
+
+    /// Fills the grid from FFmpeg's keyframes, each in the slot nearest its
+    /// time, in parallel stretches of the video: on a GPU, four (more didn't
+    /// help on VA-API); on the CPU, half the cores, at two threads each. Slots
+    /// no keyframe landed in are left to libVLC.
+    fn scrub_pass(self: Arc<Self>, grid: ScrubGrid, ffmpeg: &Path, have: HashSet<i64>) {
+        let accel = keyframes::accel(ffmpeg, &grid.uri, grid.track, scrub::WIDTH);
+        let parts = if accel.gpu() { 4 } else { thread::available_parallelism().map_or(2, |n| n.get() / 2).max(1) as i64 };
+        let span = grid.length / parts + 1;
+        let made = Arc::new(Mutex::new(have));
+        let passes: Vec<_> = (0..parts)
+            .map(|part| {
+                let (core, grid, made, accel, ffmpeg) = (self.clone(), grid.clone(), made.clone(), accel.clone(), ffmpeg.to_path_buf());
+                thread::spawn(move || {
+                    keyframes::pass(&ffmpeg, &grid.uri, grid.track, &accel, part * span, span, scrub::WIDTH, |at, jpeg| {
+                        let k = ((at + grid.step / 2) / grid.step).clamp(0, grid.count - 1);
+                        if !made.lock().unwrap_or_else(|e| e.into_inner()).insert(k) {
+                            return core.scrub_run.load(Ordering::SeqCst) == grid.run;
+                        }
+                        let out = grid.path(k);
+                        let tmp = out.with_extension(format!("part{k}"));
+                        if std::fs::write(&tmp, &jpeg).and_then(|_| std::fs::rename(&tmp, &out)).is_err() {
+                            let _ = std::fs::remove_file(&tmp);
+                            made.lock().unwrap_or_else(|e| e.into_inner()).remove(&k);
+                            return true;
+                        }
+                        core.scrub_made(&grid, k)
+                    })
+                })
+            })
+            .collect();
+        for pass in passes {
+            if let Ok(Err(e)) = pass.join() {
+                eprintln!("revlc: keyframe pass failed: {e}");
+            }
+        }
+        // libVLC fills the slots no keyframe landed in, for a file with one
+        // video stream; with more, those slots stay empty.
+        if self.scrub_run.load(Ordering::SeqCst) == grid.run && grid.libvlc {
+            let made = made.lock().unwrap_or_else(|e| e.into_inner()).clone();
+            self.scrub_fill(grid, &made);
+        }
+    }
+
+    /// Makes the frames not in `have` with libVLC, coarse to fine, on a few
+    /// low-priority threads.
+    fn scrub_fill(self: &Arc<Self>, grid: ScrubGrid, have: &HashSet<i64>) {
+        const WORKERS: usize = 6;
+        *grid.queue.lock().unwrap_or_else(|e| e.into_inner()) = scrub::order(grid.count as usize)
+            .into_iter()
+            .map(|k| k as i64)
+            .filter(|k| !have.contains(k))
+            .map(|k| ScrubJob { out: grid.path(k), at: scrub::time_at(grid.length, grid.step, k), k, exact: false })
+            .collect();
+        let plan = Arc::new(scrub::Plan::new());
+        for _ in 0..WORKERS {
+            let (core, grid, plan) = (self.clone(), grid.clone(), plan.clone());
+            let _ = thread::Builder::new().name("scrub".into()).spawn(move || {
+                background_priority();
+                loop {
+                    if core.scrub_run.load(Ordering::SeqCst) != grid.run {
+                        return;
+                    }
+                    let Some(job) = grid.queue.lock().unwrap_or_else(|e| e.into_inner()).pop_front() else { return };
+                    // Decode into a temporary file, so a half-written frame is never shown.
+                    let tmp = job.out.with_extension(format!("part{}", job.k));
+                    let exact = job.exact || !plan.keyframes();
+                    let began = Instant::now();
+                    match core.vlc.thumbnail_at(&grid.uri, &tmp, job.at, scrub::WIDTH, exact) {
+                        Ok(()) if std::fs::rename(&tmp, &job.out).is_ok() => {
+                            if exact && !job.exact {
+                                plan.exact_took(began.elapsed());
+                            }
+                            // A keyframe frame the same as a neighbour's landed on the
+                            // same keyframe: the later of the two is made again, exactly.
+                            if !exact {
+                                let redo = [(job.k - 1, job.k), (job.k + 1, job.k + 1)]
+                                    .into_iter()
+                                    .find(|&(other, _)| other >= 0 && scrub::same_picture(&job.out, &grid.path(other)))
+                                    .map(|(_, later)| later);
+                                if let Some(k) = redo {
+                                    let job = ScrubJob { out: grid.path(k), at: scrub::time_at(grid.length, grid.step, k), k, exact: true };
+                                    grid.queue.lock().unwrap_or_else(|e| e.into_inner()).push_back(job);
+                                }
+                            }
+                            if !core.scrub_made(&grid, job.k) {
+                                return;
+                            }
+                        }
+                        _ => {
+                            let _ = std::fs::remove_file(&tmp);
+                        }
+                    }
+                }
+            });
+        }
+    }
+
+    /// Moves the frames `from..=to` still to make to the front of the queue,
+    /// the middle first: they're what the user is looking at.
+    fn scrub_focus(&self, from: i64, to: i64) {
+        let mid = (from + to) / 2;
+        let queue = Arc::clone(&self.scrub_jobs.lock().unwrap_or_else(|e| e.into_inner()));
+        let mut queue = queue.lock().unwrap_or_else(|e| e.into_inner());
+        let (mut wanted, rest): (Vec<ScrubJob>, Vec<ScrubJob>) = queue.drain(..).partition(|j| (from..=to).contains(&j.k));
+        wanted.sort_by_key(|j| (j.k - mid).abs());
+        queue.extend(wanted);
+        queue.extend(rest);
+    }
+}
+
+#[tauri::command]
+async fn scrub_prepare(player: tauri::State<'_, Player>) -> Result<Option<ScrubInfo>, String> {
+    let core = player.core()?.clone();
+    tauri::async_runtime::spawn_blocking(move || core.scrub_prepare()).await.map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn scrub_cancel(player: tauri::State<'_, Player>) -> Res {
+    player.core()?.scrub_cancel();
+    Ok(())
+}
+
+#[tauri::command]
+fn scrub_focus(player: tauri::State<'_, Player>, from: i64, to: i64) -> Res {
+    player.core()?.scrub_focus(from, to);
+    Ok(())
+}
+
+/// Lowers the calling thread's priority, so preview frames give way to
+/// playback. libVLC's threads for the frame's player inherit it.
+fn background_priority() {
+    #[cfg(target_os = "linux")]
+    // SAFETY: gettid has no preconditions.
+    keyframes::lower_priority(unsafe { libc::syscall(libc::SYS_gettid) } as u32);
+}
+
 // Commands that change what plays run off the main thread: they wait for
 // the transition lock, and the event thread can hold it while libVLC needs
 // the main thread to close the previous video.
@@ -1409,7 +1690,7 @@ fn run_app_item(app: &AppHandle, id: &str) -> bool {
             tauri::async_runtime::spawn(async move { updater::check(&app, true).await });
         }
         "github" => {
-            let opener = if cfg!(windows) { "explorer" } else { "open" };
+            let opener = if cfg!(windows) { "explorer" } else if cfg!(target_os = "macos") { "open" } else { "xdg-open" };
             let _ = std::process::Command::new(opener).arg("https://github.com/HiteshRohira/ReVLC").spawn();
         }
         "quit" => app.exit(0),
@@ -1488,7 +1769,15 @@ fn font_families() -> Vec<String> {
     {
         system_windows::font_families()
     }
-    #[cfg(not(any(target_os = "macos", windows)))]
+    #[cfg(target_os = "linux")]
+    {
+        use gtk::prelude::*;
+        let context = gtk::Label::new(None).pango_context();
+        let mut fonts: Vec<String> = context.list_families().iter().map(|f| f.name().to_string()).collect();
+        fonts.sort_by_key(|f| f.to_lowercase());
+        fonts
+    }
+    #[cfg(not(any(target_os = "macos", windows, target_os = "linux")))]
     Vec::new()
 }
 
@@ -2058,7 +2347,18 @@ fn preferred_languages() -> Vec<String> {
     {
         system_windows::preferred_languages()
     }
-    #[cfg(not(any(target_os = "macos", windows)))]
+    #[cfg(target_os = "linux")]
+    {
+        let mut langs = Vec::new();
+        for lang in gtk::glib::language_names() {
+            let code = lang.split(['-', '_', '.', '@']).next().unwrap_or_default().to_lowercase();
+            if !code.is_empty() && code != "c" && !langs.contains(&code) {
+                langs.push(code);
+            }
+        }
+        langs
+    }
+    #[cfg(not(any(target_os = "macos", windows, target_os = "linux")))]
     Vec::new()
 }
 
@@ -2106,6 +2406,9 @@ fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
         library: Mutex::new(Library::load(&data_dir)),
         thumbs: Thumbnails::default(),
         thumbs_dir: cache_dir.join("thumbs"),
+        scrub_dir: cache_dir.join("scrub"),
+        scrub_run: AtomicU64::new(0),
+        scrub_jobs: Mutex::default(),
         meta: Mutex::new(MetaCache::load(&cache_dir)),
         bookmarks: Mutex::new(Bookmarks::load(&data_dir)),
         ab_loop: Mutex::default(),
@@ -2142,6 +2445,8 @@ fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     }
     // libVLC's player has its own title-display default; apply ours.
     core.vlc.set_title_display(settings.show_title, settings.title_position, settings.title_timeout);
+    let scrub_dir = core.scrub_dir.clone();
+    thread::spawn(move || scrub::prune(&scrub_dir));
     let thumbs = core.clone();
     thread::Builder::new().name("thumbnails".into()).spawn(move || make_thumbnails(thumbs))?;
     let saver = core.clone();
@@ -2196,7 +2501,18 @@ fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
                 Err(e) => eprintln!("revlc: could not create the video window: {e}"),
             }
         }
-        #[cfg(not(any(target_os = "macos", windows)))]
+        #[cfg(target_os = "linux")]
+        {
+            let frames = Arc::new(Mutex::new(None));
+            match surface_linux::attach(&webview.inner(), frames.clone()) {
+                Ok(()) => attach.vlc.set_gtk_surface(frames),
+                Err(e) => {
+                    eprintln!("revlc: could not create the video surface: {e}");
+                    return;
+                }
+            }
+        }
+        #[cfg(not(any(target_os = "macos", windows, target_os = "linux")))]
         let _ = webview;
         // Off the main thread, like the commands that open media.
         thread::spawn(move || attach.mark_ready());
@@ -2208,10 +2524,12 @@ fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    #[cfg(target_os = "linux")]
+    surface_linux::init();
     let builder = tauri::Builder::default();
     // Windows starts a new process for each file opened from Explorer; it
     // hands its files to the running copy and exits.
-    #[cfg(windows)]
+    #[cfg(any(windows, target_os = "linux"))]
     let builder = builder.plugin(tauri_plugin_single_instance::init(|app, args, cwd| {
         if let Some(window) = app.get_webview_window("main") {
             let _ = window.unminimize();
@@ -2257,6 +2575,9 @@ pub fn run() {
             updater::update_install,
             updater::update_restart,
             snapshot,
+            scrub_prepare,
+            scrub_focus,
+            scrub_cancel,
             open,
             play_index,
             toggle_pause,
