@@ -10,6 +10,8 @@ export interface Settings {
   pauseWhenMinimized: boolean;
   seekbarChapters: boolean;
   seekbarPreview: boolean;
+  /** What the mouse wheel does over the video. */
+  wheel: "volume" | "seek" | "none";
   autoUpdate: boolean;
   analytics: boolean;
 

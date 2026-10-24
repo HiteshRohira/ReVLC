@@ -11,6 +11,7 @@
   import CaptureDialog from "./lib/CaptureDialog.svelte";
   import DiscDialog from "./lib/DiscDialog.svelte";
   import JumpDialog from "./lib/JumpDialog.svelte";
+  import MediaInfoDialog from "./lib/MediaInfoDialog.svelte";
   import UrlDialog from "./lib/UrlDialog.svelte";
   import TitleBar from "./lib/TitleBar.svelte";
   import WindowControls from "./lib/WindowControls.svelte";
@@ -34,7 +35,7 @@
   const showPlayer = $derived(theme.onboarded && player.active);
   // Hide the controls and cursor while video plays and the mouse is still.
   const controlsHidden = $derived(
-    idle && player.playing && player.state.hasVideo && ui.openMenus === 0 && !ui.playlistOpen,
+    idle && player.playing && player.state.hasVideo && ui.openMenus === 0 && !ui.playlistOpen && !ui.effectsOpen,
   );
 
   $effect(() => {
@@ -78,7 +79,8 @@
   let fullscreenedFor: string | null = null;
   $effect(() => {
     const uri = currentUri;
-    if (!uri || !player.state.hasVideo || !settings.value?.startFullscreen || fullscreenedFor === uri) return;
+    const start = settings.value?.startFullscreen || player.startFullscreen;
+    if (!uri || !player.state.hasVideo || !start || fullscreenedFor === uri) return;
     fullscreenedFor = uri;
     appWindow.isFullscreen().then((fs) => {
       if (!fs) appWindow.setFullscreen(true);
@@ -89,6 +91,34 @@
   const currentUri = $derived(player.current?.uri ?? null);
   // Only for what's playing: an offer for an item since replaced is stale.
   const resumePrompt = $derived(player.resumeOffer && player.resumeOffer.uri === currentUri ? player.resumeOffer.ms : null);
+
+  // The mouse wheel over the video: volume (VLC's default), seeking, or nothing.
+  // A mouse notch is about 40 px; trackpads send many small deltas, which add
+  // up to steps. What's left over is dropped once scrolling pauses.
+  const WHEEL_STEP = 32;
+  let wheelTotal = 0;
+  let wheelAt = 0;
+  function onWheel(e: WheelEvent) {
+    const mode = settings.value?.wheel ?? "volume";
+    const target = e.target as HTMLElement;
+    // Only over the picture, not over menus, panels or lists that scroll.
+    if (mode === "none" || !showPlayer || !target.closest(".stage, .player") || target.closest(".bottom")) return;
+    wake();
+    if (e.timeStamp - wheelAt > 400) wheelTotal = 0;
+    wheelAt = e.timeStamp;
+    const lines = e.deltaMode === 1 ? WHEEL_STEP : e.deltaMode === 2 ? 400 : 1;
+    wheelTotal += e.deltaY * lines;
+    const steps = Math.trunc(wheelTotal / WHEEL_STEP);
+    if (steps === 0) return;
+    wheelTotal -= steps * WHEEL_STEP;
+    // Scrolling up (negative delta) turns it up or jumps forward.
+    if (mode === "volume") {
+      player.setVolume(player.state.volume - steps * 5);
+      player.notify("osd", `Volume ${player.state.volume}%`);
+    } else if (player.state.seekable) {
+      player.seekBy(-steps * 5_000);
+    }
+  }
 
   function wake() {
     idle = false;
@@ -131,6 +161,7 @@
       player.navigate(menuKey);
     } else if (e.key === "Escape") {
       if (ui.menu) ui.menu = null;
+      else if (ui.effectsOpen) ui.effectsOpen = false;
       else if (ui.playlistOpen) ui.playlistOpen = false;
       else if (ui.helpOpen) ui.helpOpen = false;
       else exitFullscreen();
@@ -212,7 +243,7 @@
   });
 </script>
 
-<svelte:window onkeydown={onKeyDown} onpointermove={wake} onpointerdown={wake} />
+<svelte:window onkeydown={onKeyDown} onpointermove={wake} onpointerdown={wake} onwheel={onWheel} />
 <svelte:document onvisibilitychange={onVisibility} />
 
 <div class="app" class:video={showPlayer && player.state.hasVideo} class:hide-cursor={controlsHidden} class:fullscreen={ui.fullscreen}>
@@ -261,7 +292,8 @@
   {#if ui.dialog === "url"}<UrlDialog />
   {:else if ui.dialog === "jump"}<JumpDialog />
   {:else if ui.dialog === "disc"}<DiscDialog />
-  {:else if ui.dialog === "capture"}<CaptureDialog />{/if}
+  {:else if ui.dialog === "capture"}<CaptureDialog />
+  {:else if ui.dialog === "info"}<MediaInfoDialog />{/if}
 
   {#if ui.helpOpen}
     <div class="backdrop" role="presentation" onpointerdown={() => (ui.helpOpen = false)}>

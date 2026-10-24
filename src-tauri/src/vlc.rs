@@ -79,6 +79,43 @@ struct TrackDescription {
     next: *mut TrackDescription,
 }
 
+/// libvlc_media_stats_t.
+#[repr(C)]
+#[derive(Default)]
+#[allow(dead_code)]
+struct MediaStats {
+    read_bytes: c_int,
+    input_bitrate: c_float,
+    demux_read_bytes: c_int,
+    demux_bitrate: c_float,
+    demux_corrupted: c_int,
+    demux_discontinuity: c_int,
+    decoded_video: c_int,
+    decoded_audio: c_int,
+    displayed_pictures: c_int,
+    lost_pictures: c_int,
+    played_abuffers: c_int,
+    lost_abuffers: c_int,
+    sent_packets: c_int,
+    sent_bytes: c_int,
+    send_bitrate: c_float,
+}
+
+/// libvlc_audio_track_t.
+#[repr(C)]
+struct AudioTrack {
+    channels: c_uint,
+    rate: c_uint,
+}
+
+/// libvlc_subtitle_track_t.
+#[repr(C)]
+struct SubtitleTrack {
+    encoding: *mut c_char,
+}
+
+type Equalizer = c_void;
+
 macro_rules! api {
     ($($name:ident: fn($($arg:ty),*) $(-> $ret:ty)?;)*) => {
         #[allow(non_snake_case, dead_code)]
@@ -175,6 +212,33 @@ api! {
     libvlc_media_get_duration: fn(*mut Media) -> i64;
     libvlc_media_tracks_get: fn(*mut Media, *mut *mut *mut MediaTrack) -> c_uint;
     libvlc_media_tracks_release: fn(*mut *mut MediaTrack, c_uint);
+    libvlc_media_get_codec_description: fn(c_int, u32) -> *const c_char;
+    libvlc_media_get_stats: fn(*mut Media, *mut MediaStats) -> c_int;
+    libvlc_video_get_track_description: fn(*mut Player) -> *mut TrackDescription;
+    libvlc_video_get_track: fn(*mut Player) -> c_int;
+    libvlc_video_set_track: fn(*mut Player, c_int) -> c_int;
+    libvlc_audio_get_channel: fn(*mut Player) -> c_int;
+    libvlc_audio_set_channel: fn(*mut Player, c_int) -> c_int;
+    libvlc_audio_equalizer_get_preset_count: fn() -> c_uint;
+    libvlc_audio_equalizer_get_preset_name: fn(c_uint) -> *const c_char;
+    libvlc_audio_equalizer_get_band_count: fn() -> c_uint;
+    libvlc_audio_equalizer_get_band_frequency: fn(c_uint) -> c_float;
+    libvlc_audio_equalizer_new: fn() -> *mut Equalizer;
+    libvlc_audio_equalizer_new_from_preset: fn(c_uint) -> *mut Equalizer;
+    libvlc_audio_equalizer_release: fn(*mut Equalizer);
+    libvlc_audio_equalizer_set_preamp: fn(*mut Equalizer, c_float) -> c_int;
+    libvlc_audio_equalizer_get_preamp: fn(*mut Equalizer) -> c_float;
+    libvlc_audio_equalizer_set_amp_at_index: fn(*mut Equalizer, c_float, c_uint) -> c_int;
+    libvlc_audio_equalizer_get_amp_at_index: fn(*mut Equalizer, c_uint) -> c_float;
+    libvlc_media_player_set_equalizer: fn(*mut Player, *mut Equalizer) -> c_int;
+    libvlc_video_set_adjust_int: fn(*mut Player, c_uint, c_int);
+    libvlc_video_set_adjust_float: fn(*mut Player, c_uint, c_float);
+    libvlc_video_set_logo_int: fn(*mut Player, c_uint, c_int);
+    libvlc_video_set_logo_string: fn(*mut Player, c_uint, *const c_char);
+    libvlc_video_set_marquee_int: fn(*mut Player, c_uint, c_int);
+    libvlc_video_set_marquee_string: fn(*mut Player, c_uint, *const c_char);
+    libvlc_video_set_scale: fn(*mut Player, c_float);
+    libvlc_video_set_teletext: fn(*mut Player, c_int);
 }
 
 /// libvlc_media_option_t: an option the application chose, which libVLC
@@ -305,12 +369,127 @@ pub struct Track {
     pub name: String,
 }
 
+/// What the media information dialog shows about one track.
+#[derive(Clone, Debug, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TrackInfo {
+    /// "audio", "video", "text" or "unknown".
+    pub kind: &'static str,
+    pub id: i32,
+    /// The codec's fourcc, like "h264".
+    pub codec: String,
+    /// libVLC's name for the codec, like "H264 - MPEG-4 AVC (part 10)".
+    pub codec_name: Option<String>,
+    pub language: Option<String>,
+    pub description: Option<String>,
+    /// Bits per second, 0 when unknown.
+    pub bitrate: u32,
+    pub channels: u32,
+    /// Sample rate in Hz.
+    pub rate: u32,
+    pub width: u32,
+    pub height: u32,
+    pub fps: f32,
+    /// Sample aspect ratio like "1:1", when known.
+    pub sar: Option<String>,
+    /// A text track's character encoding.
+    pub encoding: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MediaInfo {
+    /// The media's MRL.
+    pub location: String,
+    /// (field, value) for each tag the media has, in libVLC's order.
+    pub meta: Vec<(&'static str, String)>,
+    pub tracks: Vec<TrackInfo>,
+}
+
+/// Playback statistics of the current media (VLC's Statistics tab).
+#[derive(Clone, Debug, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Stats {
+    pub read_bytes: i64,
+    /// kb/s.
+    pub input_bitrate: f32,
+    pub demux_read_bytes: i64,
+    /// kb/s.
+    pub demux_bitrate: f32,
+    pub demux_corrupted: i64,
+    pub demux_discontinuity: i64,
+    pub decoded_video: i64,
+    pub decoded_audio: i64,
+    pub displayed_pictures: i64,
+    pub lost_pictures: i64,
+    pub played_abuffers: i64,
+    pub lost_abuffers: i64,
+}
+
+/// libvlc_meta_t, in order, with the names the dialog shows.
+const META_FIELDS: [&str; 26] = [
+    "Title", "Artist", "Genre", "Copyright", "Album", "Track number", "Description", "Rating", "Date", "Setting", "URL",
+    "Language", "Now playing", "Publisher", "Encoded by", "Artwork URL", "Track ID", "Track total", "Director", "Season",
+    "Episode", "Show name", "Actors", "Album artist", "Disc number", "Disc total",
+];
+
+/// libVLC reports bitrates in bytes per microsecond; VLC shows kb/s.
+fn kbps(bytes_per_us: f32) -> f32 {
+    bytes_per_us * 8000.0
+}
+
+/// Teletext, as libVLC names it: VBI pages (zvbi) or the "telx" decoder.
+fn is_teletext(code: u32) -> bool {
+    fourcc(code) == "telx"
+}
+
+/// Picks the teletext tracks out of `listed` (subtitle track ids, in
+/// order). `text` is the media's text tracks in the same order, with
+/// whether each is teletext. Their ids usually match, but not always: a
+/// transport stream's first teletext track can be listed by its PID and
+/// described by its index. So with as many of each, they're paired by position.
+fn teletext_ids(text: &[(i32, bool)], listed: &[i32]) -> Vec<i32> {
+    if text.len() == listed.len() {
+        listed.iter().zip(text).filter(|(_, (_, teletext))| *teletext).map(|(&id, _)| id).collect()
+    } else {
+        text.iter().filter(|(id, teletext)| *teletext && listed.contains(id)).map(|(id, _)| *id).collect()
+    }
+}
+
 /// Functions from libvlccore for changing VLC's configuration at runtime.
 /// New inputs and video outputs read their options from it, so changes
 /// apply to the next video without restarting libVLC.
 struct CoreApi {
     put_int: unsafe extern "C" fn(*mut c_void, *const c_char, i64),
     put_psz: unsafe extern "C" fn(*mut c_void, *const c_char, *const c_char),
+    /// var_Type, var_Create and var_SetChecked. vlc_value_t is an 8-byte
+    /// union passed by value, which the C ABIs pass like an i64.
+    var_type: unsafe extern "C" fn(*mut c_void, *const c_char) -> c_int,
+    var_create: unsafe extern "C" fn(*mut c_void, *const c_char, c_int) -> c_int,
+    var_set: unsafe extern "C" fn(*mut c_void, *const c_char, c_int, i64) -> c_int,
+    /// vlc_list_children and vlc_list_release.
+    list_children: unsafe extern "C" fn(*mut c_void) -> *mut VlcList,
+    list_release: unsafe extern "C" fn(*mut VlcList),
+}
+
+/// vlc_list_t: `count` held objects, one per 8-byte vlc_value_t.
+#[repr(C)]
+struct VlcList {
+    kind: c_int,
+    count: c_int,
+    values: *mut *mut c_void,
+}
+
+/// VLC variable types (VLC_VAR_*).
+const VAR_INTEGER: c_int = 0x30;
+const VAR_STRING: c_int = 0x40;
+const VAR_FLOAT: c_int = 0x50;
+
+/// A value for a VLC object variable.
+enum Var<'a> {
+    Int(i64),
+    Float(f32),
+    Str(&'a CStr),
 }
 
 /// A value for [`Vlc::set_config`].
@@ -345,6 +524,8 @@ pub struct Vlc {
     /// The opening frame of each file thumbnailed, by path and width; `None`
     /// when it's too plain to recognise. See [`Vlc::thumbnail_at`].
     openings: std::sync::Mutex<std::collections::HashMap<(String, u32), Option<Opening>>>,
+    /// Command-line options libVLC wouldn't start with (see [`Vlc::load`]).
+    pub rejected_args: Vec<String>,
 }
 
 // libVLC's media player API is thread-safe.
@@ -420,10 +601,18 @@ fn opt_cstr(s: Option<&str>) -> Option<CString> {
 }
 
 impl Vlc {
-    /// `extra_args` are passed to libVLC as command-line options. `config`
-    /// is applied before the media player is created, because the player
-    /// copies some options (title display, deinterlacing) when it's made.
-    pub fn load(resource_dir: Option<&Path>, extra_args: &[String], config: &[(&str, ConfigValue)]) -> Result<Self, LoadError> {
+    /// `extra_args` are passed to libVLC as command-line options; so are
+    /// `user_args`, unless libVLC rejects them (an unknown option makes it
+    /// fail to start), in which case it starts without them and they're kept
+    /// in [`Vlc::rejected_args`]. `config` is applied before the media player
+    /// is created, because the player copies some options (title display,
+    /// deinterlacing) when it's made.
+    pub fn load(
+        resource_dir: Option<&Path>,
+        extra_args: &[String],
+        user_args: &[String],
+        config: &[(&str, ConfigValue)],
+    ) -> Result<Self, LoadError> {
         let dirs = candidate_dirs(resource_dir);
         let dir = dirs.iter().find(|d| lib_dir(d).join(lib_names().1).exists());
         if dir.is_none() && !cfg!(target_os = "linux") {
@@ -463,6 +652,11 @@ impl Vlc {
             CoreApi {
                 put_int: *core_lib.get(b"config_PutInt\0").map_err(missing)?,
                 put_psz: *core_lib.get(b"config_PutPsz\0").map_err(missing)?,
+                var_type: *core_lib.get(b"var_Type\0").map_err(missing)?,
+                var_create: *core_lib.get(b"var_Create\0").map_err(missing)?,
+                var_set: *core_lib.get(b"var_SetChecked\0").map_err(missing)?,
+                list_children: *core_lib.get(b"vlc_list_children\0").map_err(missing)?,
+                list_release: *core_lib.get(b"vlc_list_release\0").map_err(missing)?,
             }
         };
 
@@ -477,14 +671,23 @@ impl Vlc {
             .chain(extra_args.iter().cloned())
             .map(|a| cstr(&a))
             .collect();
-        let argv: Vec<*const c_char> = args.iter().map(|a| a.as_ptr()).collect();
+        let with_user: Vec<CString> = args.iter().cloned().chain(user_args.iter().map(|a| cstr(a))).collect();
+        let argv = |args: &[CString]| -> Vec<*const c_char> { args.iter().map(|a| a.as_ptr()).collect() };
         let version = unsafe { CStr::from_ptr((api.libvlc_get_version)()) }.to_string_lossy().into_owned();
         // `put_config` relies on how libVLC 3 lays out its instance.
         if !version.starts_with("3.") {
             return Err(LoadError::new("version", format!("ReVLC needs libVLC 3, but {location} has libVLC {version}")));
         }
         unsafe {
-            let inst = (api.libvlc_new)(argv.len() as c_int, argv.as_ptr());
+            let mut rejected_args = Vec::new();
+            let full = argv(&with_user);
+            let mut inst = (api.libvlc_new)(full.len() as c_int, full.as_ptr());
+            if inst.is_null() && !user_args.is_empty() {
+                eprintln!("revlc: libVLC rejected {}: {}", user_args.join(" "), errmsg(&api));
+                rejected_args = user_args.to_vec();
+                let base = argv(&args);
+                inst = (api.libvlc_new)(base.len() as c_int, base.as_ptr());
+            }
             if inst.is_null() {
                 return Err(LoadError::new(
                     "init",
@@ -509,7 +712,7 @@ impl Vlc {
             // The web UI handles all keyboard and mouse input.
             (api.libvlc_video_set_key_input)(mp, 0);
             (api.libvlc_video_set_mouse_input)(mp, 0);
-            Ok(Self { api, core, inst, mp, software_decoding: AtomicBool::new(false), version, openings: Default::default() })
+            Ok(Self { api, core, inst, mp, software_decoding: AtomicBool::new(false), version, rejected_args, openings: Default::default() })
         }
     }
 
@@ -1118,6 +1321,352 @@ impl Vlc {
     }
 }
 
+/// Video tracks, stereo mode, equaliser, video effects, zoom, teletext,
+/// media information and statistics.
+impl Vlc {
+    pub fn video_tracks(&self) -> Vec<Track> {
+        self.tracks(unsafe { (self.api.libvlc_video_get_track_description)(self.mp) })
+    }
+
+    pub fn video_track(&self) -> i32 {
+        unsafe { (self.api.libvlc_video_get_track)(self.mp) }
+    }
+
+    pub fn set_video_track(&self, id: i32) {
+        unsafe { (self.api.libvlc_video_set_track)(self.mp, id) };
+    }
+
+    /// Sets the stereo mode code (see [`crate::effects::StereoMode`]).
+    /// Fails while there's no audio output, i.e. nothing is playing.
+    pub fn set_stereo_mode(&self, code: i32) -> bool {
+        unsafe { (self.api.libvlc_audio_set_channel)(self.mp, code) == 0 }
+    }
+
+    pub fn stereo_mode(&self) -> i32 {
+        unsafe { (self.api.libvlc_audio_get_channel)(self.mp) }
+    }
+
+    /// The equaliser presets' names, in libVLC's order.
+    pub fn equalizer_presets(&self) -> Vec<String> {
+        unsafe {
+            (0..(self.api.libvlc_audio_equalizer_get_preset_count)())
+                .map(|i| {
+                    let name = (self.api.libvlc_audio_equalizer_get_preset_name)(i);
+                    if name.is_null() { format!("Preset {}", i + 1) } else { CStr::from_ptr(name).to_string_lossy().into_owned() }
+                })
+                .collect()
+        }
+    }
+
+    /// Each equaliser band's centre frequency, in Hz.
+    pub fn equalizer_bands(&self) -> Vec<f32> {
+        unsafe { (0..(self.api.libvlc_audio_equalizer_get_band_count)()).map(|i| (self.api.libvlc_audio_equalizer_get_band_frequency)(i)).collect() }
+    }
+
+    /// A preset's preamp and band values in dB, or `None` if there's no such preset.
+    pub fn equalizer_preset(&self, index: u32) -> Option<(f32, Vec<f32>)> {
+        unsafe {
+            let eq = (self.api.libvlc_audio_equalizer_new_from_preset)(index);
+            if eq.is_null() {
+                return None;
+            }
+            let preamp = (self.api.libvlc_audio_equalizer_get_preamp)(eq);
+            let bands = (0..(self.api.libvlc_audio_equalizer_get_band_count)())
+                .map(|i| (self.api.libvlc_audio_equalizer_get_amp_at_index)(eq, i))
+                .collect();
+            (self.api.libvlc_audio_equalizer_release)(eq);
+            Some((preamp, bands))
+        }
+    }
+
+    /// Turns the equaliser on with these values (dB), or off with `None`.
+    /// The player keeps them for every media it plays after this.
+    pub fn set_equalizer(&self, values: Option<(f32, &[f32])>) {
+        unsafe {
+            let Some((preamp, bands)) = values else {
+                (self.api.libvlc_media_player_set_equalizer)(self.mp, std::ptr::null_mut());
+                return;
+            };
+            let eq = (self.api.libvlc_audio_equalizer_new)();
+            if eq.is_null() {
+                return;
+            }
+            (self.api.libvlc_audio_equalizer_set_preamp)(eq, preamp);
+            for (i, &amp) in bands.iter().enumerate() {
+                (self.api.libvlc_audio_equalizer_set_amp_at_index)(eq, amp, i as c_uint);
+            }
+            // libVLC copies the values, so the equaliser can go now.
+            (self.api.libvlc_media_player_set_equalizer)(self.mp, eq);
+            (self.api.libvlc_audio_equalizer_release)(eq);
+        }
+    }
+
+    /// Applies colour adjustments, live. Values go first, so the filter
+    /// starts with them rather than flashing its defaults.
+    pub fn set_adjust(&self, adjust: &crate::effects::Adjust) {
+        // libvlc_video_adjust_option_t.
+        const ENABLE: c_uint = 0;
+        const CONTRAST: c_uint = 1;
+        const BRIGHTNESS: c_uint = 2;
+        const HUE: c_uint = 3;
+        const SATURATION: c_uint = 4;
+        const GAMMA: c_uint = 5;
+        unsafe {
+            let set = |opt, v: f32| (self.api.libvlc_video_set_adjust_float)(self.mp, opt, v);
+            set(CONTRAST, adjust.contrast);
+            set(BRIGHTNESS, adjust.brightness);
+            set(HUE, adjust.hue);
+            set(SATURATION, adjust.saturation);
+            set(GAMMA, adjust.gamma);
+            (self.api.libvlc_video_set_adjust_int)(self.mp, ENABLE, adjust.enabled as c_int);
+        }
+    }
+
+    pub fn set_logo(&self, logo: &crate::effects::Logo) {
+        // libvlc_video_logo_option_t.
+        const ENABLE: c_uint = 0;
+        const FILE: c_uint = 1;
+        const OPACITY: c_uint = 6;
+        const POSITION: c_uint = 7;
+        let file = cstr(&logo.file);
+        unsafe {
+            (self.api.libvlc_video_set_logo_string)(self.mp, FILE, file.as_ptr());
+            (self.api.libvlc_video_set_logo_int)(self.mp, OPACITY, logo.opacity);
+            (self.api.libvlc_video_set_logo_int)(self.mp, POSITION, logo.position);
+            (self.api.libvlc_video_set_logo_int)(self.mp, ENABLE, (logo.enabled && !logo.file.is_empty()) as c_int);
+        }
+    }
+
+    pub fn set_marquee(&self, marquee: &crate::effects::Marquee) {
+        // libvlc_video_marquee_option_t.
+        const ENABLE: c_uint = 0;
+        const TEXT: c_uint = 1;
+        const COLOR: c_uint = 2;
+        const OPACITY: c_uint = 3;
+        const POSITION: c_uint = 4;
+        const SIZE: c_uint = 6;
+        const TIMEOUT: c_uint = 7;
+        let text = cstr(&marquee.text);
+        unsafe {
+            let set = |opt, v: i32| (self.api.libvlc_video_set_marquee_int)(self.mp, opt, v);
+            (self.api.libvlc_video_set_marquee_string)(self.mp, TEXT, text.as_ptr());
+            set(COLOR, marquee.color);
+            set(OPACITY, marquee.opacity);
+            set(POSITION, marquee.position);
+            set(SIZE, marquee.size);
+            set(TIMEOUT, marquee.timeout);
+            set(ENABLE, (marquee.enabled && !marquee.text.trim().is_empty()) as c_int);
+        }
+    }
+
+    /// Zooms the video: 0 fits the window, 1 shows it at its own size.
+    pub fn set_zoom(&self, factor: f32) {
+        unsafe { (self.api.libvlc_video_set_scale)(self.mp, factor.max(0.0)) }
+    }
+
+    /// Shows a teletext page (1–999, 100 being the index), sends a
+    /// coloured key (libvlc_teletext_key_t), or with 0 turns teletext off.
+    pub fn set_teletext(&self, page: i32) {
+        unsafe { (self.api.libvlc_video_set_teletext)(self.mp, page) }
+    }
+
+    /// Calls `f` with the current media and its tracks; `None` with no media.
+    fn with_tracks<T>(&self, f: impl FnOnce(*mut Media, &[&MediaTrack]) -> T) -> Option<T> {
+        unsafe {
+            let media = (self.api.libvlc_media_player_get_media)(self.mp);
+            if media.is_null() {
+                return None;
+            }
+            let mut list: *mut *mut MediaTrack = std::ptr::null_mut();
+            let count = (self.api.libvlc_media_tracks_get)(media, &mut list);
+            let tracks: Vec<&MediaTrack> = (0..count as usize).map(|i| &**list.add(i)).collect();
+            let result = f(media, &tracks);
+            if count > 0 {
+                (self.api.libvlc_media_tracks_release)(list, count);
+            }
+            (self.api.libvlc_media_release)(media);
+            Some(result)
+        }
+    }
+
+    /// The ids, as in [`Vlc::subtitle_tracks`], of the subtitle tracks that hold teletext.
+    pub fn teletext_tracks(&self) -> Vec<i32> {
+        let text: Vec<(i32, bool)> = self
+            .with_tracks(|_, tracks| tracks.iter().filter(|t| t.kind == 2).map(|t| (t.id, is_teletext(t.codec))).collect())
+            .unwrap_or_default();
+        let listed: Vec<i32> = self.subtitle_tracks().into_iter().map(|t| t.id).filter(|&id| id >= 0).collect();
+        teletext_ids(&text, &listed)
+    }
+
+    /// Whether a teletext track is selected. (libVLC can't say which page is
+    /// on screen: libvlc_video_get_teletext is only the page asked for last.)
+    pub fn teletext_on(&self) -> bool {
+        self.teletext_tracks().contains(&self.subtitle_track())
+    }
+
+    /// Tags and per-track codec details of what's playing.
+    pub fn media_info(&self) -> Option<MediaInfo> {
+        let text = |p: *mut c_char| unsafe {
+            (!p.is_null()).then(|| CStr::from_ptr(p).to_string_lossy().trim().to_string()).filter(|s| !s.is_empty())
+        };
+        self.with_tracks(|media, tracks| unsafe {
+            let mut info = MediaInfo::default();
+            let mrl = (self.api.libvlc_media_get_mrl)(media);
+            info.location = text(mrl).unwrap_or_default();
+            if !mrl.is_null() {
+                (self.api.libvlc_free)(mrl as *mut c_void);
+            }
+            for (i, name) in META_FIELDS.iter().enumerate() {
+                let raw = (self.api.libvlc_media_get_meta)(media, i as c_int);
+                if let Some(value) = text(raw) {
+                    info.meta.push((name, value));
+                }
+                if !raw.is_null() {
+                    (self.api.libvlc_free)(raw as *mut c_void);
+                }
+            }
+            for t in tracks {
+                let codec_name = (self.api.libvlc_media_get_codec_description)(t.kind, t.codec);
+                let mut track = TrackInfo {
+                    kind: match t.kind {
+                        0 => "audio",
+                        1 => "video",
+                        2 => "text",
+                        _ => "unknown",
+                    },
+                    id: t.id,
+                    codec: fourcc(t.codec),
+                    codec_name: (!codec_name.is_null()).then(|| CStr::from_ptr(codec_name).to_string_lossy().into_owned()).filter(|s| !s.is_empty()),
+                    language: text(t.language),
+                    description: text(t.description),
+                    bitrate: t.bitrate,
+                    ..Default::default()
+                };
+                if !t.details.is_null() {
+                    match t.kind {
+                        0 => {
+                            let a = &*(t.details as *const AudioTrack);
+                            (track.channels, track.rate) = (a.channels, a.rate);
+                        }
+                        1 => {
+                            let v = &*(t.details as *const VideoTrack);
+                            (track.width, track.height) = (v.width, v.height);
+                            if v.frame_rate_den > 0 {
+                                track.fps = v.frame_rate_num as f32 / v.frame_rate_den as f32;
+                            }
+                            if v.sar_num > 0 && v.sar_den > 0 {
+                                track.sar = Some(format!("{}:{}", v.sar_num, v.sar_den));
+                            }
+                        }
+                        2 => track.encoding = text((*(t.details as *const SubtitleTrack)).encoding),
+                        _ => {}
+                    }
+                }
+                info.tracks.push(track);
+            }
+            info
+        })
+    }
+
+    /// Playback statistics of what's playing.
+    pub fn stats(&self) -> Option<Stats> {
+        unsafe {
+            let media = (self.api.libvlc_media_player_get_media)(self.mp);
+            if media.is_null() {
+                return None;
+            }
+            let mut s = MediaStats::default();
+            let ok = (self.api.libvlc_media_get_stats)(media, &mut s) != 0;
+            (self.api.libvlc_media_release)(media);
+            ok.then(|| Stats {
+                read_bytes: s.read_bytes as i64,
+                input_bitrate: kbps(s.input_bitrate),
+                demux_read_bytes: s.demux_read_bytes as i64,
+                demux_bitrate: kbps(s.demux_bitrate),
+                demux_corrupted: s.demux_corrupted as i64,
+                demux_discontinuity: s.demux_discontinuity as i64,
+                decoded_video: s.decoded_video as i64,
+                decoded_audio: s.decoded_audio as i64,
+                displayed_pictures: s.displayed_pictures as i64,
+                lost_pictures: s.lost_pictures as i64,
+                played_abuffers: s.played_abuffers as i64,
+                lost_abuffers: s.lost_abuffers as i64,
+            })
+        }
+    }
+}
+
+/// Video and audio filters beyond what libVLC's API offers. libVLC 3's
+/// media player is a VLC object, and its audio output and video outputs
+/// are its children, so filters are set the way libVLC sets its own
+/// (adjust, logo, equaliser): as variables on the player, which new outputs
+/// inherit, and on the outputs that exist, which apply them at once.
+impl Vlc {
+    /// Sets an object variable, creating it if the object doesn't have it.
+    fn set_var(&self, obj: *mut c_void, name: &str, value: &Var) {
+        let n = cstr(name);
+        let (ty, bits) = match value {
+            Var::Int(v) => (VAR_INTEGER, *v),
+            Var::Float(v) => (VAR_FLOAT, v.to_bits() as i64),
+            Var::Str(v) => (VAR_STRING, v.as_ptr() as i64),
+        };
+        unsafe {
+            if (self.core.var_type)(obj, n.as_ptr()) == 0 {
+                (self.core.var_create)(obj, n.as_ptr(), ty);
+            }
+            (self.core.var_set)(obj, n.as_ptr(), ty, bits);
+        }
+    }
+
+    /// Calls `f` with each of the player's child objects of `kind`
+    /// ("audio output" or "video output"), held for the call.
+    fn each_child(&self, kind: &str, f: impl Fn(*mut c_void)) {
+        unsafe {
+            let list = (self.core.list_children)(self.mp);
+            if list.is_null() {
+                return;
+            }
+            for i in 0..(*list).count.max(0) as usize {
+                let obj = *(*list).values.add(i);
+                // vlc_object_t starts with `const char *object_type`.
+                let ty = *(obj as *const *const c_char);
+                if !ty.is_null() && CStr::from_ptr(ty).to_bytes() == kind.as_bytes() {
+                    f(obj);
+                }
+            }
+            (self.core.list_release)(list);
+        }
+    }
+
+    /// Sets the "video-filter" chain, like "transform{type=90}:sharpen".
+    /// The video on screen rebuilds its filters; new videos inherit it.
+    pub fn set_video_filters(&self, chain: &str) {
+        let c = cstr(chain);
+        self.set_var(self.mp, "video-filter", &Var::Str(&c));
+        self.each_child("video output", |vout| self.set_var(vout, "video-filter", &Var::Str(&c)));
+    }
+
+    /// Sets the audio filters' settings, then the "audio-filter" chain. Most
+    /// filters follow setting changes as they play; with `restart` the
+    /// chain is rebuilt so they all start again from the settings.
+    pub fn set_audio_filters(&self, chain: &str, params: &[crate::effects::AudioParam], restart: bool) {
+        let c = cstr(chain);
+        let empty = cstr("");
+        let apply = |obj: *mut c_void| {
+            for p in params {
+                let value = if p.int { Var::Int(p.value.round() as i64) } else { Var::Float(p.value) };
+                self.set_var(obj, p.name, &value);
+            }
+            if restart {
+                self.set_var(obj, "audio-filter", &Var::Str(&empty));
+            }
+            self.set_var(obj, "audio-filter", &Var::Str(&c));
+        };
+        apply(self.mp);
+        self.each_child("audio output", apply);
+    }
+}
+
 fn put_config(core: &CoreApi, inst: *mut Inst, name: &str, value: &ConfigValue) {
     let n = cstr(name);
     unsafe {
@@ -1497,5 +2046,30 @@ fn errmsg(api: &Api) -> String {
         } else {
             CStr::from_ptr(msg).to_string_lossy().into_owned()
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn teletext_tracks_pair_by_position() {
+        // A DVB recording: the first teletext track is listed by PID 106.
+        let text = [(3, true), (4, true), (5, true)];
+        assert_eq!(teletext_ids(&text, &[106, 4, 5]), [106, 4, 5]);
+        // Mixed tracks keep their kinds by position.
+        assert_eq!(teletext_ids(&[(2, false), (3, true)], &[7, 8]), [8]);
+        // An added subtitle file makes the counts differ: ids are matched.
+        assert_eq!(teletext_ids(&[(3, true), (4, false)], &[3, 4, 9]), [3]);
+        assert!(teletext_ids(&[], &[]).is_empty());
+    }
+
+    #[test]
+    fn fourcc_reads_codes() {
+        assert_eq!(fourcc(u32::from_le_bytes(*b"telx")), "telx");
+        assert!(is_teletext(u32::from_le_bytes(*b"telx")));
+        assert_eq!(fourcc(u32::from_le_bytes(*b"mp4a")), "mp4a");
+        assert_eq!(kbps(0.25), 2000.0);
     }
 }

@@ -64,6 +64,7 @@ export const MENUS: MenuDef[] = [
       ["mute", "Mute"],
       SEP,
       ["cycleAudio", "Next Audio Track"],
+      ["cycleStereo", "Next Stereo Mode"],
       ["audioDelayUp", "Increase Audio Delay"],
       ["audioDelayDown", "Decrease Audio Delay"],
     ],
@@ -77,6 +78,10 @@ export const MENUS: MenuDef[] = [
       ["cycleAspect", "Next Aspect Ratio"],
       ["cycleCrop", "Next Crop"],
       ["deinterlace", "Toggle Deinterlace"],
+      SEP,
+      ["cycleVideo", "Next Video Track"],
+      ["cycleZoom", "Zoom"],
+      ["resetZoom", "Reset Zoom"],
     ],
   },
   {
@@ -93,6 +98,9 @@ export const MENUS: MenuDef[] = [
     label: "Tools",
     items: [
       ["queue", "Up Next"],
+      ["effects", "Effects and Filters…"],
+      ["mediaInfo", "Media Information…"],
+      ["codecInfo", "Codec Information…"],
       SEP,
       ["settings", "Settings…"],
     ],

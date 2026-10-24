@@ -46,8 +46,8 @@ Main features come first. Ship, get feedback, then keep ticking boxes.
 - [x] Subtitle delay
 - [x] Text encoding override
 - [x] Font, size, colour, opacity, outline, shadow, background, position
-- [ ] Secondary subtitle track
-- [ ] Teletext
+- [ ] Secondary subtitle track. Needs libVLC 4: libVLC 3 can only show one subtitle track at a time (VLC 3.0 desktop can't either).
+- [x] Teletext
 - [ ] Online subtitle search
 
 ## Audio
@@ -55,9 +55,9 @@ Main features come first. Ship, get feedback, then keep ticking boxes.
 - [x] Volume up to 150% from the slider (200% from the keyboard), mute
 - [x] Audio delay
 - [x] Output device selection
-- [ ] Equaliser with presets
-- [ ] Compressor, spatialiser, stereo widener, normalisation, pitch
-- [ ] Stereo mode (left / right / reverse / mono)
+- [x] Equaliser with presets
+- [x] Compressor, spatialiser, stereo widener, normalisation, pitch
+- [x] Stereo mode (left / right / reverse / mono)
 - [x] S/PDIF passthrough
 - [ ] Visualisations
 
@@ -68,14 +68,14 @@ Main features come first. Ship, get feedback, then keep ticking boxes.
 - [x] Snapshot (saved to the Desktop on macOS, Pictures on Windows)
 - [x] Fullscreen
 - [ ] Zoom and pan
-- [ ] Rotate / flip
-- [ ] Colour adjustments (brightness, contrast, hue, saturation, gamma)
-- [ ] Sharpen and other effects
-- [ ] Logo and marquee overlays
-- [ ] Video track selection
+- [x] Rotate / flip
+- [x] Colour adjustments (brightness, contrast, hue, saturation, gamma)
+- [x] Sharpen and other effects
+- [x] Logo and marquee overlays
+- [x] Video track selection
 - [x] Always on top
-- [ ] Mini player, picture-in-picture
-- [ ] HDR shown as HDR on XDR displays (see plan M2)
+- [ ] Mini player, picture-in-picture. macOS's built-in picture-in-picture needs us to pass it video frames ourselves instead of letting libVLC draw into the window, which costs performance. A mini player is simpler and comes first.
+- [ ] HDR shown as HDR on XDR displays (see plan M2). libVLC 3 appears to convert HDR to SDR on macOS, so this probably needs libVLC 4.
 
 ## Convert, stream and record
 - [ ] Convert / save to another format
@@ -96,13 +96,13 @@ Main features come first. Ship, get feedback, then keep ticking boxes.
 - [ ] Mouse wheel and gesture actions
 - [ ] Media keys and the macOS Now Playing widget
 - [ ] Web interface and remote control
-- [ ] Command-line options
+- [x] Command-line options
 
 ## Settings and extras
 - [x] Simple preferences, with VLC's defaults (General, Video, Audio, Subtitles, Input & Codecs, Shortcuts)
 - [ ] Advanced preferences (every libVLC option)
 - [ ] Per-file settings
-- [ ] Media information and codec details
+- [x] Media information and codec details
 - [ ] Statistics and log viewer
 - [ ] Lua extensions
 

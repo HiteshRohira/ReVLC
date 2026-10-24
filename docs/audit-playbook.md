@@ -31,9 +31,9 @@ Each item here prevented a delay from last time (see section 6).
   - `~/.tauri/revlc-updater.key` exists, so `npm run build:app` can sign the
     updater archive.
 - [ ] **Branch has the QA scripts.** The branch under test must contain
-      `scripts/qa/` (merged from master). If it doesn't, tell both threads to
-      run the scripts from a master checkout instead
-      (`git -C <repo> show master:scripts/qa/...`, or a second worktree).
+      `scripts/qa/` (merged from main). If it doesn't, tell both threads to
+      run the scripts from a main checkout instead
+      (`git -C <repo> show main:scripts/qa/...`, or a second worktree).
 - [ ] **Fixtures are present.** `~/revlc-qa/media/` exists. If not, the thread
       runs `scripts/qa/generate-media.py` (about 4 s). On the PC,
       `scripts\qa\windows\generate-media.ps1` makes the Windows set. Both only

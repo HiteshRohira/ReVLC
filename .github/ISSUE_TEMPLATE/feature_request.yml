@@ -4,7 +4,7 @@ labels: [enhancement]
 body:
   - type: markdown
     attributes:
-      value: Check the [parity checklist](https://github.com/HiteshRohira/ReVLC/blob/master/docs/parity.md) first; it may already be planned.
+      value: Check the [parity checklist](https://github.com/HiteshRohira/ReVLC/blob/main/docs/parity.md) first; it may already be planned.
   - type: textarea
     id: what
     attributes:

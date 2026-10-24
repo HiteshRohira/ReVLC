@@ -46,7 +46,7 @@
 
   // Keys reset by each tab's "Restore defaults".
   const TAB_KEYS: Record<Exclude<Tab, "shortcuts">, (keyof Settings)[]> = {
-    general: ["resume", "stopAfterEach", "pauseWhenMinimized", "seekbarChapters", "seekbarPreview", "autoUpdate", "analytics"],
+    general: ["resume", "stopAfterEach", "pauseWhenMinimized", "seekbarChapters", "seekbarPreview", "wheel", "autoUpdate", "analytics"],
     video: ["video", "startFullscreen", "alwaysOnTop", "deinterlace", "deinterlaceMode", "snapshotPath", "snapshotPrefix", "snapshotFormat", "snapshotSequential"],
     audio: ["audio", "audioDevice", "audioLanguage", "timeStretch", "replayGain", "spdif"],
     subtitles: ["subtitleLanguage", "subAutodetect", "subAutodetectFuzzy", "subEncoding", "font", "fontSize", "fontColor", "fontOpacity", "bold", "outlineThickness", "outlineColor", "backgroundOpacity", "backgroundColor", "shadowOpacity", "subMargin", "showTitle", "titleTimeout", "titlePosition"],
@@ -207,6 +207,9 @@
             onchange={(val) => settings.set({ stopAfterEach: val === "stop" })} />
         </Row>
         <Row label="Pause when minimised">{@render toggle("pauseWhenMinimized")}</Row>
+        <Row label="Mouse wheel over the video" help="Scrolling up turns the volume up or jumps forward 5 seconds.">
+          {@render choice("wheel", [["volume", "Changes the volume"], ["seek", "Seeks"], ["none", "Does nothing"]])}
+        </Row>
       </div>
       <h3>Updates</h3>
       <div class="group">

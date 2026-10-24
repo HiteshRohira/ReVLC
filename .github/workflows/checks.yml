@@ -1,11 +1,11 @@
 # Type-checks the UI and lints and tests the Rust side on all three platforms,
-# for every push to master and every pull request. The release workflow
+# for every push to main and every pull request. The release workflow
 # runs it first and builds nothing if it fails.
 name: Checks
 
 on:
   push:
-    branches: [master]
+    branches: [main]
   pull_request:
   workflow_call:
 
