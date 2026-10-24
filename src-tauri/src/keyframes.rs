@@ -28,6 +28,8 @@ pub fn ffmpeg() -> Option<PathBuf> {
 /// How FFmpeg decodes.
 #[derive(Clone, Debug)]
 pub enum Accel {
+    /// NVIDIA's own decoder (NVDEC), frames copied back to be scaled.
+    Cuda,
     /// VA-API on this render node (Linux), scaling on the GPU too.
     Vaapi(String),
     /// VideoToolbox (macOS) or D3D11VA (Windows), frames copied back to be
@@ -43,6 +45,9 @@ impl Accel {
 
     fn args(&self) -> Vec<&str> {
         match self {
+            // Frames stay on the GPU until `filter` downloads them, so a GPU
+            // that can't decode the file fails rather than quietly using the CPU.
+            Accel::Cuda => vec!["-hwaccel", "cuda", "-hwaccel_output_format", "cuda"],
             Accel::Vaapi(d) => vec!["-hwaccel", "vaapi", "-hwaccel_device", d, "-hwaccel_output_format", "vaapi"],
             Accel::Copy(api) => vec!["-hwaccel", api, "-threads", "2"],
             Accel::Cpu => vec!["-threads", "2"],
@@ -52,22 +57,50 @@ impl Accel {
     /// The filter that scales frames to `width` and logs each one's time.
     fn filter(&self, width: u32) -> String {
         match self {
+            // 8-bit video downloads as NV12, 10-bit as P010.
+            Accel::Cuda => format!("hwdownload,format=nv12|p010le,scale={width}:-2,showinfo"),
             Accel::Vaapi(_) => format!("scale_vaapi=w={width}:h=-2,hwdownload,format=nv12,showinfo"),
             _ => format!("scale={width}:-2,showinfo"),
         }
     }
 }
 
-/// How to decode video track `track` of `video`: on macOS and Windows, the
-/// system's video API; on Linux, the first VA-API device that can decode it.
+/// How to decode video track `track` of `video`, dedicated GPU first: NVIDIA's
+/// NVDEC (on Windows, or on Linux with NVIDIA's driver), then on Linux each
+/// VA-API GPU, dedicated before integrated, then the CPU. On macOS,
+/// VideoToolbox picks the GPU itself; on Windows, D3D11VA uses the default
+/// one.
 pub fn accel(ffmpeg: &Path, video: &str, track: usize, width: u32) -> Accel {
     if cfg!(target_os = "macos") {
-        Accel::Copy("videotoolbox")
-    } else if cfg!(windows) {
-        Accel::Copy("d3d11va")
-    } else {
-        vaapi_device(ffmpeg, video, track, width).map_or(Accel::Cpu, Accel::Vaapi)
+        return Accel::Copy("videotoolbox");
     }
+    if (cfg!(windows) || nvidia_driver()) && decodes(ffmpeg, video, track, &Accel::Cuda, width) {
+        return Accel::Cuda;
+    }
+    if cfg!(windows) {
+        return Accel::Copy("d3d11va");
+    }
+    vaapi_nodes().into_iter().map(Accel::Vaapi).find(|a| decodes(ffmpeg, video, track, a, width)).unwrap_or(Accel::Cpu)
+}
+
+/// Whether NVIDIA's own driver is loaded (Linux). Without it (nouveau, say),
+/// NVDEC can't work and isn't worth trying.
+fn nvidia_driver() -> bool {
+    Path::new("/proc/driver/nvidia/version").exists()
+}
+
+/// Whether FFmpeg can decode a keyframe of video track `track` of `video`
+/// with `accel`.
+fn decodes(ffmpeg: &Path, video: &str, track: usize, accel: &Accel, width: u32) -> bool {
+    command(ffmpeg)
+        .args(["-hide_banner", "-nostdin", "-loglevel", "error"])
+        .args(accel.args())
+        .args(["-skip_frame", "nokey", "-i", video, "-map", &video_stream(track), "-frames:v", "1", "-vf", &accel.filter(width), "-f", "null", "-"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .is_ok_and(|s| s.success())
 }
 
 /// FFmpeg's name for the `track`th video stream, not counting cover art.
@@ -91,42 +124,34 @@ fn command(ffmpeg: &Path) -> Command {
     cmd
 }
 
-/// A VA-API render node that can decode `video`, trying each in turn (a
-/// laptop may have two GPUs, one without a working video decoder), the one
-/// that worked last time first; `None` to decode on the CPU.
-fn vaapi_device(ffmpeg: &Path, video: &str, track: usize, width: u32) -> Option<String> {
-    static LAST: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
-    if !cfg!(target_os = "linux") {
-        return None;
-    }
-    let last = LAST.lock().unwrap_or_else(|e| e.into_inner()).clone();
-    let mut nodes: Vec<PathBuf> = std::fs::read_dir("/dev/dri")
-        .ok()?
-        .flatten()
-        .map(|e| e.path())
-        .filter(|p| p.file_name().is_some_and(|n| n.to_string_lossy().starts_with("renderD")))
-        .collect();
-    nodes.sort();
-    let mut nodes: Vec<String> = nodes.into_iter().map(|n| n.to_string_lossy().into_owned()).collect();
-    if let Some(last) = last {
-        nodes.sort_by_key(|n| *n != last);
-    }
-    let found = nodes.into_iter().find(|node| {
-        let accel = Accel::Vaapi(node.clone());
-        command(ffmpeg)
-            .args(["-hide_banner", "-nostdin", "-loglevel", "error"])
-            .args(accel.args())
-            .args(["-skip_frame", "nokey", "-i", video, "-map", &video_stream(track), "-frames:v", "1", "-vf", &accel.filter(width), "-f", "null", "-"])
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-            .is_ok_and(|s| s.success())
+/// The VA-API render nodes to try (Linux), dedicated GPUs first.
+fn vaapi_nodes() -> Vec<String> {
+    let Ok(entries) = std::fs::read_dir("/dev/dri") else { return Vec::new() };
+    let nodes = entries.flatten().filter_map(|e| {
+        let name = e.file_name().to_string_lossy().into_owned();
+        if !name.starts_with("renderD") {
+            return None;
+        }
+        let device = Path::new("/sys/class/drm").join(&name).join("device");
+        let read = |file: &str| std::fs::read_to_string(device.join(file)).ok().map(|s| s.trim().to_string());
+        let vendor = read("vendor").and_then(|v| u16::from_str_radix(v.trim_start_matches("0x"), 16).ok()).unwrap_or(0);
+        let vram = read("mem_info_vram_total").and_then(|v| v.parse().ok());
+        Some((e.path().to_string_lossy().into_owned(), vendor, vram))
     });
-    if found.is_some() {
-        *LAST.lock().unwrap_or_else(|e| e.into_inner()) = found.clone();
-    }
-    found
+    vaapi_order(nodes.collect())
+}
+
+/// Orders render nodes, given as (path, PCI vendor, video memory in bytes),
+/// dedicated GPUs first. NVIDIA's are left out: VA-API doesn't drive them
+/// (NVDEC does, with NVIDIA's driver), and nouveau fails slowly. A GPU with
+/// at least 2 GiB of its own memory counts as dedicated; integrated ones have
+/// a smaller share of system memory, or report none.
+fn vaapi_order(mut nodes: Vec<(String, u16, Option<u64>)>) -> Vec<String> {
+    const NVIDIA: u16 = 0x10de;
+    const DEDICATED: u64 = 2 << 30;
+    nodes.retain(|n| n.1 != NVIDIA);
+    nodes.sort_by_key(|(path, _, vram)| (vram.is_none_or(|v| v < DEDICATED), path.clone()));
+    nodes.into_iter().map(|n| n.0).collect()
 }
 
 /// Decodes the keyframes of video track `track` of `video` from `from` ms
@@ -294,6 +319,16 @@ mod tests {
         }
         assert_eq!(got, vec![a, b]);
         assert!(buf.is_empty());
+    }
+
+    #[test]
+    fn dedicated_gpus_first_nvidia_left_to_nvdec() {
+        let node = |p: &str, vendor, vram| (p.to_string(), vendor, vram);
+        // This laptop: an AMD APU (512 MiB carve-out) and an NVIDIA card.
+        assert_eq!(vaapi_order(vec![node("/dev/dri/renderD129", 0x10de, None), node("/dev/dri/renderD128", 0x1002, Some(512 << 20))]), ["/dev/dri/renderD128"]);
+        // A desktop: Intel integrated, then an AMD card with 8 GiB.
+        let order = vaapi_order(vec![node("/dev/dri/renderD128", 0x8086, None), node("/dev/dri/renderD129", 0x1002, Some(8 << 30))]);
+        assert_eq!(order, ["/dev/dri/renderD129", "/dev/dri/renderD128"]);
     }
 
     #[test]
