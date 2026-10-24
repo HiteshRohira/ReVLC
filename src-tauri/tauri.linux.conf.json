@@ -22,7 +22,7 @@
     "resources": ["../LICENSE", "../licenses/"],
     "linux": {
       "deb": {
-        "depends": ["libvlc5 (>= 3.0)", "libvlccore9", "vlc-plugin-base", "vlc-plugin-video-output", "xdg-utils"]
+        "depends": ["libvlc5 (>= 3.0)", "libvlccore9", "vlc-plugin-base", "vlc-plugin-video-output", "xdg-utils", "ffmpeg"]
       }
     }
   }

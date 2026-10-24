@@ -1,5 +1,6 @@
 <script lang="ts">
   import { untrack } from "svelte";
+  import { fly } from "svelte/transition";
   import { player, formatTime, chapterAt, genericChapter, thumbUrl } from "./player.svelte";
   import { settings } from "./settings.svelte";
 
@@ -15,6 +16,7 @@
     // Another video, or none: the close-up strip belongs to the last one.
     untrack(() => {
       fineOpen = false;
+      pull = 0;
       fineAt = null;
     });
     if (wantFrames === null) {
@@ -32,22 +34,16 @@
     return () => clearTimeout(timer);
   });
 
-  // The preview frame under the pointer, or the nearest one made so far
-  // within about 1/120 of the video: one from further away would show the
-  // wrong scene. Frames are made coarse to fine, so this soon finds one.
+  // The preview frame under the pointer (the strip shows them while it's open).
   const hoverK = $derived.by(() => (hover === null || !player.scrub ? null : Math.round(hover / player.scrub.step)));
-  const frame = $derived.by(() => {
-    const sc = player.scrub;
-    // The strip shows the frames while it's open.
-    if (fineOpen || hoverK === null || !sc) return null;
-    const reach = Math.max(1, Math.round(length / 120 / sc.step));
-    for (let d = 0; d <= reach; d++) {
-      for (const k of [hoverK - d, hoverK + d]) {
-        const f = player.scrubFrame(k);
-        if (f) return f;
-      }
-    }
-    return null;
+  const frame = $derived.by(() => (fineOpen || hover === null ? null : player.nearestScrubFrame(hover, length)));
+  // While scrubbing, the video shows the frame of the chosen spot, as on
+  // YouTube; the real seek comes when the user lets go or plays.
+  $effect(() => {
+    const scrubbing = drag !== null || fineOpen;
+    const shown = scrubbing ? player.nearestScrubFrame(position, length) : null;
+    untrack(() => (player.scrubShown = shown));
+    return () => untrack(() => (player.scrubShown = null));
   });
   // Have the frames under the pointer made next.
   $effect(() => {
@@ -62,6 +58,9 @@
   const TILE = 156; // px per close-up frame, gap included
   const fineStep = $derived(player.scrub?.step ?? 10_000);
   let fineOpen = $state(false);
+  /** How far the strip has been pulled up, 0 to 1, while dragging up towards opening it. */
+  let pull = $state(0);
+  const stripShown = $derived(fineOpen || pull > 0);
   /** The chosen spot while the strip is open. */
   let fineT = $state(0);
   /** Where a drag that opened the strip started: then the pointer's sideways travel moves the spot. */
@@ -76,7 +75,7 @@
   let asked = -1000;
   const half = $derived((barW / 2) * (fineStep / TILE)); // ms from the middle to an edge
   const fineFrames = $derived.by(() => {
-    if (!fineOpen) return [];
+    if (!stripShown) return [];
     const first = Math.floor((position - half) / fineStep);
     const last = Math.ceil((position + half) / fineStep);
     const out: { k: number; left: number }[] = [];
@@ -87,7 +86,7 @@
   });
   // Ask for the frames around the pointer as it moves along.
   $effect(() => {
-    if (!fineOpen) {
+    if (!stripShown) {
       asked = -1000;
       return;
     }
@@ -106,6 +105,8 @@
   function openFine() {
     if (fineOpen) return;
     fineOpen = true;
+    // Open now, so no longer pulled: closing must hide it altogether.
+    pull = 0;
     fineT = drag ?? s.time;
     seenPaused = false;
     if (player.playing) player.togglePause();
@@ -115,6 +116,7 @@
     if (!fineOpen) return;
     const t = fineT;
     fineOpen = false;
+    pull = 0;
     fineAt = null;
     stripDrag = null;
     player.seek(t);
@@ -163,6 +165,8 @@
     hover = msAt(e);
     if (drag === null) return;
     const up = el.getBoundingClientRect().top - e.clientY;
+    // The strip follows the pointer up until it opens.
+    if (!fineOpen) pull = player.scrub ? Math.min(1, Math.max(0, (up - 6) / FINE_UP)) : 0;
     // Fine scrubbing starts above FINE_UP and ends a little below it.
     if (fineAt === null && up > FINE_UP && player.scrub) {
       fineAt = { x: e.clientX, t: drag };
@@ -179,6 +183,8 @@
     }
     drag = null;
     fineAt = null;
+    // Not pulled far enough: it slides back down.
+    if (!fineOpen) pull = 0;
   }
   const clamp = (ms: number) => Math.min(length, Math.max(0, ms));
   function onStripDown(e: PointerEvent) {
@@ -234,12 +240,21 @@
   onpointerleave={() => (hover = null)}
   onkeydown={onKey}
 >
-  {#if fineOpen}
-    <div class="strip" class:panning={stripDrag !== null} class:gliding role="presentation" onpointerdown={onStripDown} onpointermove={onStripMove} onpointerup={onStripUp}>
+  {#if stripShown}
+    {@const p = fineOpen ? 1 : pull}
+    <div
+      class="strip"
+      class:panning={stripDrag !== null}
+      class:gliding
+      class:following={!fineOpen && drag !== null}
+      class:peek={!fineOpen}
+      style="opacity: {p}; transform: translateY({(1 - p) * 28}px) scaleY({0.55 + 0.45 * p})"
+      out:fly={{ y: 28, duration: 160 }}
+      role="presentation" onpointerdown={onStripDown} onpointermove={onStripMove} onpointerup={onStripUp}>
       {#each fineFrames as f (f.k)}
         {@const src = player.scrubFrame(f.k)}
         <div class="tile" style="left: {f.left}px">
-          {#if src}<img src={thumbUrl(src)} alt="" draggable="false" />{/if}
+          {#if src}<img src={thumbUrl(src, player.scrubVersion)} alt="" draggable="false" />{/if}
         </div>
       {/each}
       <div class="mid"></div>
@@ -249,10 +264,10 @@
       </button>
     </div>
   {/if}
-  {#if hover !== null && enabled && fineAt === null}
+  {#if hover !== null && enabled && fineAt === null && pull < 0.3}
     {@const ch = player.chapters.length > 1 ? chapterAt(player.chapters, hover) : null}
     <div class="tip" class:framed={frame} style="left: clamp({frame ? 92 : 60}px, {(hover / length) * 100}%, calc(100% - {frame ? 92 : 60}px))">
-      {#if frame}<img src={thumbUrl(frame)} alt="" draggable="false" />{/if}
+      {#if frame}<img src={thumbUrl(frame, player.scrubVersion)} alt="" draggable="false" />{/if}
       <span class="tnum">{formatTime(hover)}</span>{#if nearBookmark}<span class="ch"> · {nearBookmark.name}</span>{:else if ch && !genericChapter(ch.name)}<span class="ch"> · {ch.name}</span>{/if}
     </div>
   {/if}
@@ -381,6 +396,17 @@
     background: rgb(10 10 12 / 0.92);
     cursor: grab;
     touch-action: none;
+    transform-origin: 50% 100%;
+    /* Settles into place when it opens; follows the pointer while pulled. */
+    transition:
+      opacity 0.18s ease-out,
+      transform 0.18s ease-out;
+  }
+  .strip.following {
+    transition: none;
+  }
+  .strip.peek {
+    pointer-events: none;
   }
   .strip.panning {
     cursor: grabbing;

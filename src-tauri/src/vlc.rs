@@ -1366,43 +1366,36 @@ impl Vlc {
     pub fn thumbnail(&self, path: &str, out: &Path, fraction: f64, width: u32) -> Result<(), String> {
         let length = self.parse(path, 3000).map(|m| m.duration).unwrap_or(0);
         let start = if length > 0 { ((length as f64 * fraction) as i64).clamp(0, (length - 1000).max(0)) } else { 0 };
-        self.thumbnail_at(path, out, start, width, false, false)
+        self.thumbnail_at(path, out, start, width, false)
     }
 
-    /// Like [`Vlc::thumbnail`], at `start` ms into the media. With `fast`,
-    /// the decoder skips its loop filter: a little quality for speed, for the
-    /// small frames of the seek bar. (Dropping the clock sync or cache made
-    /// the first frames come from the start of the file, before the seek.)
-    /// With `precise`, the frame is the one at `start` rather than the
-    /// keyframe before it: slower, but close frames differ.
-    pub fn thumbnail_at(&self, path: &str, out: &Path, start: i64, width: u32, fast: bool, precise: bool) -> Result<(), String> {
-        // No input cache to fill first: the file is local.
-        let quick = if fast { [":file-caching=0", ":avcodec-skiploopfilter=4"].as_slice() } else { &[] };
+    /// Like [`Vlc::thumbnail`], at `start` ms into the media. With `precise`,
+    /// the frame is the one at `start` rather than the keyframe before it:
+    /// slower, but close frames differ.
+    pub fn thumbnail_at(&self, path: &str, out: &Path, start: i64, width: u32, precise: bool) -> Result<(), String> {
         // libVLC plays a few frames from the beginning before it jumps to the
         // start time, and they can be the ones shown after the jump: frames
         // like the file's opening are passed over.
-        let opening = if start > 10_000 { self.opening(path, width, quick) } else { None };
-        let frame = self.grab(path, start, width, quick, 2, precise, opening)?;
+        let opening = if start > 10_000 { self.opening(path, width) } else { None };
+        let frame = self.grab(path, start, width, precise, opening)?;
         save_frame(&frame, out)
     }
 
     /// The opening frame of `path`, made once and kept; `None` if it's too
     /// plain (black, say) to tell apart from other frames.
-    fn opening(&self, path: &str, width: u32, extra: &[&str]) -> Option<Opening> {
+    fn opening(&self, path: &str, width: u32) -> Option<Opening> {
         let key = (path.to_string(), width);
         if let Some(known) = self.openings.lock().unwrap_or_else(|e| e.into_inner()).get(&key) {
             return known.clone();
         }
-        let frame = self.grab(path, 0, width, extra, 2, false, None).ok();
+        let frame = self.grab(path, 0, width, false, None).ok();
         let opening = frame.and_then(|f| f.buf).map(|b| b.as_slice().to_vec()).filter(|v| detailed(v)).map(std::sync::Arc::new);
         self.openings.lock().unwrap_or_else(|e| e.into_inner()).insert(key, opening.clone());
         opening
     }
 
-    /// Decodes with `extra` media options, taking the frame `settle` frames
-    /// after playback reaches `start`, and one unlike `opening` if any.
-    #[allow(clippy::too_many_arguments)]
-    fn grab(&self, path: &str, start: i64, width: u32, extra: &[&str], settle: u32, precise: bool, opening: Option<Opening>) -> Result<GrabFrame, String> {
+    /// Decodes a frame at `start` ms into `path`, unlike `opening` if given.
+    fn grab(&self, path: &str, start: i64, width: u32, precise: bool, opening: Option<Opening>) -> Result<GrabFrame, String> {
         let check = opening.is_some();
         use std::sync::atomic::Ordering::Acquire;
         use std::time::{Duration, Instant};
@@ -1434,7 +1427,9 @@ impl Vlc {
                 drop(Box::from_raw(grab));
                 return Err("could not create the thumbnail player".into());
             }
-            for opt in extra.iter().map(|o| o.to_string()).chain([
+            for opt in [
+                // No input cache to fill first: the file is local.
+                ":file-caching=0".to_string(),
                 ":no-audio".to_string(),
                 ":no-spu".to_string(),
                 ":no-sub-autodetect-file".to_string(),
@@ -1442,7 +1437,8 @@ impl Vlc {
                 // dav1d's thread count; its tile setting doesn't add any.
                 ":dav1d-thread-frames=2".to_string(),
                 format!(":start-time={:.3}", start as f64 / 1000.0),
-            ])
+            ]
+            .into_iter()
             .chain((!precise).then(|| ":input-fast-seek".to_string()))
             {
                 let o = cstr(&opt);
@@ -1454,7 +1450,6 @@ impl Vlc {
             (api.libvlc_video_set_format_callbacks)(mp, grab_format, None);
             (api.libvlc_media_player_play)(mp);
 
-            // A few frames in, past any grey first frame of an open GOP.
             // libVLC can show a frame or two from the start of the file before
             // the start time takes effect, so wait for the position to get
             // there (to its keyframe, which may be a little before), then a
@@ -1464,19 +1459,18 @@ impl Vlc {
                 g.frames.load(Acquire) >= 1 && (api.libvlc_media_player_get_time)(mp) >= start / 2
             });
             let seen = g.frames.load(Acquire);
-            let settled = landed && wait(Duration::from_secs(10), &|| g.frames.load(Acquire) >= seen + settle);
+            let settled = landed && wait(Duration::from_secs(10), &|| g.frames.load(Acquire) >= seen + 2);
             // Frames from the beginning can still be on their way after the
             // jump: wait for one unlike the opening. In a scene that looks
             // like it, that never comes; then take what's there.
             if settled && check {
                 wait(Duration::from_secs(3), &|| !g.like_opening.load(Acquire));
             }
-            let ok = settled;
             (api.libvlc_media_player_stop)(mp);
             (api.libvlc_media_player_release)(mp);
             // Stopped and released: the video output is gone, so the frame is ours.
             let g = Box::from_raw(grab).frame.into_inner();
-            if !ok {
+            if !settled {
                 return Err(format!("no frame decoded from {path}"));
             }
             Ok(g)

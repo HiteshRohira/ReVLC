@@ -27,6 +27,26 @@ plugin packages instead of bundling these libraries. Their version, source
 packages, patches and notices are provided by the distribution's package
 manager (`apt source vlc` on Mint/Ubuntu with source repositories enabled).
 
+## FFmpeg
+
+The macOS and Windows packages include an FFmpeg 9.0.2 program
+(`ffmpeg/ffmpeg`, `ffmpeg/ffmpeg.exe`), unmodified, which makes the seek bar
+previews. It is under the GNU General Public License, version 3 or later
+(the same licence as ReVLC, in `LICENSE`), and contains third-party
+libraries under their own compatible licences.
+
+- macOS (Apple Silicon): Martin Riedl's static build,
+  https://ffmpeg.martin-riedl.de/info/detail/macos/arm64/1789931890_9.0.2.
+- Windows: Gyan Doshi's "essentials" build,
+  https://github.com/GyanD/codexffmpeg/releases/tag/9.0.2 (build details:
+  https://www.gyan.dev/ffmpeg/builds/).
+
+FFmpeg's source code is available from https://ffmpeg.org/releases/
+(`ffmpeg-9.0.2.tar.xz`); the sources of the libraries in each build are
+listed on the pages above.
+
+The Linux package uses your distribution's `ffmpeg` package instead.
+
 "VLC" is a trademark of VideoLAN. ReVLC is an independent project and is not
 affiliated with or endorsed by VideoLAN.
 

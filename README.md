@@ -101,10 +101,15 @@ To build on Mint 22.x / Ubuntu 24.04:
 
 ```sh
 sudo apt install build-essential libwebkit2gtk-4.1-dev libssl-dev librsvg2-dev libx11-dev patchelf \
-  libvlc5 libvlccore9 vlc-plugin-base vlc-plugin-video-output
+  libvlc5 libvlccore9 vlc-plugin-base vlc-plugin-video-output ffmpeg
 npm ci
 npm run build:app
 ```
+
+FFmpeg makes the seek bar previews: it decodes a whole video's keyframes in
+one pass, on the GPU through VA-API where it can. Without it ReVLC falls back
+to libVLC, which is several times slower. (The macOS and Windows packages
+bundle FFmpeg, decoding with VideoToolbox and D3D11VA: `scripts/prepare-ffmpeg.sh`.)
 
 Use Rust stable and Node 22+. The package is written to
 `src-tauri/target/release/bundle/deb/`; no updater signing key is needed.

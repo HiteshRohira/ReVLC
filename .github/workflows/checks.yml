@@ -46,10 +46,10 @@ jobs:
       - name: Check the UI
         run: npm run check
 
-      # The Rust build embeds the built UI and bundles src-tauri/vlc, which
-      # can stay empty: nothing here loads libVLC.
+      # The Rust build embeds the built UI and bundles src-tauri/vlc and
+      # src-tauri/ffmpeg, which can stay empty: nothing here loads them.
       - name: Build the UI
-        run: npm run build && mkdir -p src-tauri/vlc
+        run: npm run build && mkdir -p src-tauri/vlc src-tauri/ffmpeg
 
       - name: Clippy
         working-directory: src-tauri
