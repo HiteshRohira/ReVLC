@@ -1927,7 +1927,11 @@ impl Vlc {
         // start time, and they can be the ones shown after the jump: frames
         // like the file's opening are passed over.
         let opening = if start > 10_000 { self.opening(path, width) } else { None };
-        let frame = self.grab(path, start, width, precise, opening)?;
+        let frame = match self.grab(path, start, width, precise, opening.clone()) {
+            // The fast seek didn't land (see `grab`): an exact one does.
+            Err(_) if !precise => self.grab(path, start, width, true, opening)?,
+            other => other?,
+        };
         save_frame(&frame, out)
     }
 
@@ -2008,9 +2012,13 @@ impl Vlc {
             // there (to its keyframe, which may be a little before), then a
             // few frames more, past any grey first frame of an open GOP.
             let g = &*grab;
-            let landed = wait(Duration::from_secs(10), &|| {
-                g.frames.load(Acquire) >= 1 && (api.libvlc_media_player_get_time)(mp) >= start / 2
-            });
+            // A fast seek lands at once or not at all: some files (MKVs with
+            // two video tracks, for one) ignore it and play from the start.
+            // Then waiting for playback to get there would take as long as
+            // the time itself, and give a frame from before it.
+            let first = wait(Duration::from_secs(10), &|| g.frames.load(Acquire) >= 1);
+            let reach = if precise { Duration::from_secs(10) } else { Duration::from_millis(1500) };
+            let landed = first && wait(reach, &|| (api.libvlc_media_player_get_time)(mp) >= start / 2);
             let seen = g.frames.load(Acquire);
             let settled = landed && wait(Duration::from_secs(10), &|| g.frames.load(Acquire) >= seen + 2);
             // Frames from the beginning can still be on their way after the
