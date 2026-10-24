@@ -1320,6 +1320,10 @@ struct ScrubGrid {
     length: i64,
     /// The selected video track, by position among the video tracks.
     track: usize,
+    /// Whether libVLC may make frames: only when the file has one video
+    /// stream. Its thumbnail player decodes the file's default stream, which
+    /// needn't be the first or the selected one, and can't be told otherwise.
+    libvlc: bool,
     step: i64,
     count: i64,
     prefix: Arc<String>,
@@ -1333,6 +1337,20 @@ impl ScrubGrid {
     }
 }
 
+/// What previews are made from: the current video's URI and length, the
+/// selected video track by position among its video streams (the way FFmpeg's
+/// `0:V:n` counts them; libVLC's track ids aren't stream numbers), how many
+/// video streams it has, and the file's size and modification time, which
+/// change when it's replaced by another file, maybe of the same length, so
+/// its old previews aren't reused.
+struct ScrubSource {
+    uri: String,
+    length: i64,
+    track: usize,
+    streams: usize,
+    signature: (u64, u128),
+}
+
 /// A frame to make: where it goes, how far in, and its number.
 struct ScrubJob {
     out: PathBuf,
@@ -1343,13 +1361,8 @@ struct ScrubJob {
 }
 
 impl Core {
-    /// What previews are made from, if they can be: the current video's URI,
-    /// its length, the selected video track (by position among the video
-    /// tracks, the way FFmpeg's `0:V:n` and libVLC's `video-track` count
-    /// them; libVLC's track ids aren't stream numbers), and the file's size
-    /// and modification time, which change when it's replaced by another
-    /// file, maybe of the same length, so its old previews aren't reused.
-    fn scrub_source(&self) -> Option<(String, i64, usize, (u64, u128))> {
+    /// What previews are made from, if they can be. See [`ScrubSource`].
+    fn scrub_source(&self) -> Option<ScrubSource> {
         let uri = self.current_uri()?;
         let length = self.vlc.length();
         // Only real files can be read by the second player.
@@ -1360,8 +1373,9 @@ impl Core {
         let meta = std::fs::metadata(&uri).ok()?;
         let modified = meta.modified().ok().and_then(|t| t.duration_since(UNIX_EPOCH).ok()).map_or(0, |d| d.as_nanos());
         let current = self.vlc.video_track();
-        let track = self.vlc.video_tracks().iter().filter(|t| t.id >= 0).position(|t| t.id == current).unwrap_or(0);
-        Some((uri, length, track, (meta.len(), modified)))
+        let tracks: Vec<i32> = self.vlc.video_tracks().iter().map(|t| t.id).filter(|&id| id >= 0).collect();
+        let track = tracks.iter().position(|&id| id == current).unwrap_or(0);
+        Some(ScrubSource { uri, length, track, streams: tracks.len(), signature: (meta.len(), modified) })
     }
 
     /// Ends the current preview run: its FFmpeg processes stop at their next
@@ -1379,13 +1393,14 @@ impl Core {
     fn scrub_prepare(self: &Arc<Self>) -> Option<ScrubInfo> {
         self.scrub_cancel();
         let run = self.scrub_run.load(Ordering::SeqCst);
-        let (uri, length, track, signature) = self.scrub_source()?;
+        let ScrubSource { uri, length, track, streams, signature } = self.scrub_source()?;
         let step = scrub::step(length);
         let count = (length - 1) / step + 1;
         let prefix = scrub::prefix(&self.scrub_dir, &uri, length, signature, track, step);
         let queue = Arc::default();
         *self.scrub_jobs.lock().unwrap_or_else(|e| e.into_inner()) = Arc::clone(&queue);
-        let grid = ScrubGrid { run, uri: Arc::new(uri), length, track, step, count, prefix: Arc::new(prefix.clone()), queue };
+        let libvlc = streams <= 1;
+        let grid = ScrubGrid { run, uri: Arc::new(uri), length, track, libvlc, step, count, prefix: Arc::new(prefix.clone()), queue };
         let ready: Vec<i64> = (0..count).filter(|&k| grid.path(k).exists()).collect();
         let have: HashSet<i64> = ready.iter().copied().collect();
         let _ = std::fs::create_dir_all(&self.scrub_dir);
@@ -1395,9 +1410,9 @@ impl Core {
                     let core = self.clone();
                     let _ = thread::Builder::new().name("scrub-pass".into()).spawn(move || core.scrub_pass(grid, &ffmpeg, have));
                 }
-                None if track == 0 => self.scrub_fill(grid, &have),
-                // libVLC only makes frames of the default track: none at all
-                // beats frames of a track the user didn't pick.
+                None if libvlc => self.scrub_fill(grid, &have),
+                // libVLC may make frames of another stream than the selected
+                // one: none at all beats frames of the wrong stream.
                 None => return None,
             }
         }
@@ -1448,9 +1463,9 @@ impl Core {
                 eprintln!("revlc: keyframe pass failed: {e}");
             }
         }
-        // libVLC fills the slots no keyframe landed in, but only makes frames
-        // of the default track; with another, those slots stay empty.
-        if self.scrub_run.load(Ordering::SeqCst) == grid.run && grid.track == 0 {
+        // libVLC fills the slots no keyframe landed in, for a file with one
+        // video stream; with more, those slots stay empty.
+        if self.scrub_run.load(Ordering::SeqCst) == grid.run && grid.libvlc {
             let made = made.lock().unwrap_or_else(|e| e.into_inner()).clone();
             self.scrub_fill(grid, &made);
         }

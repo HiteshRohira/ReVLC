@@ -11,8 +11,10 @@ use std::time::{Duration, SystemTime};
 /// Width of a preview frame, in pixels (twice what's shown, for sharp screens).
 pub const WIDTH: u32 = 320;
 
-/// Changes when frames made by earlier versions shouldn't be reused.
-const CACHE_VERSION: u8 = 4;
+/// Changes when frames made by earlier versions shouldn't be reused. (5:
+/// libVLC could cache frames of a file's default video stream under another
+/// stream's name.)
+const CACHE_VERSION: u8 = 5;
 
 /// How long unused frames stay in the cache.
 const KEEP: Duration = Duration::from_secs(7 * 24 * 3600);
