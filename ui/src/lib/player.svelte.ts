@@ -441,6 +441,12 @@ class Player {
     }
   }
 
+  /** Stops making preview frames and forgets them, until the next prepareScrub. */
+  cancelScrub() {
+    this.scrub = null;
+    invoke("scrub_cancel").catch(() => {});
+  }
+
   /** Has preview frames `from..=to` made next. */
   focusScrub(from: number, to: number) {
     invoke("scrub_focus", { from, to }).catch(() => {});

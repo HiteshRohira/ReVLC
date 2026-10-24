@@ -58,16 +58,21 @@ impl Accel {
     }
 }
 
-/// How to decode `video`: on macOS and Windows, the system's video API; on
-/// Linux, the first VA-API device that can decode it, if any.
-pub fn accel(ffmpeg: &Path, video: &str, width: u32) -> Accel {
+/// How to decode video track `track` of `video`: on macOS and Windows, the
+/// system's video API; on Linux, the first VA-API device that can decode it.
+pub fn accel(ffmpeg: &Path, video: &str, track: usize, width: u32) -> Accel {
     if cfg!(target_os = "macos") {
         Accel::Copy("videotoolbox")
     } else if cfg!(windows) {
         Accel::Copy("d3d11va")
     } else {
-        vaapi_device(ffmpeg, video, width).map_or(Accel::Cpu, Accel::Vaapi)
+        vaapi_device(ffmpeg, video, track, width).map_or(Accel::Cpu, Accel::Vaapi)
     }
+}
+
+/// FFmpeg's name for the `track`th video stream, not counting cover art.
+fn video_stream(track: usize) -> String {
+    format!("0:V:{track}")
 }
 
 /// An FFmpeg command. On Windows, without a console window flashing up, and
@@ -89,7 +94,7 @@ fn command(ffmpeg: &Path) -> Command {
 /// A VA-API render node that can decode `video`, trying each in turn (a
 /// laptop may have two GPUs, one without a working video decoder), the one
 /// that worked last time first; `None` to decode on the CPU.
-fn vaapi_device(ffmpeg: &Path, video: &str, width: u32) -> Option<String> {
+fn vaapi_device(ffmpeg: &Path, video: &str, track: usize, width: u32) -> Option<String> {
     static LAST: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
     if !cfg!(target_os = "linux") {
         return None;
@@ -111,7 +116,7 @@ fn vaapi_device(ffmpeg: &Path, video: &str, width: u32) -> Option<String> {
         command(ffmpeg)
             .args(["-hide_banner", "-nostdin", "-loglevel", "error"])
             .args(accel.args())
-            .args(["-skip_frame", "nokey", "-i", video, "-an", "-sn", "-dn", "-frames:v", "1", "-vf", &accel.filter(width), "-f", "null", "-"])
+            .args(["-skip_frame", "nokey", "-i", video, "-map", &video_stream(track), "-frames:v", "1", "-vf", &accel.filter(width), "-f", "null", "-"])
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
@@ -124,12 +129,14 @@ fn vaapi_device(ffmpeg: &Path, video: &str, width: u32) -> Option<String> {
     found
 }
 
-/// Decodes the keyframes from `from` ms for `len` ms of `video`, `width`
-/// pixels wide, calling `frame` with each one's time in ms and its JPEG.
-/// Stops early when `frame` returns false.
+/// Decodes the keyframes of video track `track` of `video` from `from` ms
+/// for `len` ms, `width` pixels wide, calling `frame` with each one's time in
+/// ms and its JPEG. Stops early when `frame` returns false.
+#[allow(clippy::too_many_arguments)]
 pub fn pass(
     ffmpeg: &Path,
     video: &str,
+    track: usize,
     accel: &Accel,
     from: i64,
     len: i64,
@@ -143,7 +150,7 @@ pub fn pass(
         .args(accel.args())
         // Keyframes only; times as in the file, not from the seek point.
         .args(["-skip_frame", "nokey", "-copyts", "-ss", &secs(from), "-t", &secs(len), "-i", video])
-        .args(["-an", "-sn", "-dn", "-vf", &accel.filter(width), "-fps_mode", "passthrough"])
+        .args(["-map", &video_stream(track), "-vf", &accel.filter(width), "-fps_mode", "passthrough"])
         .args(["-f", "image2pipe", "-c:v", "mjpeg", "-q:v", "5", "-"])
         .stdin(Stdio::null())
         .stdout(Stdio::piped())

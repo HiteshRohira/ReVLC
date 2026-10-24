@@ -8,25 +8,29 @@
   const length = $derived(s.length);
   const enabled = $derived(player.active && s.seekable && length > 0);
 
-  // Make preview frames once there's a seekable local video to take them from.
+  // Make preview frames once there's a seekable local video to take them
+  // from: for the selected video track, so picking another restarts them.
+  // A string, so unrelated changes don't restart them.
   const wantFrames = $derived(
-    player.current && enabled && settings.value?.seekbarPreview !== false ? player.current.uri : null,
+    player.current && enabled && settings.value?.seekbarPreview !== false
+      ? `${player.current.uri}\n${player.tracks.videoCurrent}`
+      : null,
   );
   /** Whether this video gets previews: "pending" until the player says, so the hover box can show it's coming. */
   let previews = $state<"pending" | "on" | "off">("off");
   $effect(() => {
-    // Another video, or none: the close-up strip belongs to the last one.
+    // Another video or track, or none: the close-up strip and the previews
+    // belong to the last one, and making them stops (previews turned off,
+    // playback stopped, Home).
     untrack(() => {
       fineOpen = false;
       pull = 0;
       fineAt = null;
+      player.cancelScrub();
       // Only local files can have previews.
       previews = wantFrames === null || wantFrames.includes("://") ? "off" : "pending";
     });
-    if (wantFrames === null) {
-      untrack(() => (player.scrub = null));
-      return;
-    }
+    if (wantFrames === null) return;
     // The video track may not be known yet when the length is, so ask again a few times.
     let timer: ReturnType<typeof setTimeout>;
     const ask = async (left: number) => {
@@ -37,7 +41,11 @@
     };
     // Not while the video is starting: decoding previews then would hold it up.
     timer = setTimeout(() => ask(3), 2500);
-    return () => clearTimeout(timer);
+    return () => {
+      clearTimeout(timer);
+      // Leaving the player (Home) stops them too.
+      untrack(() => player.cancelScrub());
+    };
   });
 
   // The preview frame under the pointer (the strip shows them while it's open).

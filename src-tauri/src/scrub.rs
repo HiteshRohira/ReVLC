@@ -48,11 +48,13 @@ pub fn order(count: usize) -> Vec<usize> {
     }
 }
 
-/// The start of the file names of `uri`'s frames, one every `step` ms:
-/// frame `k` is `{prefix}{k}.jpg`.
-pub fn prefix(dir: &Path, uri: &str, length_ms: i64, step: i64) -> String {
+/// The start of the file names of the frames of video track `track` of
+/// `uri`, one every `step` ms: frame `k` is `{prefix}{k}.jpg`. `signature`
+/// (the file's size and modification time) keeps a replaced file from
+/// reusing the previews of the one before.
+pub fn prefix(dir: &Path, uri: &str, length_ms: i64, signature: (u64, u128), track: usize, step: i64) -> String {
     let mut h = DefaultHasher::new();
-    (CACHE_VERSION, uri, length_ms).hash(&mut h);
+    (CACHE_VERSION, uri, length_ms, signature, track).hash(&mut h);
     // Joined, not formatted, so Windows paths keep one kind of separator.
     dir.join(format!("{:016x}-f{step}-", h.finish())).to_string_lossy().into_owned()
 }
@@ -181,6 +183,10 @@ mod tests {
     fn frames_sit_on_a_grid() {
         assert_eq!(time_at(600_000, 10_000, 3), 30_000);
         assert_eq!(time_at(600_000, 10_000, 60), 599_000);
-        assert!(prefix(Path::new("/c"), "a.mkv", 1000, 5000).ends_with("-f5000-"));
+        let p = |sig, track| prefix(Path::new("/c"), "a.mkv", 1000, sig, track, 5000);
+        assert!(p((1, 2), 0).ends_with("-f5000-"));
+        // Another file at the same path, or another video track, gets other names.
+        assert_ne!(p((1, 2), 0), p((1, 3), 0));
+        assert_ne!(p((1, 2), 0), p((1, 2), 1));
     }
 }

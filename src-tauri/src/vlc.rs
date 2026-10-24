@@ -521,9 +521,9 @@ pub struct Vlc {
     /// Hardware decoding turned off; see [`Vlc::play_media`].
     software_decoding: AtomicBool,
     pub version: String,
-    /// The opening frame of each file thumbnailed, by path and width; `None`
-    /// when it's too plain to recognise. See [`Vlc::thumbnail_at`].
-    openings: std::sync::Mutex<std::collections::HashMap<(String, u32), Option<Opening>>>,
+    /// The opening frame of each file thumbnailed; `None` when it's too plain
+    /// to recognise. See [`Vlc::thumbnail_at`].
+    openings: std::sync::Mutex<std::collections::HashMap<OpeningKey, Option<Opening>>>,
     /// Command-line options libVLC wouldn't start with (see [`Vlc::load`]).
     pub rejected_args: Vec<String>,
 }
@@ -1920,7 +1920,8 @@ impl Vlc {
 
     /// Like [`Vlc::thumbnail`], at `start` ms into the media. With `precise`,
     /// the frame is the one at `start` rather than the keyframe before it:
-    /// slower, but close frames differ.
+    /// slower, but close frames differ. Always of libVLC's default video
+    /// track: its `video-track` options don't change which one it decodes.
     pub fn thumbnail_at(&self, path: &str, out: &Path, start: i64, width: u32, precise: bool) -> Result<(), String> {
         // libVLC plays a few frames from the beginning before it jumps to the
         // start time, and they can be the ones shown after the jump: frames
@@ -1933,7 +1934,10 @@ impl Vlc {
     /// The opening frame of `path`, made once and kept; `None` if it's too
     /// plain (black, say) to tell apart from other frames.
     fn opening(&self, path: &str, width: u32) -> Option<Opening> {
-        let key = (path.to_string(), width);
+        // The file's size and modification time: another file at the same
+        // path has another opening.
+        let file = std::fs::metadata(path).ok().map(|m| (m.len(), m.modified().ok()));
+        let key = (path.to_string(), width, file);
         if let Some(known) = self.openings.lock().unwrap_or_else(|e| e.into_inner()).get(&key) {
             return known.clone();
         }
@@ -2029,6 +2033,10 @@ impl Vlc {
 
 /// A file's opening frame, in the grab layout (RV32).
 type Opening = std::sync::Arc<Vec<u8>>;
+
+/// Which opening frame: by path, width, and the file's size and modification
+/// time.
+type OpeningKey = (String, u32, Option<(u64, Option<std::time::SystemTime>)>);
 
 /// Writes a grabbed frame (RV32, so BGRX) out as a JPEG.
 fn save_frame(g: &GrabFrame, out: &Path) -> Result<(), String> {
