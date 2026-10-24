@@ -1358,7 +1358,7 @@ impl Core {
         let _ = std::fs::create_dir_all(&self.scrub_dir);
         *self.scrub_jobs.lock().unwrap_or_else(|e| e.into_inner()) = VecDeque::new();
         if have.len() < count as usize {
-            match keyframes::ffmpeg(self.app.path().resource_dir().ok().as_deref()) {
+            match keyframes::ffmpeg() {
                 Some(ffmpeg) => {
                     let core = self.clone();
                     let _ = thread::Builder::new().name("scrub-pass".into()).spawn(move || core.scrub_pass(grid, &ffmpeg, have));

@@ -29,14 +29,15 @@ manager (`apt source vlc` on Mint/Ubuntu with source repositories enabled).
 
 ## FFmpeg
 
-The macOS and Windows packages include an FFmpeg 9.0.2 program
-(`ffmpeg/ffmpeg`, `ffmpeg/ffmpeg.exe`), unmodified, which makes the seek bar
+The macOS and Windows packages include an FFmpeg 9.0.2 program (`ffmpeg`,
+`ffmpeg.exe`, next to the ReVLC program), unmodified, which makes the seek bar
 previews. It is under the GNU General Public License, version 3 or later
 (the same licence as ReVLC, in `LICENSE`), and contains third-party
 libraries under their own compatible licences.
 
-- macOS (Apple Silicon): Martin Riedl's static build,
-  https://ffmpeg.martin-riedl.de/info/detail/macos/arm64/1789931890_9.0.2.
+- macOS: Martin Riedl's static builds, for Apple Silicon
+  https://ffmpeg.martin-riedl.de/info/detail/macos/arm64/1789931890_9.0.2
+  and for Intel https://ffmpeg.martin-riedl.de/info/detail/macos/amd64/1789931006_9.0.2.
 - Windows: Gyan Doshi's "essentials" build,
   https://github.com/GyanD/codexffmpeg/releases/tag/9.0.2 (build details:
   https://www.gyan.dev/ffmpeg/builds/).

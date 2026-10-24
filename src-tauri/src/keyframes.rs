@@ -1,5 +1,5 @@
-//! Seek bar preview frames from FFmpeg (bundled on macOS and Windows, a
-//! package dependency on Linux): one process decodes just the keyframes of a
+//! Seek bar preview frames from FFmpeg (a sidecar next to ReVLC on macOS and
+//! Windows, a package dependency on Linux): one process decodes just the keyframes of a
 //! stretch of video, on the GPU where it can (VA-API, VideoToolbox, D3D11VA),
 //! and hands them over as JPEGs with their times. A 2-hour 4K HEVC film
 //! takes about 11 s on a laptop's integrated GPU, against a minute or more
@@ -11,15 +11,16 @@ use std::process::{Command, Stdio};
 use std::sync::{OnceLock, mpsc};
 use std::thread;
 
-/// FFmpeg: the app's own (in `resources/ffmpeg`), or else one on the PATH.
-/// Looked for once.
-pub fn ffmpeg(resources: Option<&Path>) -> Option<PathBuf> {
+/// FFmpeg: the app's own, next to its program, or else one on the PATH.
+/// Looked for once. (CI builds have an empty stand-in, which doesn't count.)
+pub fn ffmpeg() -> Option<PathBuf> {
     static FOUND: OnceLock<Option<PathBuf>> = OnceLock::new();
     FOUND
         .get_or_init(|| {
             let name = if cfg!(windows) { "ffmpeg.exe" } else { "ffmpeg" };
-            let bundled = resources.map(|r| r.join("ffmpeg").join(name)).filter(|p| p.is_file());
-            bundled.or_else(|| std::env::split_paths(&std::env::var_os("PATH")?).map(|dir| dir.join(name)).find(|p| p.is_file()))
+            let usable = |p: &PathBuf| p.metadata().is_ok_and(|m| m.is_file() && m.len() > 0);
+            let own = std::env::current_exe().ok().and_then(|exe| Some(exe.parent()?.join(name))).filter(usable);
+            own.or_else(|| std::env::split_paths(&std::env::var_os("PATH")?).map(|dir| dir.join(name)).find(usable))
         })
         .clone()
 }
@@ -69,7 +70,9 @@ pub fn accel(ffmpeg: &Path, video: &str, width: u32) -> Accel {
     }
 }
 
-/// An FFmpeg command, without a console window flashing up on Windows.
+/// An FFmpeg command. On Windows, without a console window flashing up, and
+/// below normal priority so it gives way to playback (elsewhere, see
+/// [`lower_priority`]).
 fn command(ffmpeg: &Path) -> Command {
     #[allow(unused_mut)]
     let mut cmd = Command::new(ffmpeg);
@@ -77,7 +80,8 @@ fn command(ffmpeg: &Path) -> Command {
     {
         use std::os::windows::process::CommandExt;
         const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-        cmd.creation_flags(CREATE_NO_WINDOW);
+        const BELOW_NORMAL_PRIORITY_CLASS: u32 = 0x0000_4000;
+        cmd.creation_flags(CREATE_NO_WINDOW | BELOW_NORMAL_PRIORITY_CLASS);
     }
     cmd
 }
@@ -162,12 +166,16 @@ pub fn pass(
             }
         }
     });
-    let (mut buf, mut chunk, mut stopped) = (Vec::new(), vec![0u8; 1 << 16], false);
+    let (mut buf, mut chunk, mut stopped, mut failed) = (Vec::new(), vec![0u8; 1 << 16], false, None);
     'read: loop {
-        let n = out.read(&mut chunk).map_err(|e| e.to_string())?;
-        if n == 0 {
-            break;
-        }
+        let n = match out.read(&mut chunk) {
+            Ok(0) => break,
+            Ok(n) => n,
+            Err(e) => {
+                failed = Some(e.to_string());
+                break;
+            }
+        };
         buf.extend_from_slice(&chunk[..n]);
         while let Some(jpeg) = take_jpeg(&mut buf) {
             let Ok(at) = times.recv() else { break 'read };
@@ -177,24 +185,28 @@ pub fn pass(
             }
         }
     }
-    if stopped {
+    if stopped || failed.is_some() {
         let _ = child.kill();
     }
     drop(out);
     let status = child.wait().map_err(|e| e.to_string())?;
     let _ = reader.join();
-    if stopped || status.success() { Ok(()) } else { Err(format!("ffmpeg: {status}")) }
+    match failed {
+        Some(e) => Err(e),
+        None if stopped || status.success() => Ok(()),
+        None => Err(format!("ffmpeg: {status}")),
+    }
 }
 
-/// Lowers a process's (or on Linux, a thread's) priority, so preview work
-/// gives way to playback. Linux only.
+/// Lowers a process's (on Linux, also a thread's) priority, so preview work
+/// gives way to playback. Windows does it as the process starts instead.
 pub fn lower_priority(id: u32) {
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     // SAFETY: setpriority on a process or thread of ours.
     unsafe {
         libc::setpriority(libc::PRIO_PROCESS as _, id as libc::id_t, 10);
     }
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     let _ = id;
 }
 

@@ -135,7 +135,6 @@
     ],
     "resources": {
       "vlc/": "vlc/",
-      "ffmpeg/": "ffmpeg/",
       "../LICENSE": "licenses/LICENSE",
       "../licenses/": "licenses/"
     },

@@ -53,7 +53,8 @@ pub fn order(count: usize) -> Vec<usize> {
 pub fn prefix(dir: &Path, uri: &str, length_ms: i64, step: i64) -> String {
     let mut h = DefaultHasher::new();
     (CACHE_VERSION, uri, length_ms).hash(&mut h);
-    format!("{}/{:016x}-f{step}-", dir.display(), h.finish())
+    // Joined, not formatted, so Windows paths keep one kind of separator.
+    dir.join(format!("{:016x}-f{step}-", h.finish())).to_string_lossy().into_owned()
 }
 
 /// Where frame `k` is taken from, in ms.
