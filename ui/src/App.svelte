@@ -250,7 +250,12 @@
   {#if !theme.onboarded}
     <Onboarding />
   {:else if showPlayer}
-    <div class="stage" role="presentation" ondblclick={(e) => e.target === e.currentTarget && toggleFullscreen()}></div>
+    <div
+      class="stage"
+      role="presentation"
+      onclick={(e) => e.target === e.currentTarget && player.closeStrip?.()}
+      ondblclick={(e) => e.target === e.currentTarget && toggleFullscreen()}
+    ></div>
     <PlayerView hidden={controlsHidden} onfullscreen={toggleFullscreen} onadd={openFiles} />
   {:else}
     {#if !isMac}<TitleBar {host} />{/if}

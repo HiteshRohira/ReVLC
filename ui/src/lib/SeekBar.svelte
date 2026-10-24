@@ -12,12 +12,16 @@
   const wantFrames = $derived(
     player.current && enabled && settings.value?.seekbarPreview !== false ? player.current.uri : null,
   );
+  /** Whether this video gets previews: "pending" until the player says, so the hover box can show it's coming. */
+  let previews = $state<"pending" | "on" | "off">("off");
   $effect(() => {
     // Another video, or none: the close-up strip belongs to the last one.
     untrack(() => {
       fineOpen = false;
       pull = 0;
       fineAt = null;
+      // Only local files can have previews.
+      previews = wantFrames === null || wantFrames.includes("://") ? "off" : "pending";
     });
     if (wantFrames === null) {
       untrack(() => (player.scrub = null));
@@ -27,7 +31,9 @@
     let timer: ReturnType<typeof setTimeout>;
     const ask = async (left: number) => {
       await player.prepareScrub();
-      if (!player.scrub && left > 0) timer = setTimeout(() => ask(left - 1), 1000);
+      if (player.scrub) previews = "on";
+      else if (left > 0) timer = setTimeout(() => ask(left - 1), 1000);
+      else previews = "off";
     };
     // Not while the video is starting: decoding previews then would hold it up.
     timer = setTimeout(() => ask(3), 2500);
@@ -122,6 +128,11 @@
     player.seek(t);
     if (resume && !player.playing) player.togglePause();
   }
+  // A click on the video closes the strip too (see PlayerView and App).
+  $effect(() => {
+    player.closeStrip = fineOpen ? () => closeFine(true) : null;
+    return () => (player.closeStrip = null);
+  });
   // Playing again, by any means, takes the chosen spot with it.
   $effect(() => {
     if (!fineOpen) return;
@@ -266,8 +277,15 @@
   {/if}
   {#if hover !== null && enabled && fineAt === null && pull < 0.3}
     {@const ch = player.chapters.length > 1 ? chapterAt(player.chapters, hover) : null}
-    <div class="tip" class:framed={frame} style="left: clamp({frame ? 92 : 60}px, {(hover / length) * 100}%, calc(100% - {frame ? 92 : 60}px))">
-      {#if frame}<img src={thumbUrl(frame, player.scrubVersion)} alt="" draggable="false" />{/if}
+    <!-- No preview box while the zoomed strip is open: it shows the frames. -->
+    {@const boxed = previews !== "off" && !fineOpen}
+    <div class="tip" class:framed={boxed} style="left: clamp({boxed ? 92 : 60}px, {(hover / length) * 100}%, calc(100% - {boxed ? 92 : 60}px))">
+      {#if frame}
+        <img src={thumbUrl(frame, player.scrubVersion)} alt="" draggable="false" />
+      {:else if boxed}
+        <!-- The frame here isn't made yet. -->
+        <div class="making" role="status" aria-label="Making preview"><div class="ring"></div></div>
+      {/if}
       <span class="tnum">{formatTime(hover)}</span>{#if nearBookmark}<span class="ch"> · {nearBookmark.name}</span>{:else if ch && !genericChapter(ch.name)}<span class="ch"> · {ch.name}</span>{/if}
     </div>
   {/if}
@@ -480,6 +498,27 @@
     object-fit: contain;
     border-radius: 5px;
     background: #000;
+  }
+  .making {
+    display: grid;
+    place-items: center;
+    width: 168px;
+    aspect-ratio: 16 / 9;
+    border-radius: 5px;
+    background: #000;
+  }
+  .ring {
+    width: 20px;
+    height: 20px;
+    border-radius: 50%;
+    border: 2px solid rgb(255 255 255 / 0.2);
+    border-top-color: #fff;
+    animation: spin 0.8s linear infinite;
+  }
+  @keyframes spin {
+    to {
+      transform: rotate(360deg);
+    }
   }
   .ch {
     font-weight: 400;

@@ -359,6 +359,8 @@ class Player {
   scrubVersion = $state(0);
   /** The preview frame shown over the video while the user scrubs, like YouTube. */
   scrubShown = $state<string | null>(null);
+  /** Closes the seek bar's zoomed strip and plays from its chosen spot, while it's open. */
+  closeStrip: (() => void) | null = null;
   engine = $state("");
   engineError = $state<string | null>(null);
   notices = $state<Notice[]>([]);
