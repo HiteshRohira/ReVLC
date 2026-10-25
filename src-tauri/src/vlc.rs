@@ -521,6 +521,9 @@ pub struct Vlc {
     /// Hardware decoding turned off; see [`Vlc::play_media`].
     software_decoding: AtomicBool,
     pub version: String,
+    /// The opening frame of each file thumbnailed; `None` when it's too plain
+    /// to recognise. See [`Vlc::thumbnail_at`].
+    openings: std::sync::Mutex<std::collections::HashMap<OpeningKey, Option<Opening>>>,
     /// Command-line options libVLC wouldn't start with (see [`Vlc::load`]).
     pub rejected_args: Vec<String>,
 }
@@ -611,28 +614,30 @@ impl Vlc {
         config: &[(&str, ConfigValue)],
     ) -> Result<Self, LoadError> {
         let dirs = candidate_dirs(resource_dir);
-        let dir = dirs
-            .iter()
-            .find(|d| lib_dir(d).join(lib_names().1).exists())
-            .ok_or_else(|| {
-                LoadError::new(
-                    "not_found",
-                    format!(
-                        "libVLC 3 was not found. Install VLC 3 from videolan.org or set REVLC_VLC_DIR. Looked in: {}",
-                        dirs.iter().map(|d| d.display().to_string()).collect::<Vec<_>>().join(", ")
-                    ),
-                )
-            })?;
+        let dir = dirs.iter().find(|d| lib_dir(d).join(lib_names().1).exists());
+        if dir.is_none() && !cfg!(target_os = "linux") {
+            return Err(LoadError::new(
+                "not_found",
+                format!(
+                    "libVLC 3 was not found. Install VLC 3 from videolan.org or set REVLC_VLC_DIR. Looked in: {}",
+                    dirs.iter().map(|d| d.display().to_string()).collect::<Vec<_>>().join(", ")
+                ),
+            ));
+        }
+        let location = dir.map_or_else(|| "the system library path".into(), |d| d.display().to_string());
 
         // SAFETY: called once during startup, before libVLC starts its threads.
-        unsafe {
-            std::env::set_var("VLC_PLUGIN_PATH", dir.join("plugins"));
-            std::env::set_var("VLC_DATA_PATH", dir.join("share"));
+        // System VLC on Linux knows its distro's plugin and data paths.
+        if let Some(dir) = dir {
+            unsafe {
+                std::env::set_var("VLC_PLUGIN_PATH", dir.join("plugins"));
+                std::env::set_var("VLC_DATA_PATH", dir.join("share"));
+            }
         }
 
         let (core_name, lib_name) = lib_names();
         let load = |name: &str| -> Result<&'static Library, LoadError> {
-            let path = lib_dir(dir).join(name);
+            let path = dir.map_or_else(|| PathBuf::from(name), |d| lib_dir(d).join(name));
             // SAFETY: loading libVLC runs its initialisers, which are safe to run.
             let lib = unsafe { Library::new(&path) }
                 .map_err(|e| LoadError::new("load", format!("Couldn't load {}: {e}", path.display())))?;
@@ -671,7 +676,7 @@ impl Vlc {
         let version = unsafe { CStr::from_ptr((api.libvlc_get_version)()) }.to_string_lossy().into_owned();
         // `put_config` relies on how libVLC 3 lays out its instance.
         if !version.starts_with("3.") {
-            return Err(LoadError::new("version", format!("ReVLC needs libVLC 3, but {} has libVLC {version}", dir.display())));
+            return Err(LoadError::new("version", format!("ReVLC needs libVLC 3, but {location} has libVLC {version}")));
         }
         unsafe {
             let mut rejected_args = Vec::new();
@@ -686,7 +691,7 @@ impl Vlc {
             if inst.is_null() {
                 return Err(LoadError::new(
                     "init",
-                    format!("libVLC loaded from {} but couldn't start: {}", dir.display(), errmsg(&api)),
+                    format!("libVLC loaded from {location} but couldn't start: {}", errmsg(&api)),
                 ));
             }
             for (name, value) in config {
@@ -707,7 +712,7 @@ impl Vlc {
             // The web UI handles all keyboard and mouse input.
             (api.libvlc_video_set_key_input)(mp, 0);
             (api.libvlc_video_set_mouse_input)(mp, 0);
-            Ok(Self { api, core, inst, mp, software_decoding: AtomicBool::new(false), version, rejected_args })
+            Ok(Self { api, core, inst, mp, software_decoding: AtomicBool::new(false), version, rejected_args, openings: Default::default() })
         }
     }
 
@@ -744,7 +749,9 @@ impl Vlc {
 
     /// Turns hardware decoding on or off, from the next video.
     pub fn set_hardware_decoding(&self, on: bool) {
-        self.software_decoding.store(!on, Ordering::Relaxed);
+        // Linux composites CPU frames through GTK so transparent controls
+        // remain visible. Hardware surfaces cannot be passed to this output.
+        self.software_decoding.store(!on || cfg!(target_os = "linux"), Ordering::Relaxed);
     }
 
     /// Shows the media title on the video when playback starts. `position`
@@ -808,6 +815,17 @@ impl Vlc {
     #[cfg(windows)]
     pub fn set_hwnd(&self, hwnd: *mut c_void) {
         unsafe { (self.api.libvlc_media_player_set_hwnd)(self.mp, hwnd) }
+    }
+
+    #[cfg(target_os = "linux")]
+    pub fn set_gtk_surface(&self, frames: std::sync::Arc<std::sync::Mutex<Option<PresentedFrame>>>) {
+        // The main player and its callbacks live until process exit, like
+        // the event subscription. Attach once, before media can be opened.
+        let output = Box::into_raw(Box::new(GtkOutput { frame: std::cell::UnsafeCell::new(None), frames }));
+        unsafe {
+            (self.api.libvlc_video_set_callbacks)(self.mp, gtk_lock, None, Some(gtk_display), output.cast());
+            (self.api.libvlc_video_set_format_callbacks)(self.mp, gtk_format, None);
+        }
     }
 
     /// Identifies the media the player has: changes each time it opens one.
@@ -1699,6 +1717,114 @@ impl Drop for FrameBuf {
 struct Grab {
     frame: std::cell::UnsafeCell<GrabFrame>,
     frames: std::sync::atomic::AtomicU32,
+    /// Whether the last frame shown looks like the file's opening frame.
+    like_opening: AtomicBool,
+}
+
+/// An owned CPU frame handed from libVLC to the GTK main thread.
+#[cfg(target_os = "linux")]
+pub struct PresentedFrame {
+    pub pixels: Vec<u8>,
+    pub width: i32,
+    pub height: i32,
+    pub stride: i32,
+}
+
+#[cfg(target_os = "linux")]
+struct GtkFrame {
+    buf: FrameBuf,
+    width: u32,
+    height: u32,
+    stride: u32,
+}
+
+#[cfg(target_os = "linux")]
+struct GtkOutput {
+    // VLC 3's vmem output serializes format, prepare (lock), and display
+    // on its video thread. GTK only receives an owned copy of these pixels.
+    frame: std::cell::UnsafeCell<Option<GtkFrame>>,
+    frames: std::sync::Arc<std::sync::Mutex<Option<PresentedFrame>>>,
+}
+
+#[cfg(target_os = "linux")]
+unsafe extern "C" fn gtk_format(
+    opaque: *mut *mut c_void,
+    chroma: *mut c_char,
+    width: *mut c_uint,
+    height: *mut c_uint,
+    pitches: *mut c_uint,
+    lines: *mut c_uint,
+) -> c_uint {
+    unsafe {
+        if *width == 0 || *height == 0 {
+            return 0;
+        }
+        // Bound CPU copies to 1080p; VLC scales larger files to this output.
+        let scale = (1920.0 / *width as f64).min(1080.0 / *height as f64).min(1.0);
+        let w = ((*width as f64 * scale) as u32).max(1);
+        let h = ((*height as f64 * scale) as u32).max(1);
+        let stride = (w * 4 + 31) & !31;
+        let Some(buf) = FrameBuf::new(stride as usize * h as usize) else { return 0 };
+        let output = &*(*opaque as *const GtkOutput);
+        *output.frame.get() = Some(GtkFrame { buf, width: w, height: h, stride });
+        std::ptr::copy_nonoverlapping(b"RV32".as_ptr().cast(), chroma, 4);
+        (*width, *height, *pitches, *lines) = (w, h, stride, h);
+        1
+    }
+}
+
+#[cfg(target_os = "linux")]
+unsafe extern "C" fn gtk_lock(opaque: *mut c_void, planes: *mut *mut c_void) -> *mut c_void {
+    unsafe {
+        let output = &*(opaque as *const GtkOutput);
+        *planes = (*output.frame.get()).as_ref().map_or(std::ptr::null_mut(), |f| f.buf.ptr.cast());
+    }
+    std::ptr::null_mut()
+}
+
+#[cfg(target_os = "linux")]
+unsafe extern "C" fn gtk_display(opaque: *mut c_void, _picture: *mut c_void) {
+    unsafe {
+        let output = &*(opaque as *const GtkOutput);
+        if let Some(frame) = &*output.frame.get() {
+            *output.frames.lock().unwrap_or_else(|e| e.into_inner()) = Some(PresentedFrame {
+                pixels: frame.buf.as_slice().to_vec(),
+                width: frame.width as i32,
+                height: frame.height as i32,
+                stride: frame.stride as i32,
+            });
+        }
+    }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod gtk_output_tests {
+    use super::*;
+
+    #[test]
+    fn bounded_aligned_frames_are_copied_before_gtk_uses_them() {
+        let frames = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let mut output = GtkOutput { frame: std::cell::UnsafeCell::new(None), frames: frames.clone() };
+        let mut opaque = std::ptr::from_mut(&mut output).cast();
+        let (mut width, mut height, mut pitch, mut lines) = (3840, 2160, 0, 0);
+        let mut chroma = [0; 4];
+        unsafe {
+            assert_eq!(gtk_format(&mut opaque, chroma.as_mut_ptr(), &mut width, &mut height, &mut pitch, &mut lines), 1);
+            assert_eq!((width, height, pitch, lines), (1920, 1080, 7680, 1080));
+            let mut plane = std::ptr::null_mut();
+            gtk_lock(opaque, &mut plane);
+            assert_eq!(plane as usize % 32, 0);
+            *(plane as *mut u8) = 123;
+            gtk_display(opaque, std::ptr::null_mut());
+            *(plane as *mut u8) = 42;
+            let shown = frames.lock().unwrap().take().unwrap();
+            assert_eq!(shown.pixels[0], 123);
+            assert_eq!(shown.pixels.len(), (pitch * lines) as usize);
+            assert_eq!((shown.width, shown.height, shown.stride), (1920, 1080, 7680));
+            width = 0;
+            assert_eq!(gtk_format(&mut opaque, chroma.as_mut_ptr(), &mut width, &mut height, &mut pitch, &mut lines), 0);
+        }
+    }
 }
 
 struct GrabFrame {
@@ -1706,6 +1832,31 @@ struct GrabFrame {
     width: u32,
     height: u32,
     target_width: u32,
+    /// The file's opening frame, to tell frames from before the jump to the
+    /// start time by.
+    opening: Option<Opening>,
+}
+
+/// Whether two frames of the same size are near enough the same picture,
+/// from a sample of pixels.
+fn alike(a: &[u8], b: &[u8]) -> bool {
+    let step = (a.len() / 4096).max(1) * 4 + 1;
+    let (mut sum, mut n) = (0u64, 0u64);
+    for i in (0..a.len().min(b.len())).step_by(step) {
+        sum += a[i].abs_diff(b[i]) as u64;
+        n += 1;
+    }
+    n > 0 && sum < n * 3
+}
+
+/// Whether a frame has enough detail to be told apart from others: a black
+/// or plain first frame looks like every dark scene.
+fn detailed(a: &[u8]) -> bool {
+    let step = (a.len() / 4096).max(1) * 4 + 1;
+    let sample: Vec<f64> = a.iter().step_by(step).map(|&v| v as f64).collect();
+    let mean = sample.iter().sum::<f64>() / sample.len().max(1) as f64;
+    let var = sample.iter().map(|v| (v - mean).powi(2)).sum::<f64>() / sample.len().max(1) as f64;
+    var.sqrt() > 20.0
 }
 
 unsafe extern "C" fn grab_format(
@@ -1746,7 +1897,12 @@ unsafe extern "C" fn grab_lock(opaque: *mut c_void, planes: *mut *mut c_void) ->
 
 unsafe extern "C" fn grab_display(opaque: *mut c_void, _picture: *mut c_void) {
     let g = unsafe { &*(opaque as *const Grab) };
-    g.frames.fetch_add(1, std::sync::atomic::Ordering::Release);
+    // Only the video output thread touches the frame.
+    let f = unsafe { &*g.frame.get() };
+    if let (Some(buf), Some(opening)) = (&f.buf, &f.opening) {
+        g.like_opening.store(alike(opening, buf.as_slice()), Ordering::Release);
+    }
+    g.frames.fetch_add(1, Ordering::Release);
 }
 
 impl Vlc {
@@ -1757,19 +1913,59 @@ impl Vlc {
     /// frame since the last keyframe: seconds of 4K or 8K AV1. Decoders get
     /// few threads, since one frame doesn't need many.
     pub fn thumbnail(&self, path: &str, out: &Path, fraction: f64, width: u32) -> Result<(), String> {
+        let length = self.parse(path, 3000).map(|m| m.duration).unwrap_or(0);
+        let start = if length > 0 { ((length as f64 * fraction) as i64).clamp(0, (length - 1000).max(0)) } else { 0 };
+        self.thumbnail_at(path, out, start, width, false)
+    }
+
+    /// Like [`Vlc::thumbnail`], at `start` ms into the media. With `precise`,
+    /// the frame is the one at `start` rather than the keyframe before it:
+    /// slower, but close frames differ. Always of libVLC's default video
+    /// track: its `video-track` options don't change which one it decodes.
+    pub fn thumbnail_at(&self, path: &str, out: &Path, start: i64, width: u32, precise: bool) -> Result<(), String> {
+        // libVLC plays a few frames from the beginning before it jumps to the
+        // start time, and they can be the ones shown after the jump: frames
+        // like the file's opening are passed over.
+        let opening = if start > 10_000 { self.opening(path, width) } else { None };
+        let frame = match self.grab(path, start, width, precise, opening.clone()) {
+            // The fast seek didn't land (see `grab`): an exact one does.
+            Err(_) if !precise => self.grab(path, start, width, true, opening)?,
+            other => other?,
+        };
+        save_frame(&frame, out)
+    }
+
+    /// The opening frame of `path`, made once and kept; `None` if it's too
+    /// plain (black, say) to tell apart from other frames.
+    fn opening(&self, path: &str, width: u32) -> Option<Opening> {
+        // The file's size and modification time: another file at the same
+        // path has another opening.
+        let file = std::fs::metadata(path).ok().map(|m| (m.len(), m.modified().ok()));
+        let key = (path.to_string(), width, file);
+        if let Some(known) = self.openings.lock().unwrap_or_else(|e| e.into_inner()).get(&key) {
+            return known.clone();
+        }
+        let frame = self.grab(path, 0, width, false, None).ok();
+        let opening = frame.and_then(|f| f.buf).map(|b| b.as_slice().to_vec()).filter(|v| detailed(v)).map(std::sync::Arc::new);
+        self.openings.lock().unwrap_or_else(|e| e.into_inner()).insert(key, opening.clone());
+        opening
+    }
+
+    /// Decodes a frame at `start` ms into `path`, unlike `opening` if given.
+    fn grab(&self, path: &str, start: i64, width: u32, precise: bool, opening: Option<Opening>) -> Result<GrabFrame, String> {
+        let check = opening.is_some();
         use std::sync::atomic::Ordering::Acquire;
         use std::time::{Duration, Instant};
 
-        let length = self.parse(path, 3000).map(|m| m.duration).unwrap_or(0);
-        let start = if length > 0 { ((length as f64 * fraction) as i64).clamp(0, (length - 1000).max(0)) } else { 0 };
         let grab = Box::into_raw(Box::new(Grab {
-            frame: std::cell::UnsafeCell::new(GrabFrame { buf: None, width: 0, height: 0, target_width: width }),
+            frame: std::cell::UnsafeCell::new(GrabFrame { buf: None, width: 0, height: 0, target_width: width, opening }),
             frames: Default::default(),
+            like_opening: Default::default(),
         }));
         let wait = |deadline: Duration, done: &dyn Fn() -> bool| {
             let begin = Instant::now();
             while !done() && begin.elapsed() < deadline {
-                std::thread::sleep(Duration::from_millis(15));
+                std::thread::sleep(Duration::from_millis(5));
             }
             done()
         };
@@ -1789,15 +1985,19 @@ impl Vlc {
                 return Err("could not create the thumbnail player".into());
             }
             for opt in [
+                // No input cache to fill first: the file is local.
+                ":file-caching=0".to_string(),
                 ":no-audio".to_string(),
                 ":no-spu".to_string(),
                 ":no-sub-autodetect-file".to_string(),
                 ":avcodec-threads=2".to_string(),
                 // dav1d's thread count; its tile setting doesn't add any.
                 ":dav1d-thread-frames=2".to_string(),
-                ":input-fast-seek".to_string(),
                 format!(":start-time={:.3}", start as f64 / 1000.0),
-            ] {
+            ]
+            .into_iter()
+            .chain((!precise).then(|| ":input-fast-seek".to_string()))
+            {
                 let o = cstr(&opt);
                 (api.libvlc_media_add_option_flag)(media, o.as_ptr(), OPTION_TRUSTED | OPTION_UNIQUE);
             }
@@ -1807,21 +2007,51 @@ impl Vlc {
             (api.libvlc_video_set_format_callbacks)(mp, grab_format, None);
             (api.libvlc_media_player_play)(mp);
 
-            // A few frames in, past any grey first frame of an open GOP.
+            // libVLC can show a frame or two from the start of the file before
+            // the start time takes effect, so wait for the position to get
+            // there (to its keyframe, which may be a little before), then a
+            // few frames more, past any grey first frame of an open GOP.
             let g = &*grab;
-            let ok = wait(Duration::from_secs(10), &|| g.frames.load(Acquire) >= 3);
+            // A fast seek lands at once or not at all: some files (MKVs with
+            // two video tracks, for one) ignore it and play from the start.
+            // Then waiting for playback to get there would take as long as
+            // the time itself, and give a frame from before it.
+            let first = wait(Duration::from_secs(10), &|| g.frames.load(Acquire) >= 1);
+            let reach = if precise { Duration::from_secs(10) } else { Duration::from_millis(1500) };
+            let landed = first && wait(reach, &|| (api.libvlc_media_player_get_time)(mp) >= start / 2);
+            let seen = g.frames.load(Acquire);
+            let settled = landed && wait(Duration::from_secs(10), &|| g.frames.load(Acquire) >= seen + 2);
+            // Frames from the beginning can still be on their way after the
+            // jump: wait for one unlike the opening. In a scene that looks
+            // like it, that never comes; then take what's there.
+            if settled && check {
+                wait(Duration::from_secs(3), &|| !g.like_opening.load(Acquire));
+            }
             (api.libvlc_media_player_stop)(mp);
             (api.libvlc_media_player_release)(mp);
             // Stopped and released: the video output is gone, so the frame is ours.
             let g = Box::from_raw(grab).frame.into_inner();
-            let Some(buf) = g.buf.as_ref().filter(|_| ok && g.width > 0) else {
+            if !settled {
                 return Err(format!("no frame decoded from {path}"));
-            };
-            let rgb: Vec<u8> = buf.as_slice().as_chunks::<4>().0.iter().flat_map(|p| [p[2], p[1], p[0]]).collect();
-            let img = image::RgbImage::from_raw(g.width, g.height, rgb).ok_or("bad frame size")?;
-            img.save_with_format(out, image::ImageFormat::Jpeg).map_err(|e| e.to_string())
+            }
+            Ok(g)
         }
     }
+}
+
+/// A file's opening frame, in the grab layout (RV32).
+type Opening = std::sync::Arc<Vec<u8>>;
+
+/// Which opening frame: by path, width, and the file's size and modification
+/// time.
+type OpeningKey = (String, u32, Option<(u64, Option<std::time::SystemTime>)>);
+
+/// Writes a grabbed frame (RV32, so BGRX) out as a JPEG.
+fn save_frame(g: &GrabFrame, out: &Path) -> Result<(), String> {
+    let buf = g.buf.as_ref().filter(|_| g.width > 0).ok_or("no frame")?;
+    let rgb: Vec<u8> = buf.as_slice().as_chunks::<4>().0.iter().flat_map(|p| [p[2], p[1], p[0]]).collect();
+    let img = image::RgbImage::from_raw(g.width, g.height, rgb).ok_or("bad frame size")?;
+    img.save_with_format(out, image::ImageFormat::Jpeg).map_err(|e| e.to_string())
 }
 
 fn errmsg(api: &Api) -> String {

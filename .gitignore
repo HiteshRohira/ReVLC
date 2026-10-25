@@ -5,6 +5,7 @@ src-tauri/gen/
 testmedia/
 .DS_Store
 src-tauri/vlc/
+src-tauri/binaries/
 
 # Release files collected by scripts/release-files.sh
 /release/

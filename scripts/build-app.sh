@@ -8,6 +8,9 @@
 # with it, so keep it backed up and never commit it.
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+if [[ "$(uname -s)" == Linux ]]; then
+  exec bash "$ROOT/scripts/build-linux.sh" "$@"
+fi
 KEY="${REVLC_UPDATER_KEY:-$HOME/.tauri/revlc-updater.key}"
 
 if [[ -z "${TAURI_SIGNING_PRIVATE_KEY:-}" ]]; then
@@ -20,6 +23,7 @@ fi
 cd "$ROOT"
 # Replaces src-tauri/vlc if it holds another libVLC version.
 bash scripts/prepare-libvlc.sh
+bash scripts/prepare-ffmpeg.sh
 npx tauri build
 case "$(uname -s)" in
   MINGW* | MSYS* | CYGWIN*) ;;

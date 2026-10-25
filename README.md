@@ -106,6 +106,49 @@ files (with their `--start-time` and friends) and ignores the other options.
 
 ## Building
 
+### Experimental Linux Mint 22.x (Intel/AMD 64-bit)
+
+The `feat/linux-mint-build` branch builds a `.deb` for Linux Mint 22.x and
+Ubuntu 24.04. Download the `ReVLC-linux-mint-x64` artifact from a successful
+**Linux build** run in GitHub Actions, unzip it, and install the package:
+
+```sh
+sudo apt install ./ReVLC_0.2.8_amd64.deb
+```
+
+APT installs libVLC 3 and its plugins from your distribution. Launch ReVLC
+from the application menu or run `revlc`. These experimental packages don't
+self-update; install a newer `.deb` to update. They are CI artifacts, with
+no new release or change to the published downloads.
+
+Video uses X11, including XWayland in a Wayland session. Mint's default
+Cinnamon X11 session is the initial target. This first Linux build uses
+software decoding and GTK compositing, with video output capped at 1080p
+to limit CPU copies; larger files still play, scaled down. Hardware video
+output is reserved for a later build. Native Wayland, Mint 21.x,
+ARM builds, and automatic audio-CD detection aren't supported by this build.
+Camera capture uses Video4Linux2, microphone capture uses the default
+PulseAudio/PipeWire source, and screen capture covers the X11 desktop.
+
+To build on Mint 22.x / Ubuntu 24.04:
+
+```sh
+sudo apt install build-essential libwebkit2gtk-4.1-dev libssl-dev librsvg2-dev libx11-dev patchelf \
+  libvlc5 libvlccore9 vlc-plugin-base vlc-plugin-video-output ffmpeg
+npm ci
+npm run build:app
+```
+
+FFmpeg makes the seek bar previews: it decodes a whole video's keyframes in
+one pass, on the GPU through VA-API where it can. Without it ReVLC falls back
+to libVLC, which is several times slower. (The macOS and Windows packages
+bundle FFmpeg, decoding with VideoToolbox and D3D11VA: `scripts/prepare-ffmpeg.sh`.)
+
+Use Rust stable and Node 22+. The package is written to
+`src-tauri/target/release/bundle/deb/`; no updater signing key is needed.
+
+### macOS and Windows
+
 Requirements: Rust, Node 20+. On Windows, run the scripts from Git Bash.
 
 ```sh
@@ -158,7 +201,7 @@ off in Settings → General → Privacy. Details in [docs/analytics.md](docs/ana
 
 - Subtitles can overlap the control bar while it's visible (Settings → Subtitles → "Raise subtitles by" moves them up).
 - HDR is tone-mapped to SDR by libVLC 3 (true HDR on XDR displays is milestone M2).
-- Linux isn't supported yet.
+- Linux support is experimental; see the Mint 22.x build instructions above.
 - Windows: the installer isn't code-signed yet.
 
 ## Contributing
@@ -182,11 +225,13 @@ Copyright (C) 2026 Hitesh Rohira
 
 ReVLC is free software under the GPL-3.0-or-later ([LICENSE](LICENSE)).
 
-The app bundles libVLC 3.0.24 (LGPL-2.1-or-later) and VLC plugins (mostly
+The macOS and Windows apps bundle libVLC 3.0.24 (LGPL-2.1-or-later) and VLC plugins (mostly
 GPL-2.0-or-later) from [VideoLAN](https://www.videolan.org/). Their source
 code, including the build recipes for the libraries the plugins contain
 (`contrib/` in the tarball), is in
 [VideoLAN's 3.0.24 download folder](https://download.videolan.org/pub/videolan/vlc/3.0.24/).
+The experimental Linux package uses the distribution's libVLC and VLC
+plugins; their source and notices come from the distribution.
 
 The licence texts for everything the app ships, and the notices for its Rust
 and JavaScript dependencies, are in [licenses/](licenses/). Installed copies

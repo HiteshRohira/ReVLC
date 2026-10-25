@@ -2982,6 +2982,7 @@ version = "0.2.9"
 dependencies = [
  "block2",
  "dunce",
+ "gtk",
  "image",
  "libc",
  "libloading 0.8.9",
@@ -2998,6 +2999,7 @@ dependencies = [
  "tauri-plugin-single-instance",
  "tauri-plugin-updater",
  "uuid",
+ "webkit2gtk",
  "webview2-com",
  "windows",
  "windows-sys 0.61.2",

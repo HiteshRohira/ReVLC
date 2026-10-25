@@ -8,7 +8,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 OUT="$ROOT/licenses"
 
-# Rust: the crates linked into the app on macOS and Windows (scripts/about.toml).
+# Rust: crates linked into the app on macOS, Windows and Linux (scripts/about.toml).
 (cd "$ROOT/src-tauri" && cargo about generate --locked --fail \
   -c "$ROOT/scripts/about.toml" "$ROOT/scripts/about.hbs" -o "$OUT/THIRD-PARTY-RUST.txt")
 

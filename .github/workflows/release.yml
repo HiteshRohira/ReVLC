@@ -75,6 +75,9 @@ jobs:
       - name: Download libVLC
         run: bash scripts/prepare-libvlc.sh
 
+      - name: Download FFmpeg
+        run: bash scripts/prepare-ffmpeg.sh
+
       - name: Build
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}

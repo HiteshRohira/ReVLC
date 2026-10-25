@@ -10,7 +10,7 @@
   import Row from "./Row.svelte";
   import Select from "./Select.svelte";
   import WindowControls from "./WindowControls.svelte";
-  import { isMac } from "./platform";
+  import { isMac, isWindows } from "./platform";
   import { updater } from "./updater.svelte";
 
   // VLC's default snapshot folder.
@@ -46,7 +46,7 @@
 
   // Keys reset by each tab's "Restore defaults".
   const TAB_KEYS: Record<Exclude<Tab, "shortcuts">, (keyof Settings)[]> = {
-    general: ["resume", "stopAfterEach", "pauseWhenMinimized", "seekbarChapters", "wheel", "autoUpdate", "analytics"],
+    general: ["resume", "stopAfterEach", "pauseWhenMinimized", "seekbarChapters", "seekbarPreview", "wheel", "autoUpdate", "analytics"],
     video: ["video", "startFullscreen", "alwaysOnTop", "deinterlace", "deinterlaceMode", "snapshotPath", "snapshotPrefix", "snapshotFormat", "snapshotSequential"],
     audio: ["audio", "audioDevice", "audioLanguage", "timeStretch", "replayGain", "spdif"],
     subtitles: ["subtitleLanguage", "subAutodetect", "subAutodetectFuzzy", "subEncoding", "font", "fontSize", "fontColor", "fontOpacity", "bold", "outlineThickness", "outlineColor", "backgroundOpacity", "backgroundColor", "shadowOpacity", "subMargin", "showTitle", "titleTimeout", "titlePosition"],
@@ -195,6 +195,7 @@
           </div>
         </Row>
         <Row label="Show chapters on the seek bar" help="Split the seek bar where the file has chapter markers.">{@render toggle("seekbarChapters")}</Row>
+        <Row label="Preview frames on the seek bar" help="Show a frame of the video while hovering or dragging the seek bar. Made in the background for local files.">{@render toggle("seekbarPreview")}</Row>
       </div>
       <h3>Playback</h3>
       <div class="group">
@@ -320,7 +321,11 @@
     {:else if tab === "input"}
       <h3>Decoding</h3>
       <div class="group">
-        <Row label="Hardware-accelerated decoding" help={isMac ? "Uses the Mac's video decoder (VideoToolbox). Saves battery." : "Uses the graphics card's video decoder (Direct3D 11). Saves battery."}>{@render toggle("hardwareDecoding")}</Row>
+        {#if isMac || isWindows}
+          <Row label="Hardware-accelerated decoding" help={isMac ? "Uses the Mac's video decoder (VideoToolbox). Saves battery." : "Uses the graphics card's video decoder (Direct3D 11). Saves battery."}>{@render toggle("hardwareDecoding")}</Row>
+        {:else}
+          <Row label="Video rendering" help="This experimental Linux build uses software decoding and displays video at up to 1080p.">Software</Row>
+        {/if}
         <Row label="Skip H.264 loop filter" help="Speeds up software decoding of H.264 at some cost in quality.">{@render choice("skipLoopFilter", LOOP_FILTER)}</Row>
       </div>
       <h3>Caching</h3>
