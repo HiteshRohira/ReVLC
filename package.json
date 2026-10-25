@@ -8,6 +8,7 @@
     "dev": "vite",
     "build": "vite build",
     "check": "svelte-check --tsconfig ./tsconfig.json",
+    "test:site": "node --test site/*.test.js",
     "tauri": "tauri",
     "prepare:vlc": "bash scripts/prepare-libvlc.sh",
     "build:app": "bash scripts/build-app.sh"

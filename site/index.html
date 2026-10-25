@@ -26,7 +26,7 @@
 
   <link rel="preload" as="image" href="assets/player.webp" imagesrcset="assets/player-1000.webp 1000w, assets/player.webp 2000w" imagesizes="(min-width: 1240px) 1160px, 94vw">
   <link rel="stylesheet" href="styles.css">
-  <script src="main.js" defer></script>
+  <script src="main.js" type="module"></script>
   <script src="analytics.js" defer></script>
 </head>
 <body>
@@ -62,17 +62,14 @@
         <p class="pill"><span class="dot" aria-hidden="true"></span>0.2.10 alpha · macOS, Windows and Linux</p>
         <h1 id="hero-title">VLC, rebuilt<br> for the modern age.</h1>
         <p class="lede">Every format VLC plays, on the same engine, with an interface that finally feels current. Free and open source.</p>
-        <div class="cta" data-downloads>
-          <a class="btn btn-primary" data-os="mac" href="https://github.com/HiteshRohira/ReVLC/releases/download/v0.2.10-alpha/ReVLC-0.2.10-alpha-arm64.dmg">
+        <div class="cta" data-download-actions>
+          <a class="btn btn-primary" data-primary-download href="#download">
             <svg class="i" viewBox="0 0 24 24" aria-hidden="true"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="m7 10 5 5 5-5"/><path d="M12 15V3"/></svg>
-            Download for Mac
+            <span data-primary-label>Choose your download</span>
           </a>
-          <a class="btn btn-secondary" data-os="windows" href="https://github.com/HiteshRohira/ReVLC/releases/download/v0.2.10-alpha/ReVLC-0.2.10-alpha-x64-setup.exe">
-            <svg class="i" viewBox="0 0 24 24" aria-hidden="true"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="m7 10 5 5 5-5"/><path d="M12 15V3"/></svg>
-            Download for Windows
-          </a>
+          <button class="btn btn-secondary" type="button" data-other-downloads aria-haspopup="dialog" aria-controls="downloads-dialog" hidden>Other downloads <span aria-hidden="true">↗</span></button>
         </div>
-        <p class="fine">macOS 11+ on Apple Silicon · Windows 10 and 11 (64‑bit) · <a href="https://github.com/HiteshRohira/ReVLC">Source on GitHub</a></p>
+        <p class="fine"><span data-primary-requirements>macOS · Windows · Experimental Linux</span> · <a href="https://github.com/HiteshRohira/ReVLC">Source on GitHub</a></p>
       </div>
 
       <div class="wrap wrap-wide">
@@ -318,11 +315,21 @@
           <p class="section-sub">ReVLC is licensed under GPL-3.0. macOS and Windows update themselves; Linux packages update manually. Read the code, file an issue, or help tick off the next box.</p>
         </header>
 
-        <div class="platforms" data-downloads>
+        <div class="download-feature" data-download-feature hidden>
+          <p class="label">0.2.10 alpha</p>
+          <h3 data-download-title>Choose your platform</h3>
+          <p class="platform-req" data-primary-requirements></p>
+          <div class="cta" data-download-actions>
+            <a class="btn btn-primary" data-primary-download href="#download"><span data-primary-label>Choose your download</span></a>
+            <button class="btn btn-secondary" type="button" data-other-downloads aria-haspopup="dialog" aria-controls="downloads-dialog" hidden>Other downloads <span aria-hidden="true">↗</span></button>
+          </div>
+          <p class="platform-note" data-download-note></p>
+        </div>
+        <div class="platforms" data-download-fallback>
           <article class="platform" data-os="mac">
             <h3>macOS</h3>
             <p class="platform-req">macOS 11 or later · Apple Silicon</p>
-            <a class="btn btn-primary" href="https://github.com/HiteshRohira/ReVLC/releases/download/v0.2.10-alpha/ReVLC-0.2.10-alpha-arm64.dmg">
+            <a class="btn btn-secondary" href="https://github.com/HiteshRohira/ReVLC/releases/download/v0.2.10-alpha/ReVLC-0.2.10-alpha-arm64.dmg">
               <svg class="i" viewBox="0 0 24 24" aria-hidden="true"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="m7 10 5 5 5-5"/><path d="M12 15V3"/></svg>
               Download .dmg
             </a>
@@ -370,6 +377,16 @@
       </div>
     </section>
   </main>
+
+  <dialog class="download-dialog" id="downloads-dialog" aria-labelledby="downloads-title" aria-describedby="downloads-description">
+    <div class="download-dialog-head">
+      <div><p class="label">ReVLC · 0.2.10 alpha</p><h2 id="downloads-title">Other downloads</h2></div>
+      <button class="download-close" type="button" aria-label="Close downloads" autofocus>×</button>
+    </div>
+    <p id="downloads-description">Choose a package for another computer.</p>
+    <div class="download-options" data-download-options></div>
+    <p class="platform-note">macOS and Windows update automatically. Linux packages update manually.</p>
+  </dialog>
 
   <footer class="footer">
     <div class="wrap footer-inner">

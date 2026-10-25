@@ -1,4 +1,5 @@
 // Progressive enhancements. The page reads fine without any of this.
+import { detectDesktopOS } from "./download-platform.js";
 
 const root = document.documentElement;
 
@@ -30,22 +31,74 @@ if (seek) {
   layout();
 }
 
-// Put the visitor's platform first.
-const ua = navigator.userAgentData?.platform || navigator.platform || navigator.userAgent;
-const os = /win/i.test(ua) ? "windows" : /mac/i.test(ua) ? "mac" : /linux/i.test(ua) ? "linux" : null;
-if (os === "windows" || os === "linux") {
-  for (const group of document.querySelectorAll("[data-downloads]")) {
-    const mine = group.querySelector(`[data-os="${os}"]`);
-    if (!mine) continue;
-    group.prepend(mine);
-    for (const el of group.querySelectorAll("[data-os]")) {
-      const btn = el.matches(".btn") ? el : el.querySelector(".btn");
-      btn.classList.toggle("btn-primary", el === mine);
-      btn.classList.toggle("btn-secondary", el !== mine);
+// Keep one source for release URLs and compatibility copy: the no-JS cards.
+const os = detectDesktopOS({
+  userAgentData: navigator.userAgentData,
+  platform: navigator.platform,
+  userAgent: navigator.userAgent,
+  maxTouchPoints: navigator.maxTouchPoints,
+});
+const fallback = document.querySelector("[data-download-fallback]");
+const dialog = document.querySelector("#downloads-dialog");
+if (dialog && typeof dialog.showModal === "function" && fallback) {
+  const cards = [...fallback.querySelectorAll("[data-os]")];
+  const selected = cards.find((card) => card.dataset.os === os);
+  const names = { mac: "Mac", windows: "Windows", linux: "Linux" };
+  let opener;
+  const openDownloads = (event) => {
+    event.preventDefault();
+    opener = event.currentTarget;
+    if (!dialog.open) dialog.showModal();
+  };
+  for (const primary of document.querySelectorAll("[data-primary-download]")) {
+    if (selected) {
+      primary.href = selected.querySelector("a").href;
+      primary.querySelector("[data-primary-label]").textContent = `Download for ${names[os]}`;
+    } else {
+      primary.setAttribute("aria-haspopup", "dialog");
+      primary.setAttribute("aria-controls", dialog.id);
+      primary.addEventListener("click", openDownloads);
     }
   }
+  for (const button of document.querySelectorAll("[data-other-downloads]")) {
+    button.hidden = !selected;
+    button.addEventListener("click", openDownloads);
+  }
+  const requirements = selected?.querySelector(".platform-req").textContent || "macOS · Windows · Experimental Linux";
+  document.querySelectorAll("[data-primary-requirements]").forEach((el) => el.textContent = requirements);
+  document.querySelector("[data-download-title]").textContent = selected ? (os === "mac" ? "macOS" : names[os]) : "Choose your platform";
+  const note = document.querySelector("[data-download-note]");
+  if (selected) note.replaceChildren(...[...selected.querySelector(".platform-note").childNodes].map((el) => el.cloneNode(true)));
+  else note.textContent = "Choose a package below. Check its system requirements before installing.";
+  if (!selected) {
+    dialog.querySelector("h2").textContent = "Choose your download";
+    dialog.querySelector("#downloads-description").textContent = "Available for these desktop platforms.";
+  }
+  for (const card of cards) {
+    if (card === selected) continue;
+    const link = document.createElement("a");
+    link.className = "download-option";
+    link.href = card.querySelector("a").href;
+    const title = document.createElement("strong");
+    title.textContent = card.querySelector("h3").textContent;
+    const detail = document.createElement("span");
+    detail.textContent = card.querySelector(".platform-req").textContent;
+    const arrow = document.createElement("span");
+    arrow.className = "download-option-arrow";
+    arrow.textContent = "↓";
+    arrow.setAttribute("aria-hidden", "true");
+    link.append(title, detail, arrow);
+    dialog.querySelector("[data-download-options]").append(link);
+  }
+  dialog.querySelector(".download-close").addEventListener("click", () => dialog.close());
+  dialog.addEventListener("click", (event) => {
+    const box = dialog.getBoundingClientRect();
+    if (event.target === dialog && (event.clientX < box.left || event.clientX > box.right || event.clientY < box.top || event.clientY > box.bottom)) dialog.close();
+  });
+  dialog.addEventListener("close", () => opener?.focus({ preventScroll: true }));
+  document.querySelector("[data-download-feature]").hidden = false;
+  fallback.hidden = true;
 }
-if (os) document.querySelector(`.platform[data-os="${os}"]`)?.classList.add("is-yours");
 
 // The tour: the step nearest the middle of the screen picks the screenshot.
 const steps = [...document.querySelectorAll(".step")];
@@ -102,7 +155,7 @@ const press = (k, down) => {
 };
 addEventListener("keydown", (e) => {
   const k = e.key.toLowerCase();
-  if (e.metaKey || e.ctrlKey || e.altKey || e.target.closest("input, textarea, select")) return;
+  if (e.metaKey || e.ctrlKey || e.altKey || e.target.closest("input, textarea, select, dialog")) return;
   if (k === " " && e.target.closest("button, a")) return;
   if (press(k, true) && (k === " " || k.startsWith("arrow"))) {
     // Only take over Space and the arrows while the keys are on screen.
