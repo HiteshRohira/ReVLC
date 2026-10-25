@@ -2,7 +2,7 @@
 
 A modern, lightweight media player built on libVLC.
 
-**[revlc.vercel.app](https://revlc.vercel.app)** · [Download the alpha](https://github.com/HiteshRohira/ReVLC/releases/tag/v0.2.9-alpha)
+**[revlc.vercel.app](https://revlc.vercel.app)** · [Download the alpha](https://github.com/HiteshRohira/ReVLC/releases/tag/v0.2.10-alpha)
 
 ReVLC aims for full VLC feature parity with a cleaner, faster UI. It is early:
 see the [feature parity checklist](docs/parity.md) for what works today and
@@ -108,18 +108,17 @@ files (with their `--start-time` and friends) and ignores the other options.
 
 ### Experimental Linux Mint 22.x (Intel/AMD 64-bit)
 
-The `feat/linux-mint-build` branch builds a `.deb` for Linux Mint 22.x and
-Ubuntu 24.04. Download the `ReVLC-linux-mint-x64` artifact from a successful
-**Linux build** run in GitHub Actions, unzip it, and install the package:
+Download the experimental x64 `.deb` from [Releases](../../releases) for
+Linux Mint 22.x or Ubuntu 24.04, and install it:
 
 ```sh
-sudo apt install ./ReVLC_0.2.8_amd64.deb
+sudo apt install ./ReVLC-0.2.10-alpha-amd64.deb
 ```
 
 APT installs libVLC 3 and its plugins from your distribution. Launch ReVLC
 from the application menu or run `revlc`. These experimental packages don't
-self-update; install a newer `.deb` to update. They are CI artifacts, with
-no new release or change to the published downloads.
+self-update; install a newer `.deb` to update. Development packages and smoke-test
+evidence are also available from the **Linux build** workflow in GitHub Actions.
 
 Video uses X11, including XWayland in a Wayland session. Mint's default
 Cinnamon X11 session is the initial target. This first Linux build uses
@@ -178,7 +177,11 @@ Releases are built on GitHub Actions, for free on this public repo:
    both into the update manifest. It won't rebuild a published release.
 3. Download the run's `latest-json` artifact into `site/`
    (`gh run download <run id> -n latest-json -D site`) and commit it.
-4. Publish the release, then deploy the site; installed copies see the update:
+4. For Linux, run **Linux build** on the same commit, confirm its installed-package
+   smoke test passes, and attach the `.deb` from `ReVLC-linux-mint-x64` to the
+   draft release. Linux is deliberately absent from the updater manifest.
+5. Update the version and download URLs in this README and `site/index.html`.
+   Publish the release, then deploy the site; installed copies see the update:
 
 ```sh
 cd site && vercel deploy --prod

@@ -1076,9 +1076,9 @@ kbd {
 
 .platforms {
   display: grid;
-  grid-template-columns: 1fr 1fr;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 16px;
-  max-width: 820px;
+  max-width: 1120px;
   margin-inline: auto;
 }
 
@@ -1099,6 +1099,14 @@ kbd {
 
 .platform h3 {
   font-size: 26px;
+}
+
+.platform h3 small {
+  display: block;
+  margin-top: 4px;
+  color: var(--muted);
+  font-size: 14px;
+  font-weight: 400;
 }
 
 .platform-req {

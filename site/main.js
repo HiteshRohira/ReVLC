@@ -32,10 +32,11 @@ if (seek) {
 
 // Put the visitor's platform first.
 const ua = navigator.userAgentData?.platform || navigator.platform || navigator.userAgent;
-const os = /win/i.test(ua) ? "windows" : /mac/i.test(ua) ? "mac" : null;
-if (os === "windows") {
+const os = /win/i.test(ua) ? "windows" : /mac/i.test(ua) ? "mac" : /linux/i.test(ua) ? "linux" : null;
+if (os === "windows" || os === "linux") {
   for (const group of document.querySelectorAll("[data-downloads]")) {
-    const mine = group.querySelector('[data-os="windows"]');
+    const mine = group.querySelector(`[data-os="${os}"]`);
+    if (!mine) continue;
     group.prepend(mine);
     for (const el of group.querySelectorAll("[data-os]")) {
       const btn = el.matches(".btn") ? el : el.querySelector(".btn");
