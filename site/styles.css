@@ -1109,14 +1109,16 @@ kbd {
   display: grid;
   place-items: center;
   flex: 0 0 36px;
+  width: 36px;
   height: 36px;
+  padding: 0;
   border: 1px solid var(--border);
   border-radius: 50%;
   background: transparent;
   color: var(--muted);
-  font-size: 24px;
   cursor: pointer;
 }
+.download-close svg { display: block; }
 .download-close:hover { color: var(--text); background: rgb(255 255 255 / 0.06); }
 .download-options { display: grid; gap: 10px; margin-top: 24px; }
 .download-option {
