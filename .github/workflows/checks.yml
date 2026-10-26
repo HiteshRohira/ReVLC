@@ -6,6 +6,8 @@ name: Checks
 
 on:
   pull_request:
+    # edited covers a retarget to another base, which changes the diff.
+    types: [opened, synchronize, reopened, edited]
   workflow_call:
 
 concurrency:
@@ -25,7 +27,7 @@ jobs:
       - id: scope
         env:
           EVENT_NAME: ${{ github.event_name }}
-          BASE_REF: ${{ github.event.pull_request.base.ref }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
         run: |
           set -euo pipefail
           # A reusable call from Release always runs the complete matrix.
@@ -34,15 +36,17 @@ jobs:
             exit 0
           fi
 
-          git fetch --no-tags origin "refs/heads/$BASE_REF:refs/remotes/origin/$BASE_REF"
-          mapfile -t changed < <(git diff --name-only --no-renames "origin/$BASE_REF...HEAD")
+          # Diff against the base commit the event names, and fail the job
+          # (so the gate fails) if git can't produce the list.
+          git fetch --no-tags origin "$BASE_SHA"
+          git diff --name-only --no-renames -z "$BASE_SHA...HEAD" > "$RUNNER_TEMP/changed"
           run_app_checks=false
-          for path in "${changed[@]}"; do
+          while IFS= read -r -d '' path; do
             case "$path" in
               README.md|docs/*|site/*|.github/ISSUE_TEMPLATE/*) ;;
               *) run_app_checks=true; break ;;
             esac
-          done
+          done < "$RUNNER_TEMP/changed"
           echo "run_app_checks=$run_app_checks" >> "$GITHUB_OUTPUT"
 
   checks:
