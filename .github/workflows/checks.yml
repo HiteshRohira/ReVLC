@@ -35,7 +35,7 @@ jobs:
           fi
 
           git fetch --no-tags origin "refs/heads/$BASE_REF:refs/remotes/origin/$BASE_REF"
-          mapfile -t changed < <(git diff --name-only "origin/$BASE_REF...HEAD")
+          mapfile -t changed < <(git diff --name-only --no-renames "origin/$BASE_REF...HEAD")
           run_app_checks=false
           for path in "${changed[@]}"; do
             case "$path" in
