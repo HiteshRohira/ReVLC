@@ -1,16 +1,57 @@
-# Type-checks the UI and lints and tests the Rust side on all three platforms,
-# for every push to main and every pull request. The release workflow
-# runs it first and builds nothing if it fails.
+# Type-checks the UI and lints and tests the Rust side on all supported
+# platforms for code PRs. Docs/site-only PRs still report a required green
+# gate without running the full matrix. The release workflow calls this for
+# the full checks before it builds anything.
 name: Checks
 
 on:
-  push:
-    branches: [main]
   pull_request:
+    # edited covers a retarget to another base, which changes the diff.
+    types: [opened, synchronize, reopened, edited]
   workflow_call:
 
+concurrency:
+  group: checks-${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
+  scope:
+    runs-on: ubuntu-latest
+    outputs:
+      run_app_checks: ${{ steps.scope.outputs.run_app_checks }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          fetch-depth: 0
+      - id: scope
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          set -euo pipefail
+          # A reusable call from Release always runs the complete matrix.
+          if [[ "$EVENT_NAME" != "pull_request" ]]; then
+            echo "run_app_checks=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # Diff against the base commit the event names, and fail the job
+          # (so the gate fails) if git can't produce the list.
+          git fetch --no-tags origin "$BASE_SHA"
+          git diff --name-only --no-renames -z "$BASE_SHA...HEAD" > "$RUNNER_TEMP/changed"
+          run_app_checks=false
+          while IFS= read -r -d '' path; do
+            case "$path" in
+              README.md|docs/*|site/*|.github/ISSUE_TEMPLATE/*) ;;
+              *) run_app_checks=true; break ;;
+            esac
+          done < "$RUNNER_TEMP/changed"
+          echo "run_app_checks=$run_app_checks" >> "$GITHUB_OUTPUT"
+
   checks:
+    needs: scope
+    if: needs.scope.outputs.run_app_checks == 'true'
     strategy:
       fail-fast: false
       matrix:
@@ -65,3 +106,22 @@ jobs:
       - name: Tests
         working-directory: src-tauri
         run: cargo test
+
+  required:
+    name: required
+    if: always()
+    needs: [scope, checks]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require the full matrix when app checks are in scope
+        env:
+          SCOPE_RESULT: ${{ needs.scope.result }}
+          RUN_APP_CHECKS: ${{ needs.scope.outputs.run_app_checks }}
+          CHECKS_RESULT: ${{ needs.checks.result }}
+        run: |
+          [[ "$SCOPE_RESULT" == "success" ]]
+          if [[ "$RUN_APP_CHECKS" == "true" ]]; then
+            [[ "$CHECKS_RESULT" == "success" ]]
+          else
+            [[ "$RUN_APP_CHECKS" == "false" && "$CHECKS_RESULT" == "skipped" ]]
+          fi
