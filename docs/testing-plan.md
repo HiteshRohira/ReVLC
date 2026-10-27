@@ -1,6 +1,8 @@
 # Automated testing plan
 
-Status: planned for after the next release. Nothing here is built yet.
+Status: planned. A spike on `ci/cua-ui-spike` (October 26) proved that Cua can
+drive the real app on GitHub's macOS, Windows and Linux runners; nothing else
+is built yet.
 
 Today every branch gets a hands-on audit (see [audit-playbook.md](audit-playbook.md)):
 one QA agent on the Mac and one on the Windows PC drive the real app with
@@ -14,14 +16,25 @@ bugs, but it costs a lot of tokens, ties up both machines, and is fragile:
 - A Vite server from another checkout can serve the wrong UI.
 - The Windows relay times out.
 
-The goal is to make automated tests the default merge gate, and keep desktop
-testing for what really needs a desktop. The target is a 10–18 minute warm CI
-run, plus 10–15 minutes of targeted desktop checks when a PR touches native
-behaviour. Both figures are estimates, not measurements.
+The goal is to make automated tests the default merge gate, and keep the real
+Mac and PC for what only real hardware can prove. Not everything has to run in
+CI: checks that need a real machine are fine, as long as they run before a
+public release. The target is a 10–18 minute warm CI run; that figure is an
+estimate, not a measurement.
 
 This plan was written from the October 2026 audits (`audit-fixes-oct` on both
-platforms, its macOS re-test, and `parity-quick-wins` on both platforms), the
-QA helpers in `scripts/qa/`, and the CI workflows.
+platforms, its macOS re-test, `parity-quick-wins` on both platforms, the PR #7
+audit and the 0.2.9 and 0.2.10 release checks), the Windows engine failure a
+user hit on 0.2.5, the QA helpers in `scripts/qa/`, the CI workflows and the
+Cua spike.
+
+Every check gets two answers: what kind of test it is (section 1) and where it
+has to run (section 4). The same Cua script can run on a GitHub runner, in a
+clean VM or on the real Mac and PC; what changes is what each place can prove.
+Of the 33 bugs the audits found, about 30 would have been caught on GitHub's
+runners alone. Read that with care: every audit ran on our own machines, so
+bugs that only show up on someone else's computer are under-represented, and
+the Windows engine failure is exactly that kind.
 
 ## 1. Where each kind of check belongs
 
@@ -41,7 +54,7 @@ gains are real media tests and browser interaction tests on top of that.
 | UI rendering: home, queue, player, onboarding, settings, dialogs, effects, media info, empty, error and loading states, overflow | Playwright against the Svelte app with Tauri mocked, plus a few screenshot comparisons | Rust and native video |
 | UI interaction: seeking, volume, menus, held keys, focus trapping, accessible names, wheel modes, shortcut conflicts | Playwright; Vitest for pure helpers | OS key delivery and focus |
 | IPC and start-up: command arguments and results, events, early notices and resume offers, the two windows staying in sync | Contract tests plus a small real-app suite | — |
-| Native window behaviour: fullscreen focus, green button, resize, minimise, always on top, cursor wake, controls over video | Scripted native checks, with a short manual fallback | Needs a desktop session |
+| Native window behaviour: fullscreen focus, green button, resize, minimise, always on top, cursor wake, controls over video | Cua against the built app on GitHub's runners | Video under the controls on macOS (no GPU on hosted Macs) |
 | OS integration: menu bar, file picker, Finder/Explorer drops, file associations, cold and warm opens, second instance, command line | Unit tests for argument, path and menu logic; real-app process tests; a few native checks | DOM clicks don't prove OS hand-offs |
 | Packaging and updates: bundle contents, NSIS install and uninstall, registry clean-up, update state, signatures, restart | Artifact checks, silent installer tests, a local update feed; release smoke test | Installer appearance, replacing a real installed version |
 | Platform presentation: Windows DPI, mixed monitors, macOS fonts, subtitle glyphs, title overlap | Browser layout tests for CSS; render tests and native screenshots for libVLC text | Browser device scale isn't Windows display scaling |
@@ -148,27 +161,41 @@ The existing helpers need hardening before they can gate merges:
 - `network-buffer.mjs` catches errors without failing;
 - some steps import Vite source modules, which don't exist in a packaged build.
 
-### macOS: trial the embedded WebDriver
+### Cua for the real app on all three platforms
 
-The official `tauri-driver` still has no macOS support, but Tauri now
-documents a WebdriverIO service with an embedded WebDriver plugin that works
-with WKWebView ([Tauri WebDriver](https://v2.tauri.app/develop/tests/webdriver/),
-[platform support](https://webdriver.io/docs/desktop-testing/tauri/platform-support)).
-Spend half a day to a day checking whether it can reliably launch the embedded
-frontend, address both windows, click controls and read real IPC results, and
-capture the web view on a hosted macOS runner. Keep it out of shipped builds.
-It still wouldn't prove first-responder behaviour, OS key delivery or native
-video compositing.
+Proven on GitHub's runners by the `ci/cua-ui-spike` branch
+(`scripts/qa/ci/cua_smoke.py` and its workflow): the built app opens a generated test
+video, and Cua finds the window, reads its accessibility tree, clicks Pause,
+checks the button flips to Play and the picture stops, and resumes with Space.
+Each job took 4–11 minutes with warm caches.
 
-For the small native suite, use AppleScript/Accessibility and the existing
-helpers. Consider XCUITest only if that suite grows.
+| | macOS 14 / 26 | Windows | Linux |
+|---|---|---|---|
+| Cua drives the app window | yes | yes | yes |
+| Reads every control in the web view | yes | yes, with the flag below | yes |
+| Video renders | **no**: no GPU, libVLC can't create its OpenGL view (15 too) | yes, in software | yes, in software |
+| Pause by button, resume by Space | yes | yes | yes |
+
+What each runner needed:
+
+- **macOS:** `scripts/qa/ci/cua-macos-setup.sh` grants Cua Accessibility and
+  Screen Recording by writing the system permissions database, which works
+  because SIP is off on hosted runners. It copies Cua's own hosted-runner CI.
+- **Windows:** WebView2 only exposes the page to UI Automation when it starts
+  with `--force-renderer-accessibility`. The environment variable is ignored
+  because Tauri passes its own browser arguments, so the CI build adds the flag
+  through Tauri's `additionalBrowserArgs`.
+- **Linux:** the Xvfb desktop from the Linux smoke test plus the accessibility
+  bus (`at-spi2-core`). Cua has no background key route there, so key presses
+  bring the window forward, which is fine on a CI desktop.
+
+Cua replaces the macOS embedded-WebDriver trial: it already drives the real
+WKWebView on a hosted Mac. Playwright stays the tool for UI logic; Cua is for
+the built app, native windows, menus and OS input.
 
 ### Hosted runners
 
-They suit software-output tests, not hardware: no GPU or audio device is
-needed, but don't assume a hidden Tauri window works without a desktop
-session. Windows web view automation is realistic on hosted runners; macOS app
-automation stays experimental until measured.
+They suit everything except hardware. Section 4 lists what they hide.
 
 ## 3. CI design
 
@@ -178,7 +205,8 @@ automation stays experimental until measured.
 |---|---|---:|
 | `ui` (Linux) | Svelte check and build, Vitest, Playwright Chromium and WebKit, selected visual checks | 3–6 min |
 | `native-checks-macos` | Existing Rust checks plus backend and real libVLC tests | 7–12 min |
-| `native-checks-windows` | Same; later a small CDP real-app suite | 9–18 min |
+| `native-checks-windows` | Same | 9–18 min |
+| `ui-smoke` (all three) | The Cua smoke test on the built app | 4–11 min (measured) |
 | `qa-gate` | Requires the jobs above | — |
 
 Cold caches could push the slowest job to 20–30 minutes; measure before
@@ -191,16 +219,21 @@ growing the suite.
 - Real-app tests build the app with the frontend embedded, launch the exact
   binary and check its build identifier. Browser tests start their own server
   and refuse to reuse one already running.
+- On hosted macOS the smoke test skips the on-screen video check: there is no
+  GPU. Video correctness on macOS comes from the libVLC memory-output tests and
+  the real-Mac checks in section 4.
 
 ### Nightly
 
+- The full Cua suite on all three platforms: menus, settings, effects,
+  focus, fullscreen and keyboard, file opens from Finder and Explorer, the
+  command line, second instance, resume across relaunch.
 - More codecs, containers and multi-track fixtures.
 - Repeated cold starts and resume and reload cycles.
 - HLS stalls, disconnects and recovery against a local server.
 - The real scan cap and long paths.
 - Endurance: open, stop, filters and thumbnails in a loop, watching resources.
 - Unsigned bundle layout and a silent Windows installer smoke test.
-- The macOS embedded-driver tests, if the trial works.
 
 Budget 20–40 minutes per platform, non-blocking at first while flakiness is
 understood. Skip commits that already passed an equivalent run.
@@ -215,8 +248,9 @@ publishable:
 - install and uninstall in a throwaway Windows environment, checking
   registrations and clean-up;
 - update success, failure, bad signature, interrupted download, restart with
-  history kept;
-- the short native checklist below.
+  history kept.
+
+Then, before publishing, the clean-VM and real-machine checks in section 4.
 
 A local update feed with a throwaway key tests the updater's mechanics without
 production secrets. It doesn't prove that the production-signed build replaces
@@ -252,37 +286,64 @@ Cost: public repositories use standard hosted runners at no charge. At paid
 rates a PR run (about 6 Linux, 14 Windows and 12 macOS minutes) is roughly
 $0.90, and a 30-minute nightly per native platform roughly $2.
 
-## 4. What stays on a desktop
+## 4. Where each check must run
 
-Run the relevant items when a PR changes native surfaces, fullscreen or focus,
-window handling, menus, open events, packaging, or the matching UI code; run
-the whole list before a release:
+### GitHub's runners: every PR and nightly
 
-- **Native picture:** video and subtitles visible under the controls; resize
-  and fullscreen keep them composited; a 10-bit sample when output or decoding
-  changes.
-- **Focus:** F / Escape and green-button cycles, then Space and arrows without
-  clicking first; double-click fullscreen; switching between Settings and the
-  player.
-- **Opening from the OS:** one native multi-select or drop of a video plus an
-  unrelated SRT; cold and warm Finder/Explorer opens; Windows second instance.
-- **Platform presentation:** Windows at 100% and 150% (mixed monitors when
-  relevant); macOS default-font Japanese subtitles and title position.
-- **Release hand-off:** installer appearance, associations, a real update
-  replacing the installed version, history kept.
-- **Hardware, only when affected:** audio device switching, Bluetooth and
-  passthrough, capture devices and permissions, discs.
+Sections 1–3. They differ from a user's machine in ways that hide real bugs:
 
-Aim for 10–15 minutes, 6–10 screenshots and one or two short recordings.
+- **No GPU.** macOS shows no native video at all; Windows and Linux render in
+  software.
+- **No audio devices**, Bluetooth, discs or cameras.
+- **One virtual display at 100% scale**, US English, the latest OS only.
+- **Developer tools and Visual C++ runtimes are already installed**, so a
+  missing-DLL bug passes. That is one of the likeliest causes of the 0.2.5
+  engine failure on a user's Windows 10 PC.
+- **macOS has SIP off and Cua's permissions pre-seeded**, so first-launch
+  permission prompts never appear.
+- **The app is never downloaded through a browser**, so no Gatekeeper
+  quarantine and no SmartScreen.
 
-- Prefer a dedicated desktop session. A spare Mac is the most useful
-  self-hosted machine eventually. A runner on an everyday machine still takes
-  over its desktop while it works.
+### Clean VMs on our own hardware: before each release
+
+Install the published files on a fresh snapshot with nothing else installed,
+and run the same Cua smoke script:
+
+- Windows 10 and Windows 11 on the PC (VirtualBox snapshots, or Windows
+  Sandbox for Windows 11: Windows 11 Pro includes it and every launch starts
+  clean);
+- a macOS VM on the Mac (UTM or Tart), ideally an older macOS too.
+
+The real PC can't stand in for the clean Windows 11 install: it has
+developer tools, runtimes, VLC and earlier ReVLC versions on it, which is the
+opposite of a new user's machine. A VM also resets in seconds and runs without
+taking over the desktop. This layer catches "doesn't start on a stranger's
+PC". It is fully scriptable; it just doesn't run on GitHub.
+
+### The real Mac and PC: before a public release
+
+Scripted with Cua where possible, run when a PR changes the area and always
+before a public release:
+
+| Check | Why CI or a VM can't prove it |
+|---|---|
+| macOS native video: picture, subtitles over video, resize, fullscreen; title position | Every hosted macOS image fails to create the OpenGL context |
+| Hardware decoding, real GPU drivers (AMD, Intel, NVIDIA), 10-bit and HDR | No real GPU |
+| Windows at 125% and 150%, mixed-DPI monitors; Retina plus an external display | One 100% display |
+| Audio devices, AirPods and Bluetooth switching, passthrough | No audio hardware |
+| The downloaded installer: Gatekeeper quarantine on the DMG, SmartScreen, antivirus touching libVLC plugins | Nothing is downloaded through a browser |
+| A real update from the previous release, history kept | Needs the previous version installed |
+| Sleep and wake, a locked screen, trackpad gestures | Not available in VMs |
+| Discs, cameras, microphones, network shares (only when affected) | No hardware |
+| Installer appearance and overall look | Human judgement: Cua takes the screenshots, a person looks |
+
 - Keep the unlocked-screen requirement. Before each native action, check the
   intended process, window and frontmost app, and stop if focus changed.
-- Fix the click-count issue in `scripts/qa/mac/desktop.swift` before using it
-  on web content.
 - Native checks run as scripts, not as an agent deciding every click.
+
+### After a release
+
+The existing sanity and smoke runs on the published files.
 
 ## 5. Test hooks the app needs
 
@@ -317,45 +378,54 @@ A few seams, not a general remote control:
 | B | Tauri mock bootstrap, core Playwright flows, console-error failures, accessibility and selected visual checks | 1½–2½ days |
 | C | Turn the memory-output and WAV experiments into per-process libVLC tests; codecs, subtitles, replaced files | 2–3 days |
 | D | Backend seams and deterministic start-up, event and storage tests | 2–3 days |
-| E | Small Windows real-app suite; separate time-boxed macOS driver trial | 1–2 days, plus ½–1 day |
-| F | Broader nightly, release and package tests, compact native scripts | 2–3 days, gradually |
+| E | Turn the Cua spike into the PR smoke job, then grow it into the nightly suite on all three platforms | ½ day, then 1–2 days |
+| F | Broader nightly, release and package tests; clean-VM and real-machine scripts | 2–3 days, gradually |
 
 About two weeks for the core, in small steps. The UI tests and the
-already-proven libVLC approach should pay off within the first few days. Don't
-make a macOS automation framework a prerequisite for anything.
+already-proven libVLC approach should pay off within the first few days.
 
 ### Past audit bugs and what would have caught them
 
 These are bugs the audits found (most are fixed); the point is which layer
-would have caught each one.
+would have caught each one, and whether GitHub's runners are enough. "Real
+Mac" or "clean VM" means section 4.
 
 | Bug | Test that would catch it | Phase |
 |---|---|---|
 | "Ask" resume offer lost on a cold launch from Finder | Late-listener test in Rust, UI hydration test, cold-start app smoke test | B, D, E |
 | Changing subtitle style dropped external subtitles (both platforms) | Real-engine reload test: track stays selected, Off stays Off, old SRT doesn't follow another file | C, D |
 | Recovered history showed no notice (both platforms) | Corrupt history in a temp folder: file kept aside, notice pending, notice shown | B, D |
-| Fullscreen loses keyboard focus (macOS) | Native fullscreen transition followed by real OS key input | F, desktop |
-| Double-click on video didn't enter fullscreen | Browser handler test plus a native double-click | B, F |
+| Fullscreen loses keyboard focus (macOS) | Cua: F, then real key input, on a hosted Mac; confirm on the real Mac before release | E, real Mac |
+| Double-click on video didn't enter fullscreen | Browser handler test plus a Cua double-click | B, E |
 | Unplayable file marked Watched (both platforms) | Feed end-before-play events; replay malformed media through the real engine | C, D |
 | Update result shown in the other window | Delayed update scenario; check progress and result in Settings | B, E |
 | Shuffle button had no accessible name | Accessible role, name and state checks | B |
 | Periodic history writes on the event thread | Block the writer; event handling must continue | D |
-| Start-up title covered subtitles | Default-policy test and a known-frame render; native confirmation | C, D, F |
-| Default font showed Japanese subtitles as boxes (macOS) | Font and render fixture; native screenshot | C, F |
+| Start-up title covered subtitles | Default-policy test and a known-frame render; native confirmation | C, D, real Mac |
+| Default font showed Japanese subtitles as boxes (macOS) | Memory-output render on a hosted Mac, which has the real macOS fonts: libVLC draws subtitles into the frame | C |
 | Valid file failed at a 346-character Unicode path (Windows) | Real wrapper opens the same file at short and long paths | C |
 | Replacing a file with an older timestamp kept the old thumbnail (Windows) | Replace, move the timestamp back, rescan, check new metadata and pixels | C, D |
 | Focus escaped a modal dialog (Windows) | Tab and Shift+Tab containment, background inert | B |
 | Engine failure left Settings loading forever (Windows) | Reject `settings_get`; a visible error state | B |
 | "Return" shown instead of "Enter" on Windows | Platform-specific shortcut text | B |
-| NSIS footer clipped; generic uninstaller artwork | Installer screenshot at the affected scale; resource check | F |
+| NSIS footer clipped; generic uninstaller artwork | Cua screenshots of the installer on hosted Windows; a person looks | E, F |
 | Gear menu froze with Svelte's update-depth error (Windows) | Open the menu with real tracks and effects; fail on console errors | B |
-| Marquee `$t`/`$T` codes shown literally (both platforms) | Render the advertised codes through real libVLC; native confirmation | C, F |
+| Marquee `$t`/`$T` codes shown literally (both platforms) | Render the advertised codes through real libVLC | C |
 | Relative-path Rust test assumed Unix paths | Windows `cargo test` already caught it | A |
+| Windows menus disappeared during playback | Playwright: title bar and Alt handling mounted on the player; Cua on hosted Windows | B, E |
+| Onboarding disclosure clipped at minimum height | Playwright at 720×450; 150% scaling on the real PC | B, real PC |
+| Media information focus escaped (Windows) | Tab and Shift+Tab containment | B |
+| Scan-cap boundary depended on file-system order | Controlled enumeration in a Rust test | D |
+| Previews reused after replacing a file with one of the same length (PR #7) | Replace the file, relaunch, check new preview pixels | C, D |
+| Preview generation continued after disabling and stopping (PR #7) | Count generated frames after disable and stop | C, D |
+| Previews ignored the selected video track (PR #7) | Two-track fixture: preview pixels match the selected track | C |
+| Engine failed on a user's Windows 10 PC on first launch (0.2.5); cause unknown | Published installer on a clean Windows 10 VM; better startup diagnostics | F, clean VM |
+| "libVLC not found" shown for every engine failure | Each failure class produces its own message | B, D |
 
 ## Top five recommendations
 
 1. Gate merges on real libVLC output tests on both platforms.
 2. Move routine UI interaction and visual checks into Playwright with Tauri mocked.
 3. Test event races and saved data deterministically in Rust.
-4. Keep real-app automation small: reuse Windows CDP, trial the macOS embedded WebDriver.
-5. Replace whole-branch desktop audits with targeted native checks and a release checklist.
+4. Drive the built app with Cua on GitHub's macOS, Windows and Linux runners: a smoke test on every PR, the full suite nightly.
+5. Before each release, run the same scripts on clean VMs and the real Mac and PC, limited to what hosted runners can't prove.
