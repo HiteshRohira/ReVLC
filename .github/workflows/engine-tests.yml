@@ -1,0 +1,68 @@
+# Runs ReVLC's libVLC integration tests (src-tauri/src/vlc_it.rs) on macOS,
+# Windows and Linux: the real libVLC that ships (the system one on Linux)
+# plays generated media into memory and a WAV file, and the tests check the
+# frames and samples. No screen, GPU or sound card needed. Not a required
+# check yet: run it for a while first.
+name: Engine tests
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+    paths-ignore: ['README.md', 'docs/**', 'site/**', '.github/ISSUE_TEMPLATE/**']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: engine-tests-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: true
+
+jobs:
+  vlc-it:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-14, windows-latest, ubuntu-24.04]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 40
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Linux dependencies
+        if: runner.os == 'Linux'
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
+          # The hosted runner's Azure mirror can stall; see linux-build.yml.
+          [[ -f /etc/apt/apt-mirrors.txt ]] && echo 'https://archive.ubuntu.com/ubuntu/' | sudo tee /etc/apt/apt-mirrors.txt
+          sudo -E apt-get -o Acquire::http::Timeout=30 -o Acquire::Retries=2 update
+          sudo -E apt-get -o Acquire::http::Timeout=30 -o Acquire::Retries=2 install -y \
+            libwebkit2gtk-4.1-dev build-essential libssl-dev librsvg2-dev libx11-dev patchelf \
+            libvlc5 libvlccore9 vlc-plugin-base vlc-plugin-video-output ffmpeg
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+      - run: npm ci
+      # The Rust build embeds the built UI.
+      - run: npm run build
+      - name: Download libVLC and FFmpeg
+        if: runner.os != 'Linux'
+        run: bash scripts/prepare-libvlc.sh && bash scripts/prepare-ffmpeg.sh
+      - name: Run the libVLC integration tests
+        working-directory: src-tauri
+        run: |
+          if [[ "$RUNNER_OS" == Linux ]]; then
+            export REVLC_TEST_FFMPEG=ffmpeg  # and the system libVLC
+          else
+            export REVLC_VLC_DIR="$PWD/vlc"
+            export REVLC_TEST_FFMPEG="$(ls "$PWD"/binaries/ffmpeg-*)"
+          fi
+          cargo test --locked vlc_it -- --ignored --test-threads=1
