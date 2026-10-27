@@ -392,11 +392,17 @@ fn vlc_it_thumbnails_follow_the_file() {
 #[test]
 #[ignore = "needs libVLC and FFmpeg; see the module docs"]
 fn vlc_it_opens_long_unicode_paths_and_local_hls() {
-    let deep = work().join(["Ünïcødé 視頻 テスト — segment"; 8].join(std::path::MAIN_SEPARATOR_STR));
+    // The app is long-path aware on Windows through its manifest
+    // (windows/app.manifest), which this test executable doesn't have, so
+    // Windows gets a Unicode path under 260 characters here; the Cua suite
+    // covers long paths with the real app.
+    let segments = if cfg!(windows) { 3 } else { 12 };
+    let deep = work().join(vec!["Ünïcødé 視頻 テスト — segment"; segments].join(std::path::MAIN_SEPARATOR_STR));
     std::fs::create_dir_all(&deep).unwrap();
     let file = deep.join("長いファイル名.mp4");
     std::fs::copy(pattern(), &file).unwrap();
-    assert!(file.to_string_lossy().chars().count() > 260);
+    let chars = file.to_string_lossy().chars().count();
+    assert!(if cfg!(windows) { chars < 260 } else { chars > 300 }, "{chars} characters");
     let (vlc, _frames) = video_player();
     play(&vlc, &file);
 
