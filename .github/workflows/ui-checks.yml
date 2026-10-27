@@ -1,5 +1,6 @@
-# Drives the built Linux package through Cua (scripts/qa/ci/cua_suite.py)
-# on every app PR: the same suite that runs on the Mac, the PC and the VMs
+# Two jobs on every app PR. browser: the UI in Chromium and WebKit with the
+# backend mocked (tests/ui). linux: the built Linux package driven through
+# Cua (scripts/qa/ci/cua_suite.py), the same suite that runs on the Mac, the PC and the VMs
 # before a release (scripts/qa/device/). macOS and Windows run there rather
 # than here: hosted Macs have no GPU, and WebView2 hides the page from Cua
 # unless a screen reader seems to be running, which the device runs handle
@@ -33,6 +34,29 @@ env:
   DO_NOT_TRACK: '1'
 
 jobs:
+  # The UI in Chromium and WebKit with the backend mocked (tests/ui):
+  # every layout, dialog, shortcut and state the Rust side can put it in.
+  browser:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npx playwright install --with-deps chromium webkit
+      - run: npm run test:ui
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: browser-tests-report
+          path: |
+            playwright-report/
+            test-results/
+          if-no-files-found: ignore
+
   linux:
     runs-on: ubuntu-24.04
     timeout-minutes: 45
