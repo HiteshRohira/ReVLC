@@ -32,7 +32,8 @@ from pathlib import Path
 from PIL import Image, ImageChops
 
 ROOT = Path(__file__).resolve().parents[3]
-SESSION = "revlc-suite"
+# A fresh Cua session per run: a long-running daemon can end an old one.
+SESSION = f"revlc-suite-{os.getpid()}"
 MAC = sys.platform == "darwin"
 WIN = os.name == "nt"
 LINUX = sys.platform.startswith("linux")
@@ -48,13 +49,29 @@ class Skip(Exception):
     pass
 
 
-def cua(tool, args, shot=None, timeout=60):
+DAEMON_GONE = ("daemon is not running", "closed connection without response")
+
+
+def cua(tool, args, shot=None, timeout=60, retry=True):
     cmd = ["cua-driver", "call", tool, json.dumps({**args, "session": SESSION})]
     if shot:
         cmd += ["--screenshot-out-file", str(shot)]
-    r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+    # UTF-8 explicitly: Windows would decode with its ANSI code page.
+    r = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=timeout)
     if r.returncode:
-        raise RuntimeError(f"{tool}: {(r.stderr or r.stdout).strip()[:600]}")
+        message = (r.stderr or r.stdout or "").strip()
+        if retry and "session has ended" in message:
+            subprocess.run(["cua-driver", "call", "start_session", json.dumps({"session": SESSION})], capture_output=True)
+            return cua(tool, args, shot, timeout, retry=False)
+        restart = os.environ.get("CUA_DAEMON_RESTART")
+        if retry and restart and any(m in message for m in DAEMON_GONE):
+            # The daemon can crash on a hosted runner; Cua's own CI restarts
+            # it with a watchdog. Restart it once and retry the call.
+            print(f"  (Cua daemon gone during {tool}; restarting it)", flush=True)
+            subprocess.run(restart, shell=True)
+            wait_for(lambda: subprocess.run(["cua-driver", "status"], capture_output=True).returncode == 0, "the Cua daemon", 30)
+            return cua(tool, args, shot, timeout, retry=False)
+        raise RuntimeError(f"{tool}: {message[:600]}")
     return json.loads(r.stdout) if r.stdout.strip() else {}
 
 
@@ -127,7 +144,9 @@ class App:
 
     def windows(self):
         ws = cua("list_windows", {"pid": self.pid}).get("windows", [])
-        return [w for w in ws if w.get("bounds", {}).get("width", 0) > 300]
+        # Layer 0 only: macOS also lists the app's menu-bar strip as a window.
+        return [w for w in ws if w.get("bounds", {}).get("width", 0) > 300 and w.get("bounds", {}).get("height", 0) > 200
+                and w.get("layer", 0) == 0]
 
     def wait_window(self, timeout=40, title=None):
         def find():
@@ -160,7 +179,7 @@ class App:
     def read(self, window_id=None):
         s = cua("get_window_state", {
             "pid": self.pid, "window_id": window_id or self.window_id, "tree_format": "elements",
-            "include_screenshot": False, "max_elements": 1500, "full_output": True,
+            "include_screenshot": False, "max_elements": 1500,
         })
         self.snapshot = s.get("snapshot_id")
         self.elements = s.get("elements", [])
@@ -206,9 +225,9 @@ class App:
 
     # Actions
 
-    def press(self, label, window_id=None, **kw):
-        els = self.find(label, window_id=window_id, button=True, **kw)
-        ensure(els, f'no "{label}" button')
+    def press(self, label, window_id=None, any_role=False, **kw):
+        els = self.find(label, window_id=window_id, button=not any_role, **kw)
+        ensure(els, f'no "{label}" {"control" if any_role else "button"}')
         cua("click", {"element_token": els[0]["element_token"]})
 
     def key(self, key, mods=()):
@@ -227,7 +246,8 @@ class App:
         bar, which owns ⌘ shortcuts there), Ctrl elsewhere."""
         if MAC:
             return cua("hotkey", {"pid": self.pid, "window_id": self.window_id, "keys": ["cmd", key], "delivery_mode": "foreground"})
-        return self.key(key, ("ctrl",))
+        # Background Ctrl chords don't reach WebView2; send them as real input.
+        return cua("hotkey", {"pid": self.pid, "window_id": self.window_id, "keys": ["ctrl", key], "delivery_mode": "foreground"})
 
     def menu(self, top, item):
         """Runs a menu item the way a user does: the menu bar on macOS, the
@@ -255,7 +275,16 @@ class App:
 
     def double_click_centre(self):
         b = self.bounds() or self.frame
-        cua("double_click", {"pid": self.pid, "window_id": self.window_id, "x": b["width"] // 2, "y": b["height"] // 3})
+        # Pixel clicks are relative to a screenshot Cua has taken of the window.
+        cua("get_window_state", {"pid": self.pid, "window_id": self.window_id, "include_accessibility_tree": False})
+        args = {"pid": self.pid, "window_id": self.window_id, "x": b["width"] // 2, "y": b["height"] // 3}
+        try:
+            cua("double_click", args)
+        except RuntimeError as e:
+            # WebKitGTK ignores synthetic background input; a CI desktop can take focus.
+            if "background_unavailable" not in str(e):
+                raise
+            cua("double_click", {**args, "delivery_mode": "foreground"})
 
     def shot(self, name):
         path = self.ctx.out / "screenshots" / f"{name}.png"
@@ -391,7 +420,9 @@ class Context:
             status, detail = ("xfail" if known_bug else "fail"), f"{type(e).__name__}: {e}\n{traceback.format_exc(limit=3)}"
         if status in ("fail", "xfail") and app and app.window_id:
             try:
-                app.shot(f"{self.scenario}--{name}--failed")
+                base = f"{self.scenario}--{re.sub(r'[^A-Za-z0-9]+', '-', name)}--failed"
+                app.shot(base)
+                (self.out / "logs" / f"{base}.json").write_text(json.dumps(app.read(), indent=1, ensure_ascii=False), encoding="utf-8")
             except Exception:
                 pass
         r = {"scenario": self.scenario, "check": name, "status": status, "detail": detail if isinstance(detail, str) else json.dumps(detail),
@@ -469,6 +500,7 @@ def onboarding(ctx):
         cua("set_window_frame", {"pid": app.pid, "window_id": app.window_id, "x": b["x"], "y": b["y"], "width": 720, "height": 450})
         time.sleep(1)
         b = app.bounds()
+        ensure(abs(b["width"] - 720) < 40 and abs(b["height"] - 450) < 40, f"couldn't resize the window: it's {b['width']:g}×{b['height']:g}")
         app.shot("onboarding-720x450")
         bottom = b["y"] + b["height"]
         outside = [e.get("label") for e in app.read() if e.get("frame") and e.get("label")
@@ -557,9 +589,11 @@ def fullscreen(ctx):
     def enter_f():
         app.key("f")
         app.wait("Exit fullscreen", button=True, timeout=10)
-        b = wait_for(lambda: (b := app.bounds()) and b["width"] > before["width"] and b, "the window to grow", 10)
+        screen = cua("get_screen_size", {})
+        b = wait_for(lambda: (b := app.bounds()) and b["width"] >= screen["width"] - 2 and b["height"] >= screen["height"] - 2 and b,
+                     f"the window to cover the {screen['width']}×{screen['height']} screen", 10)
         app.shot("fullscreen")
-        return f"{before['width']:g}×{before['height']:g} → {b['width']:g}×{b['height']:g}"
+        return f"{before['width']:g}×{before['height']:g} → {b['width']:g}×{b['height']:g}, the whole screen"
 
     if ctx.check("F enters fullscreen", enter_f, app=app):
         ctx.check("keys still work in fullscreen", lambda: (app.key("space"), app.wait("Play", button=True, timeout=5),
@@ -606,8 +640,7 @@ def menus(ctx):
         app.wait("Media information", timeout=8)
         tabs = [l for l in ("General", "Codec", "Statistics") if app.find(l, fresh=False)]
         ensure(len(tabs) == 3, f"tabs found: {tabs}")
-        app.press("Codec")
-        app.wait_text("Codec", timeout=3)
+        app.press("Codec", any_role=True)
         return "dialog with General, Codec and Statistics"
 
     if ctx.check("media information opens", info, app=app):
@@ -631,6 +664,9 @@ def menus(ctx):
         ctx.check("Escape closes it", lambda: (app.key("escape"), app.wait_gone("Media information", timeout=5)) and "closed", app=app)
 
     def help_text():
+        if app.find("Media information"):
+            app.key("escape")
+            app.wait_gone("Media information", timeout=5)
         if not MAC:
             app.press("Back to home")
             app.wait_text("Home", timeout=10)
@@ -682,11 +718,18 @@ def resume(ctx):
             # Launch Services starts the app and sends it an open-file event,
             # the way a double-click in Finder does.
             subprocess.run(["open", "-a", str(ctx.bundle), str(ctx.media / "playback.mp4")], check=True)
-            pid = wait_for(lambda: [w["pid"] for w in cua("list_windows", {"app": "ReVLC"}).get("windows", [])], "ReVLC from open -a", 30)[0]
+            pid = wait_for(lambda: [w["pid"] for w in cua("list_windows", {"app": "ReVLC"}).get("windows", [])
+                                    if w["pid"] != again.pid and w.get("layer", 0) == 0], "ReVLC from open -a", 30)[0]
             opened = App(ctx, "resume-open-a", pid=pid)
             ctx.apps.append(opened)
             opened.wait_window()
-            opened.wait("Continue", button=True, timeout=15)
+            try:
+                opened.wait("Continue", button=True, timeout=15)
+            except Fail:
+                opened.shot("resume--finder-open--failed")
+                (ctx.out / "logs" / "resume--finder-open--failed.json").write_text(
+                    json.dumps(opened.read(), indent=1, ensure_ascii=False), encoding="utf-8")
+                raise
             return "a cold open from Finder offered to continue"
 
         ctx.check("cold open from Finder offers to continue", finder_open, app=again)
@@ -833,6 +876,7 @@ def small_window(ctx):
         cua("set_window_frame", {"pid": app.pid, "window_id": app.window_id, "x": b["x"], "y": b["y"], "width": 720, "height": 450})
         time.sleep(1.5)
         b = app.bounds()
+        ensure(abs(b["width"] - 720) < 40 and abs(b["height"] - 450) < 40, f"couldn't resize the window: it's {b['width']:g}×{b['height']:g}")
         app.shot("player-720x450")
         right, bottom = b["x"] + b["width"], b["y"] + b["height"]
         missing, outside = [], []
@@ -841,7 +885,10 @@ def small_window(ctx):
             if not els:
                 missing.append(label)
                 continue
-            f = els[0]["frame"]
+            f = els[0].get("frame")
+            if not f:
+                missing.append(f"{label} (no position)")
+                continue
             if f["x"] + f["w"] > right + 1 or f["y"] + f["h"] > bottom + 1:
                 outside.append(label)
         ensure(not missing and not outside, f"missing {missing}, outside the window {outside}")
@@ -857,24 +904,30 @@ def subtitles(ctx):
     if not ctx.check("starts playing", lambda: app.wait_playing() or "playing", app=app):
         return
 
-    def listed():
+    def tracks():
+        """Opens the Subtitles menu and returns its track items."""
         app.press("Subtitles")
-        app.wait("Subtitles", role="menu", timeout=5)
-        items = [e for e in app.read() if "menuitem" in (e.get("role") or "").lower() or "radio" in (e.get("role") or "").lower()]
-        names = [e.get("label") for e in items]
+        wait_for(lambda: app.find("Off"), "the Subtitles menu", 5)
+        return [e for e in app.elements if (e.get("label") or "").startswith("Track")]
+
+    def listed():
+        items = tracks()
         app.key("escape")
-        ensure(any(n and n != "Off" for n in names), f"no subtitle track in {names}")
-        return f"tracks {names}"
+        ensure(items, "no subtitle track besides Off")
+        return f"tracks {[e.get('label') for e in items]}"
 
     ctx.check("the SRT is listed", listed, app=app)
+
+    def white_text(name):
+        im = Image.open(app.shot(name)).convert("RGB")
+        w, h = im.size
+        band = im.crop((w // 6, int(h * 0.6), 5 * w // 6, int(h * 0.95)))
+        return sum(min(p) > 200 for p in band.getdata())
 
     def drawn():
         if ctx.no_video:
             raise Skip("this runner can't show video")
-        im = Image.open(app.shot("subtitle")).convert("RGB")
-        w, h = im.size
-        band = im.crop((w // 6, int(h * 0.6), 5 * w // 6, int(h * 0.95)))
-        white = sum(min(p) > 200 for p in band.getdata())
+        white = white_text("subtitle")
         return ensure(white > 200, f"only {white} white pixels where the subtitle goes") and f"{white} white pixels of subtitle text"
 
     ctx.check("the subtitle is drawn", drawn, app=app)
@@ -883,21 +936,28 @@ def subtitles(ctx):
         w = app.settings_window()
         tab = wait_for(lambda: [e for e in app.find("Subtitles", window_id=w) if is_button(e)], "the Subtitles tab", 10)
         cua("click", {"element_token": tab[0]["element_token"]})
-        bold = wait_for(lambda: [e for e in app.read(w) if e.get("label") == "Bold" and "switch" in (e.get("role") or "").lower()
-                                 or e.get("label") == "Bold" and "check" in (e.get("role") or "").lower()], "the Bold switch", 10)
+        # The switch is named after its row's label; its role differs by platform.
+        bold = wait_for(lambda: [e for e in app.read(w) if e.get("label") == "Bold" and e.get("actions")
+                                 and "text" not in (e.get("role") or "").lower()], "the Bold switch", 10)
         cua("click", {"element_token": bold[0]["element_token"]})
         time.sleep(3)
-        app.press("Subtitles")
-        app.wait("Subtitles", role="menu", timeout=5)
-        checked = [e.get("label") for e in app.read() if e.get("selected") or e.get("value") in ("1", 1, True, "true")]
+        if not ctx.no_video:
+            # What a user sees: the subtitle is still on the picture.
+            white = white_text("subtitle-after-bold")
+            ensure(white > 200, f"the subtitle is gone from the picture ({white} white pixels)")
+            return f"still drawn ({white} white pixels)"
+        items = tracks()
         app.key("escape")
-        ensure(any(c and c != "Off" for c in checked), f"no subtitle track selected after the change ({checked})")
+        checked = [e.get("label") for e in items if e.get("selected") or str(e.get("value")).lower() in ("1", "true")]
+        ensure(checked, f"no subtitle track selected after the change ({[e.get('label') for e in items]})")
         return f"still selected: {checked}"
 
     ctx.check("turning on Bold keeps the subtitle", survives_style_change, app=app)
 
 
 def main():
+    # Windows consoles default to a code page that can't print "→" or "—".
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     ap = argparse.ArgumentParser()
     ap.add_argument("--out", required=True, type=Path)
     ap.add_argument("--ffmpeg", required=True)
