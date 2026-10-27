@@ -226,9 +226,56 @@ class App:
     # Actions
 
     def press(self, label, window_id=None, any_role=False, **kw):
-        els = self.find(label, window_id=window_id, button=not any_role, **kw)
-        ensure(els, f'no "{label}" {"control" if any_role else "button"}')
-        cua("click", {"element_token": els[0]["element_token"]})
+        for attempt in (1, 2):
+            els = self.find(label, window_id=window_id, button=not any_role, **kw)
+            ensure(els, f'no "{label}" {"control" if any_role else "button"}')
+            try:
+                return self.click_el(els[0], window_id)
+            except RuntimeError as e:
+                # A restarted Cua daemon forgets earlier reads; read again.
+                if attempt == 2 or not any(c in str(e) for c in ("stale_element_token", "window_never_read")):
+                    raise
+
+    def click_el(self, e, window_id=None):
+        """Clicks an element through accessibility, or at its centre when
+        it has no action (WebKitGTK menu items have none)."""
+        if e.get("actions"):
+            return cua("click", {"element_token": e["element_token"]})
+        f = e.get("frame")
+        ensure(f, f'"{e.get("label")}" has no action and no position')
+        return self.pixel_click(f["x"] + f["w"] / 2, f["y"] + f["h"] / 2, window_id)
+
+    def pixel_click(self, sx, sy, window_id=None, count=1):
+        """Clicks at screen point (sx, sy). Cua takes window-local pixels of
+        its latest screenshot of the window, so read one first."""
+        wid = window_id or self.window_id
+        st = cua("get_window_state", {"pid": self.pid, "window_id": wid, "include_accessibility_tree": False})
+        wb = st.get("window_bounds") or self.bounds()
+        scale = (st.get("screenshot_width") or wb["width"]) / wb["width"]
+        args = {"pid": self.pid, "window_id": wid, "x": round((sx - wb["x"]) * scale), "y": round((sy - wb["y"]) * scale)}
+        tool = "double_click" if count == 2 else "click"
+        try:
+            return cua(tool, args)
+        except RuntimeError as err:
+            if "background_unavailable" not in str(err) and "window_never_read" not in str(err):
+                raise
+            return cua(tool, {**args, "delivery_mode": "foreground"})
+
+    def click_switch(self, label, window_id):
+        """Flips the switch named `label`. On Linux a switch reports no
+        position, so click where it sits: the right end of its row."""
+        els = [e for e in self.read(window_id) if e.get("label") == label and e.get("actions")
+               and "text" not in (e.get("role") or "").lower()]
+        ensure(els, f'no "{label}" switch')
+        if els[0].get("frame"):
+            return cua("click", {"element_token": els[0]["element_token"]})
+        by_index = {e["element_index"]: e for e in self.elements}
+        parent = by_index.get(els[0].get("parent_index"))
+        while parent and not parent.get("frame"):
+            parent = by_index.get(parent.get("parent_index"))
+        ensure(parent, f'"{label}" and its parents have no position')
+        f = parent["frame"]
+        return self.pixel_click(f["x"] + f["w"] - 19, f["y"] + f["h"] / 2, window_id)
 
     def key(self, key, mods=()):
         args = {"pid": self.pid, "window_id": self.window_id}
@@ -259,7 +306,7 @@ class App:
         self.press({"App": "Tools"}.get(top, top))
         # Items carry their shortcut in their name, e.g. "Settings…Ctrl+,".
         els = wait_for(lambda: [e for e in self.read() if (e.get("label") or "").startswith(item)], f'menu item "{item}"', 5)
-        cua("click", {"element_token": els[0]["element_token"]})
+        self.click_el(els[0])
 
     def settings_window(self):
         """Opens Settings (its own window) and returns that window's id:
@@ -275,16 +322,15 @@ class App:
 
     def double_click_centre(self):
         b = self.bounds() or self.frame
-        # Pixel clicks are relative to a screenshot Cua has taken of the window.
-        cua("get_window_state", {"pid": self.pid, "window_id": self.window_id, "include_accessibility_tree": False})
-        args = {"pid": self.pid, "window_id": self.window_id, "x": b["width"] // 2, "y": b["height"] // 3}
-        try:
-            cua("double_click", args)
-        except RuntimeError as e:
-            # WebKitGTK ignores synthetic background input; a CI desktop can take focus.
-            if "background_unavailable" not in str(e):
-                raise
-            cua("double_click", {**args, "delivery_mode": "foreground"})
+        x, y = b["x"] + b["width"] / 2, b["y"] + b["height"] / 3
+        if MAC:
+            return self.pixel_click(x, y, count=2)
+        # WebView2 and WebKitGTK don't take synthetic background double-clicks.
+        st = cua("get_window_state", {"pid": self.pid, "window_id": self.window_id, "include_accessibility_tree": False})
+        wb = st.get("window_bounds") or b
+        scale = (st.get("screenshot_width") or wb["width"]) / wb["width"]
+        cua("double_click", {"pid": self.pid, "window_id": self.window_id, "x": round((x - wb["x"]) * scale),
+                             "y": round((y - wb["y"]) * scale), "delivery_mode": "foreground"})
 
     def shot(self, name):
         path = self.ctx.out / "screenshots" / f"{name}.png"
@@ -316,6 +362,11 @@ class App:
             raise Fail(f'"{label}" has no numeric value ({v!r})')
 
     def finish_onboarding(self):
+        """A fresh profile shows the welcome screen until media plays or
+        Get started is pressed. Wait for the page to load, then pass it."""
+        wait_for(lambda: [e for e in self.read() if e.get("in_web_content") or e.get("label") in ("Get started", "Back to home", "Home")
+                          or (e.get("role") or "").lower() in ("document", "button")], "the page to load", 15)
+        time.sleep(1)
         if self.find("Get started", button=True):
             self.press("Get started")
             self.wait_gone("Get started")
@@ -350,11 +401,16 @@ class App:
 
     def kill(self):
         if self.alive():
-            if self.proc:
+            if WIN:
+                # The whole tree: WebView2's helpers otherwise keep the
+                # profile's files locked.
+                subprocess.run(["taskkill", "/F", "/T", "/PID", str(self.pid)], capture_output=True)
+            elif self.proc:
                 self.proc.kill()
-                self.proc.wait()
             else:
                 os.kill(self.pid, 9)
+        if self.proc:
+            self.proc.wait()
         self.log.close()
 
 
@@ -362,7 +418,7 @@ class Context:
     def __init__(self, a):
         self.out = a.out
         self.app = a.app
-        self.bundle = a.bundle
+        self.bundle = a.bundle.resolve() if a.bundle else None
         self.ffmpeg = a.ffmpeg
         self.ci = bool(os.environ.get("CI"))
         self.no_video = a.no_video
@@ -374,9 +430,16 @@ class Context:
             (self.out / d).mkdir(parents=True, exist_ok=True)
 
     def appdata(self, cmd):
-        r = subprocess.run([sys.executable, "-I", str(ROOT / "scripts/qa/appdata.py"), cmd, str(self.out)], capture_output=True, text=True)
-        if r.returncode:
-            raise RuntimeError(f"appdata.py {cmd}: {r.stdout}{r.stderr}")
+        for attempt in range(10):
+            r = subprocess.run([sys.executable, "-I", str(ROOT / "scripts/qa/appdata.py"), cmd, str(self.out)], capture_output=True, text=True)
+            if not r.returncode:
+                return
+            # On Windows, WebView2 helpers can hold the profile for a moment.
+            if not WIN or "PermissionError" not in r.stderr:
+                break
+            subprocess.run(["taskkill", "/F", "/IM", "msedgewebview2.exe"], capture_output=True)
+            time.sleep(1)
+        raise RuntimeError(f"appdata.py {cmd}: {r.stdout}{r.stderr}")
 
     def data_dir(self):
         """Where ReVLC keeps history.json: Tauri's app data dir."""
@@ -562,6 +625,8 @@ def playback(ctx):
 
     def volume():
         before = app.slider("Volume")
+        if WIN and before == 0:
+            raise Skip("no audio output on this runner: libVLC reports volume 0")
         app.key("up")
         after = wait_for(lambda: (v := app.slider("Volume")) > before and v, "the volume to rise", 5)
         return f"{before:g} → {after:g}"
@@ -569,6 +634,8 @@ def playback(ctx):
     ctx.check("↑ raises the volume", volume, app=app)
 
     def mute():
+        if WIN and app.slider("Volume") == 0:
+            raise Skip("no audio output on this runner: libVLC reports volume 0")
         app.key("m")
         app.wait("Unmute", button=True, timeout=5)
         app.key("m")
@@ -637,7 +704,8 @@ def menus(ctx):
             app.menu("Window", "Media Information…")
         else:
             app.shortcut("i")
-        app.wait("Media information", timeout=8)
+        # Windows doesn't expose the dialog's heading; its tabs show everywhere.
+        app.wait("Statistics", timeout=8)
         tabs = [l for l in ("General", "Codec", "Statistics") if app.find(l, fresh=False)]
         ensure(len(tabs) == 3, f"tabs found: {tabs}")
         app.press("Codec", any_role=True)
@@ -651,22 +719,32 @@ def menus(ctx):
             time.sleep(1)
             # The dialog hides the player from the accessibility tree
             # (aria-modal), so close it before reading the play state.
-            if app.find("Media information"):
+            if app.find("Statistics"):
                 app.key("escape")
-                app.wait_gone("Media information", timeout=5)
+                app.wait_gone("Statistics", timeout=5)
             # Space on a background control would have paused playback.
             ensure(app.playing(), "focus left the dialog: Space reached the player")
             app.shortcut("i") if not MAC else app.menu("Window", "Media Information…")
-            app.wait("Media information", timeout=8)
+            app.wait("Statistics", timeout=8)
             return "12 Tabs and Space stayed inside the dialog"
 
         ctx.check("focus stays in the dialog", trap, app=app)
-        ctx.check("Escape closes it", lambda: (app.key("escape"), app.wait_gone("Media information", timeout=5)) and "closed", app=app)
+        ctx.check("Escape closes it", lambda: (app.key("escape"), app.wait_gone("Statistics", timeout=5)) and "closed", app=app)
+
+    if not MAC:
+        def title_menus():
+            ensure(app.playing(), "not playing")
+            names = ("Media", "Playback", "Audio", "Video", "Tools", "Help")
+            found = [n for n in names if app.find(n, button=True, fresh=False)]
+            ensure(len(found) == len(names), f"menus while playing: {found or 'none'}")
+            return "all six menus reachable while playing"
+
+        ctx.check("title-bar menus while playing", title_menus, known_bug="W6: the Windows and Linux menus only show on Home", app=app)
 
     def help_text():
-        if app.find("Media information"):
+        if app.find("Statistics"):
             app.key("escape")
-            app.wait_gone("Media information", timeout=5)
+            app.wait_gone("Statistics", timeout=5)
         if not MAC:
             app.press("Back to home")
             app.wait_text("Home", timeout=10)
@@ -682,12 +760,6 @@ def menus(ctx):
 
     ctx.check("shortcut list uses this platform's keys", help_text, app=app)
 
-    if not MAC:
-        def title_menus():
-            ensure(app.find("Video", button=True) or app.find("Playback", button=True), "no Media/Playback/Video menus while playing")
-            return "menus reachable"
-
-        ctx.check("title-bar menus while playing", title_menus, known_bug="W6: the Windows and Linux menus only show on Home", app=app)
 
 
 @scenario
@@ -744,11 +816,12 @@ def second_instance(ctx):
 
     def hand_off():
         ctx.hand_off(ctx.media / "second.mp4")
-        title = wait_for(lambda: "second" in (t := app.title()) and t, "the window to show second.mp4", 15)
+        wait_for(lambda: app.find("second"), "the player to show second.mp4", 15)
         ensure(len(app.windows()) == 1, "a second window opened")
-        return f"same window now plays {title!r}"
+        return "the same window now plays second.mp4"
 
-    ctx.check("opening another file uses the running app" if MAC else "a second launch hands its file over", hand_off, app=app)
+    if ctx.check("opening another file uses the running app" if MAC else "a second launch hands its file over", hand_off, app=app):
+        ctx.check("the window title follows", lambda: wait_for(lambda: "second" in (t := app.title()) and t, "the title to show second.mp4", 10), app=app)
 
 
 @scenario
@@ -757,7 +830,8 @@ def bad_files(ctx):
     app.finish_onboarding()
     ctx.check("empty file: readable error", lambda: app.wait_text("Could not play", timeout=15) and "notice shown", app=app)
     ctx.check("corrupt file: readable error", lambda: ctx.hand_off(ctx.media / "corrupt.mp4") or app.wait_text("Could not play", timeout=15) and "notice shown", app=app)
-    ctx.check("still responsive", lambda: ensure(app.alive(), "app exited") and app.wait_text("Home", timeout=10) and "Home shown", app=app)
+    # A fresh profile that hasn't played anything yet goes back to the welcome screen.
+    ctx.check("still responsive", lambda: ensure(app.alive(), "app exited") and (app.finish_onboarding() or app.wait_text("Home", timeout=10)) and "Home shown", app=app)
 
 
 @scenario
@@ -813,7 +887,13 @@ def command_line(ctx):
 
     app = ctx.launch("-f", ctx.media / "playback.mp4", name="command_line-fullscreen")
     app.finish_onboarding()
-    ctx.check("-f starts in fullscreen", lambda: app.wait("Exit fullscreen", button=True, timeout=15) and "fullscreen", app=app)
+    def starts_fullscreen():
+        if ctx.no_video:
+            # ReVLC enters fullscreen once the video appears, and there's none here.
+            raise Skip("this runner can't show video")
+        return app.wait("Exit fullscreen", button=True, timeout=15) and "fullscreen"
+
+    ctx.check("-f starts in fullscreen", starts_fullscreen, app=app)
     app.kill()
 
     app = ctx.launch("--play-and-exit", "--run-time=3", ctx.media / "playback.mp4", name="command_line-exit")
@@ -937,9 +1017,8 @@ def subtitles(ctx):
         tab = wait_for(lambda: [e for e in app.find("Subtitles", window_id=w) if is_button(e)], "the Subtitles tab", 10)
         cua("click", {"element_token": tab[0]["element_token"]})
         # The switch is named after its row's label; its role differs by platform.
-        bold = wait_for(lambda: [e for e in app.read(w) if e.get("label") == "Bold" and e.get("actions")
-                                 and "text" not in (e.get("role") or "").lower()], "the Bold switch", 10)
-        cua("click", {"element_token": bold[0]["element_token"]})
+        wait_for(lambda: [e for e in app.read(w) if e.get("label") == "Bold"], "the Bold switch", 10)
+        app.click_switch("Bold", w)
         time.sleep(3)
         if not ctx.no_video:
             # What a user sees: the subtitle is still on the picture.

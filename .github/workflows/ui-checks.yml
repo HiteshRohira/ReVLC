@@ -74,6 +74,9 @@ jobs:
           kill -INT "$rec" 2>/dev/null || true  # stop recording; FFmpeg finishes the file
           wait "$rec" || true
           exit "$status"
+      - name: Collect Cua crash reports
+        if: always()
+        run: cp ~/Library/Logs/DiagnosticReports/*[Cc]ua* "$RUNNER_TEMP/run/logs/" 2>/dev/null || true
       - uses: actions/upload-artifact@v4
         if: always()
         with:
