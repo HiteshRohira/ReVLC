@@ -1265,7 +1265,13 @@ def effects(ctx):
             return [e for e in app.read() if e.get("label") == "Saturation" and numeric(e.get("value"))][0]
 
         for _ in range(3):
-            cua("click", {"element_token": saturation()["element_token"]})
+            sat = saturation()
+            if LINUX and sat.get("frame"):
+                # Accessibility clicks don't focus it on Linux; a real one does.
+                f = sat["frame"]
+                app.pixel_click(f["x"] + f["w"] / 2, f["y"] + f["h"] / 2)
+            else:
+                cua("click", {"element_token": sat["element_token"]})
             app.key("home")
             time.sleep(0.8)
             if str(saturation().get("value")) in ("0", "0.0"):
