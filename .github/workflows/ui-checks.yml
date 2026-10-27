@@ -115,14 +115,26 @@ jobs:
       # No installer: the unbundled exe loads libVLC through REVLC_VLC_DIR.
       # WebView2 only exposes the page to UI Automation for a detected screen
       # reader, and ignores WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS because
-      # Tauri passes its own arguments. Add the flag to Tauri's defaults.
+      # Tauri passes its own arguments. Add the flag to Tauri's defaults, for
+      # the main window (config) and the Settings window (built in Rust):
+      # WebView2 refuses a second window whose browser options differ from
+      # the first's. This build only; shipped builds don't change.
       - name: Build revlc.exe
+        env:
+          WEBVIEW_ARGS: --disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection --force-renderer-accessibility
         run: |
           node -e '
+            const fs = require("fs");
+            const args = process.env.WEBVIEW_ARGS;
             const w = require("./src-tauri/tauri.windows.conf.json").app.windows[0];
-            w.additionalBrowserArgs = "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection --force-renderer-accessibility";
-            require("fs").writeFileSync(process.env.RUNNER_TEMP + "/ci.conf.json",
-              JSON.stringify({ app: { windows: [w] }, bundle: { createUpdaterArtifacts: false } }));'
+            w.additionalBrowserArgs = args;
+            fs.writeFileSync(process.env.RUNNER_TEMP + "/ci.conf.json",
+              JSON.stringify({ app: { windows: [w] }, bundle: { createUpdaterArtifacts: false } }));
+            const lib = "src-tauri/src/lib.rs";
+            const from = "let builder = builder.decorations(false);";
+            const src = fs.readFileSync(lib, "utf8");
+            if (src.split(from).length !== 2) throw new Error("Settings window builder not found in " + lib);
+            fs.writeFileSync(lib, src.replace(from, `let builder = builder.decorations(false).additional_browser_args(${JSON.stringify(args)});`));'
           npx tauri build --no-bundle --config "$RUNNER_TEMP/ci.conf.json"
       # D:/a/_temp style, which Git Bash and the native tools both accept.
       - name: Make the run folder

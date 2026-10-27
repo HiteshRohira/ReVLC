@@ -847,7 +847,14 @@ def bad_files(ctx):
 def engine_failure(ctx):
     app = ctx.launch(env={"REVLC_VLC_DIR": str(ctx.broken_vlc)})
     app.finish_onboarding()
-    ctx.check("explains the engine failure", lambda: app.wait_text("playback engine couldn't start", timeout=15) and "message shown", app=app)
+    def explains():
+        # The heading isn't exposed on Windows; the error under it is, on
+        # every platform.
+        wait_for(lambda: (t := app.text()) and ("couldn't start" in t or "Couldn't load" in t), "the engine error on Home", 15)
+        lines = [l for l in app.text().splitlines() if "couldn't start" in l or "Couldn't load" in l]
+        return f"shown: {lines[-1][:120]}"
+
+    ctx.check("explains the engine failure", explains, app=app)
 
     def settings():
         w = app.settings_window()
