@@ -1,0 +1,243 @@
+# Drives the built app on GitHub's macOS, Windows and Linux runners through
+# Cua (scripts/qa/ci/cua_smoke.py): opens a generated test video, reads the
+# controls, checks the picture, pauses with the Pause button and resumes with
+# Space. Each job uploads screenshots, the accessibility trees, logs and a
+# screen recording. Not a required check yet: run it for a while first.
+#
+# Hosted Macs have no GPU, so libVLC can't create its OpenGL view there; the
+# macOS job skips the picture checks. See docs/testing-plan.md.
+#
+# Analytics stay off: CI builds have no PostHog key, and appdata.py seeds
+# settings with analytics disabled. Never set REVLC_ANALYTICS_SEND here.
+name: UI smoke
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+    paths-ignore: ['README.md', 'docs/**', 'site/**', '.github/ISSUE_TEMPLATE/**']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ui-smoke-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: true
+
+env:
+  # Pinned so a Cua release can't change the results under us.
+  CUA_DRIVER_RS_VERSION: '0.37.0'
+  CUA_TELEMETRY: '0'
+  DO_NOT_TRACK: '1'
+
+jobs:
+  macos:
+    runs-on: macos-14
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+      - run: npm ci
+      - name: Download libVLC and FFmpeg
+        run: bash scripts/prepare-libvlc.sh && bash scripts/prepare-ffmpeg.sh
+      - name: Build ReVLC.app
+        run: npx tauri build --bundles app --config '{"bundle":{"createUpdaterArtifacts":false}}'
+      - name: Make the test video
+        run: |
+          mkdir -p "$RUNNER_TEMP/run"
+          src-tauri/binaries/ffmpeg-* -hide_banner -loglevel error -y -f lavfi -i 'testsrc2=size=640x360:rate=24' -t 60 -c:v mpeg4 -q:v 3 "$RUNNER_TEMP/run/playback.mp4"
+      - name: Set up Cua Driver
+        run: bash scripts/qa/ci/cua-macos-setup.sh "$RUNNER_TEMP/run/cua-setup" src-tauri/binaries/ffmpeg-*
+      - name: Drive ReVLC with Cua
+        run: |
+          python3 -m pip install --quiet --break-system-packages pillow
+          python3 -I scripts/qa/appdata.py backup "$RUNNER_TEMP/run"
+          python3 -I scripts/qa/appdata.py seed "$RUNNER_TEMP/run"
+          ff="$(ls src-tauri/binaries/ffmpeg-*)"
+          # The recording is evidence only; the run doesn't depend on it.
+          "$ff" -hide_banner -loglevel error -y -f avfoundation -framerate 15 -capture_cursor 1 -i 'Capture screen 0:none' \
+            -t 120 -vf 'scale=1280:-2' -c:v libx264 -pix_fmt yuv420p "$RUNNER_TEMP/run/recording.mp4" \
+            >"$RUNNER_TEMP/run/recording.log" 2>&1 &
+          rec=$!
+          status=0
+          python3 scripts/qa/ci/cua_smoke.py --no-video --out "$RUNNER_TEMP/run" --media "$RUNNER_TEMP/run/playback.mp4" -- \
+            src-tauri/target/release/bundle/macos/ReVLC.app/Contents/MacOS/revlc || status=$?
+          kill -INT "$rec" 2>/dev/null || true  # stop recording; FFmpeg finishes the file
+          wait "$rec" || true
+          exit "$status"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ui-smoke-macos
+          path: |
+            ${{ runner.temp }}/run/report.json
+            ${{ runner.temp }}/run/recording.mp4
+            ${{ runner.temp }}/run/recording.log
+            ${{ runner.temp }}/run/screenshots/
+            ${{ runner.temp }}/run/logs/
+            ${{ runner.temp }}/run/cua-setup/
+          if-no-files-found: warn
+
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 45
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+      - run: npm ci
+      - name: Download libVLC and FFmpeg
+        run: bash scripts/prepare-libvlc.sh && bash scripts/prepare-ffmpeg.sh
+      # No installer: the unbundled exe loads libVLC through REVLC_VLC_DIR.
+      # WebView2 only exposes the page to UI Automation for a detected screen
+      # reader, and ignores WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS because
+      # Tauri passes its own arguments. Add the flag to Tauri's defaults.
+      - name: Build revlc.exe
+        run: |
+          node -e '
+            const w = require("./src-tauri/tauri.windows.conf.json").app.windows[0];
+            w.additionalBrowserArgs = "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection --force-renderer-accessibility";
+            require("fs").writeFileSync(process.env.RUNNER_TEMP + "/ci.conf.json",
+              JSON.stringify({ app: { windows: [w] }, bundle: { createUpdaterArtifacts: false } }));'
+          npx tauri build --no-bundle --config "$RUNNER_TEMP/ci.conf.json"
+      # D:/a/_temp style, which Git Bash and the native tools both accept.
+      - name: Make the test video
+        run: |
+          run="$(cygpath -m "$RUNNER_TEMP")/run"
+          echo "RUN=$run" >> "$GITHUB_ENV"
+          mkdir -p "$run"
+          src-tauri/binaries/ffmpeg-*.exe -hide_banner -loglevel error -y -f lavfi -i 'testsrc2=size=640x360:rate=24' -t 60 -c:v mpeg4 -q:v 3 "$run/playback.mp4"
+      - name: Set up Cua Driver
+        shell: pwsh
+        run: |
+          irm https://cua.ai/driver/install.ps1 | iex
+          $bin = "$env:LOCALAPPDATA\Programs\Cua\cua-driver\bin"
+          $bin | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
+          & "$bin\cua-driver.exe" --version
+          Start-Process -FilePath "$bin\cua-driver.exe" -ArgumentList 'serve','--permission-mode','unrestricted','--dangerously-bypass-approvals','--no-overlay' -WindowStyle Hidden
+          for ($i = 0; $i -lt 30; $i++) {
+            & "$bin\cua-driver.exe" status
+            if ($LASTEXITCODE -eq 0) { exit 0 }
+            Start-Sleep -Seconds 1
+          }
+          exit 1
+      - name: Drive ReVLC with Cua
+        env:
+          REVLC_VLC_DIR: ${{ github.workspace }}\src-tauri\vlc
+        run: |
+          python -m pip install --quiet pillow
+          python -I scripts/qa/appdata.py backup "$RUN"
+          python -I scripts/qa/appdata.py seed "$RUN"
+          ff="$(ls src-tauri/binaries/ffmpeg-*.exe)"
+          # The recording is evidence only; the run doesn't depend on it.
+          "$ff" -hide_banner -loglevel error -y -f gdigrab -framerate 15 -i desktop \
+            -t 120 -vf 'scale=1280:-2' -c:v libx264 -tune zerolatency -pix_fmt yuv420p -g 15 \
+            -movflags +frag_keyframe+empty_moov "$RUN/recording.mp4" >"$RUN/recording.log" 2>&1 &
+          rec=$!
+          status=0
+          python scripts/qa/ci/cua_smoke.py --out "$RUN" --media "$RUN/playback.mp4" -- \
+            src-tauri/target/release/revlc.exe || status=$?
+          # Git Bash can't send FFmpeg a gentle stop. The MP4 above is written
+          # in one-second fragments (a keyframe a second) with no encoder
+          # lookahead, so it stays playable, and complete, when FFmpeg is killed.
+          kill "$rec" 2>/dev/null || true
+          wait "$rec" || true
+          exit "$status"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ui-smoke-windows
+          path: |
+            ${{ runner.temp }}/run/report.json
+            ${{ runner.temp }}/run/recording.mp4
+            ${{ runner.temp }}/run/recording.log
+            ${{ runner.temp }}/run/screenshots/
+            ${{ runner.temp }}/run/logs/
+          if-no-files-found: warn
+
+  linux:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+      - name: Install Linux dependencies
+        timeout-minutes: 5
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
+          # The hosted runner's Azure mirror can stall; see linux-build.yml.
+          [[ -f /etc/apt/apt-mirrors.txt ]] && echo 'https://archive.ubuntu.com/ubuntu/' | sudo tee /etc/apt/apt-mirrors.txt
+          sudo -E apt-get -o Acquire::http::Timeout=30 -o Acquire::Retries=2 update
+          sudo -E apt-get -o Acquire::http::Timeout=30 -o Acquire::Retries=2 install -y \
+            libwebkit2gtk-4.1-dev build-essential libssl-dev librsvg2-dev libx11-dev patchelf \
+            libvlc5 libvlccore9 vlc-plugin-base vlc-plugin-video-output \
+            xvfb dbus-x11 at-spi2-core openbox xcompmgr ffmpeg python3-pil
+      - run: npm ci
+      - name: Build and install the .deb
+        run: |
+          bash scripts/build-linux.sh
+          sudo apt-get install -y ./src-tauri/target/release/bundle/deb/*.deb
+      - name: Install Cua Driver
+        run: |
+          /bin/bash -c "$(curl -fsSL https://cua.ai/driver/install.sh)" -- --no-modify-path
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          "$HOME/.local/bin/cua-driver" --version
+      - name: Drive ReVLC with Cua
+        run: |
+          mkdir -p "$RUNNER_TEMP/run/logs"
+          ffmpeg -hide_banner -loglevel error -y -f lavfi -i 'testsrc2=size=640x360:rate=24' -t 60 -c:v mpeg4 -q:v 3 "$RUNNER_TEMP/run/playback.mp4"
+          python3 -I scripts/qa/appdata.py backup "$RUNNER_TEMP/run"
+          python3 -I scripts/qa/appdata.py seed "$RUNNER_TEMP/run"
+          # Xvfb has no DRI3 device: keep WebKit off its DMA-BUF path.
+          export WEBKIT_DISABLE_DMABUF_RENDERER=1
+          xvfb-run -a -s '-screen 0 1920x1080x24' dbus-run-session -- bash -c '
+            set -euo pipefail
+            run="$RUNNER_TEMP/run"
+            openbox >"$run/logs/openbox.log" 2>&1 &
+            xcompmgr >"$run/logs/compositor.log" 2>&1 &
+            cua-driver serve --permission-mode unrestricted --dangerously-bypass-approvals --no-overlay >"$run/logs/cua-serve.log" 2>&1 &
+            for _ in {1..30}; do cua-driver status && break; sleep 1; done
+            # The recording is evidence only; the run does not depend on it.
+            ffmpeg -hide_banner -loglevel error -y -f x11grab -framerate 15 -video_size 1920x1080 -i "$DISPLAY" \
+              -vf "scale=1280:-2" -c:v libx264 -pix_fmt yuv420p "$run/recording.mp4" >"$run/recording.log" 2>&1 &
+            rec=$!
+            status=0
+            python3 -I scripts/qa/ci/cua_smoke.py --out "$run" --media "$run/playback.mp4" -- revlc || status=$?
+            kill -INT "$rec" 2>/dev/null || true
+            wait "$rec" || true
+            exit "$status"'
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ui-smoke-linux
+          path: |
+            ${{ runner.temp }}/run/report.json
+            ${{ runner.temp }}/run/recording.mp4
+            ${{ runner.temp }}/run/recording.log
+            ${{ runner.temp }}/run/screenshots/
+            ${{ runner.temp }}/run/logs/
+          if-no-files-found: warn
