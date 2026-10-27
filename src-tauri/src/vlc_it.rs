@@ -269,10 +269,10 @@ fn record(path: &Path, setup: impl FnOnce(&Vlc)) -> (Vec<f32>, Vec<f32>) {
     drop(vlc);
     let bytes = std::fs::read(&wav).expect("libVLC wrote the WAV");
     let data = bytes.windows(4).position(|w| w == b"data").expect("a WAV data chunk") + 8;
-    let samples: Vec<i16> = bytes[data..].chunks_exact(2).map(|b| i16::from_le_bytes([b[0], b[1]])).collect();
+    let samples: Vec<i16> = bytes[data..].as_chunks::<2>().0.iter().map(|&b| i16::from_le_bytes(b)).collect();
     // From a moment after the settings were applied.
     let skip = ((mark + 300) * 48) as usize;
-    let (l, r) = samples.chunks_exact(2).skip(skip).map(|s| (s[0] as f32 / 32768.0, s[1] as f32 / 32768.0)).unzip();
+    let (l, r) = samples.as_chunks::<2>().0.iter().skip(skip).map(|&[a, b]| (a as f32 / 32768.0, b as f32 / 32768.0)).unzip();
     (l, r)
 }
 

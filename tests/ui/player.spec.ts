@@ -63,7 +63,9 @@ test("media information keeps focus inside, and Escape gives it back", async ({ 
   // browser move focus otherwise; WebKit leaves buttons out of the Tab order
   // (unless the Mac's keyboard navigation setting is on), so its Shift+Tab
   // jumps past them to the seek bar behind the dialog.
-  test.fail(isMacProject(info.project.name), "found by this suite: on WebKit, Shift+Tab leaves Media information for the seek bar");
+  // WebKit takes that behaviour from macOS, so it only shows on a Mac.
+  test.fail(isMacProject(info.project.name) && process.platform === "darwin",
+    "found by this suite: on WebKit, Shift+Tab leaves Media information for the seek bar");
   await page.getByRole("button", { name: "Settings" }).click();
   await page.getByRole("button", { name: /^Media information/ }).click();
   const dialog = page.getByRole("dialog", { name: "Media information" });

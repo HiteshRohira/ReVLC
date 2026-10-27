@@ -21,7 +21,9 @@ test("the welcome screen shows on first launch, and Get started leads Home", asy
 });
 
 test("the welcome screen fits a minimum-size window", async ({ page }) => {
-  test.fail(true, "W7: the usage statistics note runs below a 720×450 window");
+  // The browser draws with this machine's fonts; with Linux's the note fits,
+  // as it does in the Linux app.
+  test.fail(process.platform !== "linux", "W7: the usage statistics note runs below a 720×450 window");
   await page.setViewportSize({ width: 720, height: 450 });
   await open(page, "home", { onboarded: false });
   const note = page.getByText("ReVLC sends usage statistics");
