@@ -678,6 +678,10 @@ def fullscreen(ctx):
         time.sleep(1.5)
 
     def double_click():
+        if ctx.no_video:
+            # Without a picture the player shows its audio-only placeholder
+            # there, which isn't the video area that double-click acts on.
+            raise Skip("this runner can't show video")
         app.double_click_centre()
         app.wait("Exit fullscreen", button=True, timeout=10)
         time.sleep(1)
