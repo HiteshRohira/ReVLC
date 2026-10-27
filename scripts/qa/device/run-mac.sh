@@ -62,6 +62,16 @@ xattr -cr "$run/ReVLC.app"
 defaults read "$run/ReVLC.app/Contents/Info.plist" CFBundleShortVersionString > "$run/version.txt"
 echo "Testing ReVLC $(cat "$run/version.txt")"
 
+# If the run is cut short, put your ReVLC data back.
+cleanup() {
+  if [[ -f "$run/backup/manifest.json" && ! -f "$run/logs/data-restore-verification.json" ]]; then
+    pkill -9 -x revlc 2>/dev/null || true
+    sleep 1
+    python3 -I "$ROOT/scripts/qa/appdata.py" restore "$run"
+  fi
+}
+trap cleanup EXIT
+
 args=(--out "$run" --ffmpeg "$run/ReVLC.app/Contents/MacOS/ffmpeg" --bundle "$run/ReVLC.app")
 [[ -n "$only" ]] && args+=(--only "$only")
 status=0

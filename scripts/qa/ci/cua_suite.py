@@ -102,10 +102,16 @@ def centre(path):
     return im.crop((w // 4, h // 3, 3 * w // 4, 2 * h // 3))
 
 
+def pixels(im):
+    """RGB tuples of an image (Pillow deprecates getdata)."""
+    data = im.convert("RGB").tobytes()
+    return [tuple(data[i:i + 3]) for i in range(0, len(data), 3)]
+
+
 def colourful(path):
     """Share of centre pixels that are saturated: testsrc2 is, a black or
     covered video surface is not."""
-    px = list(centre(path).getdata())
+    px = pixels(centre(path))
     return sum(max(p) - min(p) > 100 and max(p) > 150 for p in px) / len(px)
 
 
@@ -492,6 +498,8 @@ class Context:
         for attempt in range(10):
             r = subprocess.run([sys.executable, "-I", str(ROOT / "scripts/qa/appdata.py"), cmd, str(self.out)], capture_output=True, text=True)
             if not r.returncode:
+                if cmd == "restore":
+                    print(r.stdout.strip(), flush=True)
                 return
             # On Windows, WebView2 helpers can hold the profile for a moment.
             if not WIN or "PermissionError" not in r.stderr:
@@ -713,8 +721,11 @@ def playback(ctx):
         if WIN and before == 0:
             raise Skip("no audio output on this runner: libVLC reports volume 0")
         app.key("up")
-        after = wait_for(lambda: (v := app.slider("Volume")) > before and v, "the volume to rise", 5)
-        return f"{before:g} → {after:g}"
+        # The on-screen message, not the slider: Windows' UI Automation
+        # doesn't follow the slider's value as it changes.
+        wait_for(lambda: [l for l in app.text().splitlines() if re.fullmatch(r"Volume 1\d\d%", l.strip()) and l.strip() != "Volume 100%"],
+                 "a Volume 105% message", 5)
+        return "Volume 105% shown"
 
     ctx.check("↑ raises the volume", volume, app=app)
 
@@ -793,7 +804,9 @@ def menus(ctx):
         if MAC:
             app.menu("Window", "Media Information…")
         else:
-            app.shortcut("i")
+            # From the gear menu here; Ctrl+I has its own check below.
+            app.gear_item("Media information")
+            app.click_el(app.find(contains="Media information")[-1])
         # Windows doesn't expose the dialog's heading; its tabs show everywhere.
         app.wait("Statistics", timeout=8)
         tabs = [l for l in ("General", "Codec", "Statistics") if app.find(l, fresh=False)]
@@ -814,12 +827,26 @@ def menus(ctx):
                 app.wait_gone("Statistics", timeout=5)
             # Space on a background control would have paused playback.
             ensure(app.playing(), "focus left the dialog: Space reached the player")
-            app.shortcut("i") if not MAC else app.menu("Window", "Media Information…")
+            if MAC:
+                app.menu("Window", "Media Information…")
+            else:
+                app.gear_item("Media information")
+                app.click_el(app.find(contains="Media information")[-1])
             app.wait("Statistics", timeout=8)
             return "12 Tabs and Space stayed inside the dialog"
 
         ctx.check("focus stays in the dialog", trap, app=app)
         ctx.check("Escape closes it", lambda: (app.key("escape"), app.wait_gone("Statistics", timeout=5)) and "closed", app=app)
+
+        if not MAC:
+            def ctrl_i():
+                app.shortcut("i")
+                app.wait("Statistics", timeout=8)
+                app.key("escape")
+                app.wait_gone("Statistics", timeout=5)
+                return "Ctrl+I opened it"
+
+            ctx.check("Ctrl+I opens media information", ctrl_i, app=app)
 
     if not MAC:
         def title_menus():
@@ -1102,7 +1129,7 @@ def subtitles(ctx):
         im = Image.open(app.shot(name)).convert("RGB")
         w, h = im.size
         band = im.crop((w // 6, int(h * 0.6), 5 * w // 6, int(h * 0.95)))
-        return sum(min(p) > 200 for p in band.getdata())
+        return sum(min(p) > 200 for p in pixels(band))
 
     def drawn():
         if ctx.no_video:
@@ -1144,14 +1171,14 @@ def frame_pair(app, name):
 
 
 def mean_rgb_diff(a, b, invert=False):
-    pa, pb = list(centre(a).getdata()), list(centre(b).getdata())
+    pa, pb = pixels(centre(a)), pixels(centre(b))
     n = min(len(pa), len(pb))
     f = (lambda x: 255 - x) if invert else (lambda x: x)
     return sum(abs(f(x[i]) - y[i]) for x, y in zip(pa[:n], pb[:n]) for i in range(3)) / (3 * n)
 
 
 def greyish(path):
-    px = list(centre(path).getdata())
+    px = pixels(centre(path))
     return sum(max(p) - min(p) < 24 for p in px) / len(px)
 
 

@@ -817,7 +817,7 @@ impl Vlc {
         unsafe { (self.api.libvlc_media_player_set_hwnd)(self.mp, hwnd) }
     }
 
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", test))]
     pub fn set_gtk_surface(&self, frames: std::sync::Arc<std::sync::Mutex<Option<PresentedFrame>>>) {
         // The main player and its callbacks live until process exit, like
         // the event subscription. Attach once, before media can be opened.
@@ -1722,7 +1722,7 @@ struct Grab {
 }
 
 /// An owned CPU frame handed from libVLC to the GTK main thread.
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", test))]
 pub struct PresentedFrame {
     pub pixels: Vec<u8>,
     pub width: i32,
@@ -1730,7 +1730,7 @@ pub struct PresentedFrame {
     pub stride: i32,
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", test))]
 struct GtkFrame {
     buf: FrameBuf,
     width: u32,
@@ -1738,7 +1738,7 @@ struct GtkFrame {
     stride: u32,
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", test))]
 struct GtkOutput {
     // VLC 3's vmem output serializes format, prepare (lock), and display
     // on its video thread. GTK only receives an owned copy of these pixels.
@@ -1746,7 +1746,7 @@ struct GtkOutput {
     frames: std::sync::Arc<std::sync::Mutex<Option<PresentedFrame>>>,
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", test))]
 unsafe extern "C" fn gtk_format(
     opaque: *mut *mut c_void,
     chroma: *mut c_char,
@@ -1773,7 +1773,7 @@ unsafe extern "C" fn gtk_format(
     }
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", test))]
 unsafe extern "C" fn gtk_lock(opaque: *mut c_void, planes: *mut *mut c_void) -> *mut c_void {
     unsafe {
         let output = &*(opaque as *const GtkOutput);
@@ -1782,7 +1782,7 @@ unsafe extern "C" fn gtk_lock(opaque: *mut c_void, planes: *mut *mut c_void) -> 
     std::ptr::null_mut()
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", test))]
 unsafe extern "C" fn gtk_display(opaque: *mut c_void, _picture: *mut c_void) {
     unsafe {
         let output = &*(opaque as *const GtkOutput);
@@ -2089,3 +2089,7 @@ mod tests {
         assert_eq!(kbps(0.25), 2000.0);
     }
 }
+
+#[cfg(test)]
+#[path = "vlc_it.rs"]
+mod vlc_it;

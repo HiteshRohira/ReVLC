@@ -68,11 +68,20 @@ try {
     $suiteArgs = @("$root\scripts\qa\ci\cua_suite.py", "--out", $run, "--ffmpeg", $ffmpeg)
     if ($Only) { $suiteArgs += @("--only", $Only) }
     $suiteArgs += @("--", $Exe)
-    & python @suiteArgs 2>&1 | Tee-Object -FilePath (Join-Path $run "suite.log")
+    # Windows PowerShell 5.1 turns anything a native program writes to stderr
+    # into an error record; with "Stop" that would kill the suite mid-run.
+    $ErrorActionPreference = "Continue"
+    & python @suiteArgs 2>&1 | ForEach-Object { "$_" } | Tee-Object -FilePath (Join-Path $run "suite.log")
     $status = $LASTEXITCODE
 }
 finally {
     [void][RevlcQa.ScreenReader]::SystemParametersInfo($SPI_SETSCREENREADER, [uint32]$was, [System.IntPtr]::Zero, $SPIF_SENDCHANGE)
+    # If the run was cut short, put your ReVLC data back.
+    if ((Test-Path (Join-Path $run "backup\manifest.json")) -and -not (Test-Path (Join-Path $run "logs\data-restore-verification.json"))) {
+        Get-Process revlc -ErrorAction SilentlyContinue | Stop-Process -Force
+        Start-Sleep -Seconds 2
+        & python -I "$root\scripts\qa\appdata.py" restore $run
+    }
 }
 Write-Host ""
 Write-Host "Report: $run\report.md"
