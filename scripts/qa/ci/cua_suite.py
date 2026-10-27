@@ -267,11 +267,16 @@ class App:
         els = [e for e in self.read(window_id) if e.get("label") == label and e.get("actions")
                and "text" not in (e.get("role") or "").lower()]
         ensure(els, f'no "{label}" switch')
-        if els[0].get("frame"):
-            return cua("click", {"element_token": els[0]["element_token"]})
+        f = els[0].get("frame")
+        if f and f.get("w") and f.get("h"):
+            try:
+                return cua("click", {"element_token": els[0]["element_token"]})
+            except RuntimeError as e:
+                if "element_bounds_unavailable" not in str(e):
+                    raise
         by_index = {e["element_index"]: e for e in self.elements}
         parent = by_index.get(els[0].get("parent_index"))
-        while parent and not parent.get("frame"):
+        while parent and not (parent.get("frame") or {}).get("w"):
             parent = by_index.get(parent.get("parent_index"))
         ensure(parent, f'"{label}" and its parents have no position')
         f = parent["frame"]
@@ -310,13 +315,13 @@ class App:
 
     def settings_window(self):
         """Opens Settings (its own window) and returns that window's id:
-        from Home's button when Home shows, else the menu or shortcut."""
+        Home's Settings button, or the player's gear menu (More settings…)."""
         if self.find("Settings", button=True) and self.find("Home"):
             self.press("Settings")
-        elif MAC:
-            self.menu("App", "Settings…")
         else:
-            self.shortcut(",")
+            self.press("Settings")
+            items = wait_for(lambda: self.find(contains="More settings"), "More settings… in the gear menu", 5)
+            self.click_el(items[0])
         w = wait_for(lambda: [w for w in self.windows() if w["window_id"] != self.window_id], "the Settings window", 10)
         return w[0]["window_id"]
 
@@ -364,11 +369,14 @@ class App:
     def finish_onboarding(self):
         """A fresh profile shows the welcome screen until media plays or
         Get started is pressed. Wait for the page to load, then pass it."""
-        wait_for(lambda: [e for e in self.read() if e.get("in_web_content") or e.get("label") in ("Get started", "Back to home", "Home")
-                          or (e.get("role") or "").lower() in ("document", "button")], "the page to load", 15)
-        time.sleep(1)
-        if self.find("Get started", button=True):
-            self.press("Get started")
+        # Labels only the page has: Windows' own title bar has buttons too.
+        page = ("Get started", "Back to home", "Home", "Open…", "Videos")
+        wait_for(lambda: [e for e in self.read() if e.get("label") in page], "the page to load", 20)
+        if self.find("Get started", button=True, fresh=False):
+            try:
+                self.press("Get started")
+            except Fail:
+                pass  # media started playing, which finishes onboarding too
             self.wait_gone("Get started")
 
     # Lifecycle
@@ -571,7 +579,8 @@ def onboarding(ctx):
         ensure(not outside, f"cut off at the bottom of a 720×450 window: {outside}")
         return "everything fits"
 
-    ctx.check("fits a 720×450 window", fits, known_bug="W7: onboarding text runs below a minimum-size window", app=app)
+    ctx.check("fits a 720×450 window", fits, app=app,
+              known_bug=None if LINUX else "W7: onboarding text runs below a minimum-size window")
     ctx.check("Get started", lambda: (app.press("Get started"), app.wait_gone("Get started"), app.wait_text("Home"))[-1] and "Home shown", app=app)
 
 
@@ -931,8 +940,10 @@ def paths_and_folders(ctx):
 def queue(ctx):
     app = ctx.launch(ctx.media / "playback.mp4", ctx.media / "second.mp4")
     app.finish_onboarding()
-    if not ctx.check("starts on the first file", lambda: wait_for(lambda: "playback" in app.title(), "playback.mp4", 15) and app.title(), app=app):
+    # The player shows what's playing as text next to Back to home.
+    if not ctx.check("starts on the first file", lambda: app.wait("playback", timeout=15) and "playing playback.mp4", app=app):
         return
+    ctx.check("the window title follows", lambda: wait_for(lambda: "playback" in (t := app.title()) and t, "the title to show playback.mp4", 10), app=app)
 
     def up_next():
         app.press("Up next")
@@ -941,7 +952,7 @@ def queue(ctx):
         return "both files listed"
 
     ctx.check("Up next lists both", up_next, app=app)
-    ctx.check("N plays the next one", lambda: (app.key("n"), wait_for(lambda: "second" in (t := app.title()) and t, "second.mp4", 10))[-1], app=app)
+    ctx.check("N plays the next one", lambda: (app.key("n"), app.wait("second", timeout=10)) and "playing second.mp4", app=app)
 
 
 @scenario
@@ -960,7 +971,8 @@ def small_window(ctx):
         app.shot("player-720x450")
         right, bottom = b["x"] + b["width"], b["y"] + b["height"]
         missing, outside = [], []
-        for label in ("Pause", "Seek", "Volume", "Fullscreen", "Settings", "Up next", "Subtitles"):
+        # The volume slider stays collapsed until the speaker is hovered; Mute is its button.
+        for label in ("Pause", "Seek", "Mute", "Fullscreen", "Settings", "Up next", "Subtitles"):
             els = app.find(label)
             if not els:
                 missing.append(label)

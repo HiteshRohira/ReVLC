@@ -35,7 +35,9 @@ env:
 
 jobs:
   macos:
-    runs-on: macos-14
+    # macos-26, as Cua's own CI uses: on macos-14 Cua's daemon segfaults in
+    # macOS's SkyLight event code before accessibility clicks.
+    runs-on: macos-26
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
