@@ -261,11 +261,56 @@ class App:
                 raise
             return cua(tool, {**args, "delivery_mode": "foreground"})
 
+    def switches(self, label, window_id=None):
+        """Elements that can be the switch named `label`: switch-like roles
+        first, and never a tab of the same name."""
+        els = [e for e in self.read(window_id) if e.get("label") == label and e.get("actions")
+               and not any(r in (e.get("role") or "").lower() for r in ("text", "tab", "radio"))]
+        return sorted(els, key=lambda e: not any(r in (e.get("role") or "").lower() for r in ("check", "switch", "toggle")))
+
+    def switch_on(self, label, window_id=None):
+        """Whether the switch named `label` is on, from its checked state."""
+        els = self.switches(label, window_id)
+        ensure(els, f'no "{label}" switch')
+        e = els[0]
+        return bool(e.get("selected")) or str(e.get("value")).lower() in ("1", "true", "on", "checked")
+
+    def gear_item(self, prefix):
+        """Opens the gear menu and returns the label of its item that starts
+        with `prefix`, such as "Playback speed 1.5×"; leaves the menu open."""
+        if not self.find(contains="Playback speed"):
+            self.press("Settings")
+        items = wait_for(lambda: [e for e in self.read() if (e.get("label") or "").startswith(prefix)], f'"{prefix}" in the gear menu', 5)
+        return items[0]["label"]
+
+    def close_menus(self):
+        if self.find(contains="Playback speed"):
+            self.key("escape")
+            wait_for(lambda: not self.find(contains="Playback speed"), "the gear menu to close", 5)
+
+    def type_into(self, element, text):
+        """Types into a text field: focus it, then type."""
+        cua("click", {"element_token": element["element_token"]})
+        try:
+            cua("type_text", {"pid": self.pid, "element_token": element["element_token"], "text": text})
+        except RuntimeError:
+            cua("type_text", {"pid": self.pid, "window_id": self.window_id, "text": text, "delivery_mode": "foreground"})
+
+    def button_after(self, label, window_id=None):
+        """The first button after the element named `label`: the control in
+        a row whose name isn't linked to it (the shortcut list)."""
+        els = self.read(window_id)
+        idx = [i for i, e in enumerate(els) if e.get("label") == label and not is_button(e)]
+        ensure(idx, f'no "{label}"')
+        for e in els[idx[0] + 1:]:
+            if is_button(e):
+                return e
+        raise Fail(f'no button after "{label}"')
+
     def click_switch(self, label, window_id):
         """Flips the switch named `label`. On Linux a switch reports no
         position, so click where it sits: the right end of its row."""
-        els = [e for e in self.read(window_id) if e.get("label") == label and e.get("actions")
-               and "text" not in (e.get("role") or "").lower()]
+        els = self.switches(label, window_id)
         ensure(els, f'no "{label}" switch')
         f = els[0].get("frame")
         if f and f.get("w") and f.get("h"):
@@ -282,8 +327,8 @@ class App:
         f = parent["frame"]
         return self.pixel_click(f["x"] + f["w"] - 19, f["y"] + f["h"] / 2, window_id)
 
-    def key(self, key, mods=()):
-        args = {"pid": self.pid, "window_id": self.window_id}
+    def key(self, key, mods=(), window_id=None):
+        args = {"pid": self.pid, "window_id": window_id or self.window_id}
         tool, args = ("hotkey", {**args, "keys": [*mods, key]}) if mods else ("press_key", {**args, "key": key})
         try:
             return cua(tool, args)
@@ -313,6 +358,13 @@ class App:
         els = wait_for(lambda: [e for e in self.read() if (e.get("label") or "").startswith(item)], f'menu item "{item}"', 5)
         self.click_el(els[0])
 
+    def command(self, mac_menu, key):
+        """Runs a command: from the macOS menu bar, or its Ctrl shortcut."""
+        if MAC:
+            cua("invoke_menu", {"pid": self.pid, "path": list(mac_menu)})
+        else:
+            self.shortcut(key)
+
     def settings_window(self):
         """Opens Settings (its own window) and returns that window's id:
         Home's Settings button, or the player's gear menu (More settings…)."""
@@ -328,9 +380,8 @@ class App:
     def double_click_centre(self):
         b = self.bounds() or self.frame
         x, y = b["x"] + b["width"] / 2, b["y"] + b["height"] / 3
-        if MAC:
-            return self.pixel_click(x, y, count=2)
-        # WebView2 and WebKitGTK don't take synthetic background double-clicks.
+        # None of the web views take synthetic background double-clicks (on
+        # macOS the video is a native view under the page); send real ones.
         st = cua("get_window_state", {"pid": self.pid, "window_id": self.window_id, "include_accessibility_tree": False})
         wb = st.get("window_bounds") or b
         scale = (st.get("screenshot_width") or wb["width"]) / wb["width"]
@@ -530,6 +581,31 @@ def make_media(ctx):
     if not long_file.exists():
         shutil.copyfile(m / "playback.mp4", long_file)
     ctx.long_file = long_file
+    def ff_raw(out, *args):
+        if not out.exists():
+            out.parent.mkdir(parents=True, exist_ok=True)
+            subprocess.run([ctx.ffmpeg, "-hide_banner", "-loglevel", "error", "-y", *map(str, args), str(out)], check=True)
+
+    # Three named chapters.
+    meta = m / "chapters.txt"
+    meta.write_text(";FFMETADATA1\n" + "".join(
+        f"[CHAPTER]\nTIMEBASE=1/1000\nSTART={a * 1000}\nEND={(a + 20) * 1000}\ntitle={n}\n"
+        for a, n in ((0, "Opening"), (20, "Middle part"), (40, "Closing"))), encoding="utf-8")
+    ff_raw(m / "chapters.mp4", "-f", "lavfi", "-i", "testsrc2=size=640x360:rate=24", "-i", meta, "-map", "0", "-map_metadata", "1",
+           "-t", "60", "-c:v", "mpeg4", "-q:v", "3")
+    # Two audio tracks and two subtitle tracks, with languages.
+    for lang, text in (("eng", "ENGLISH LINE"), ("fre", "LIGNE FRANCAISE")):
+        (m / f"tracks-{lang}.srt").write_text(f"1\n00:00:00,000 --> 00:01:00,000\n{text}\n", encoding="utf-8")
+    ff_raw(m / "tracks.mkv", "-f", "lavfi", "-i", "testsrc2=size=640x360:rate=24", "-f", "lavfi", "-i", "sine=frequency=440",
+           "-f", "lavfi", "-i", "sine=frequency=880", "-i", m / "tracks-eng.srt", "-i", m / "tracks-fre.srt",
+           "-map", "0", "-map", "1", "-map", "2", "-map", "3", "-map", "4", "-t", "60", "-c:v", "mpeg4", "-q:v", "3", "-c:a", "aac",
+           "-c:s", "srt", "-metadata:s:a:0", "language=eng", "-metadata:s:a:1", "language=fre",
+           "-metadata:s:s:0", "language=eng", "-metadata:s:s:1", "language=fre")
+    # An HLS stream, served from a local web server while the suite runs.
+    ff_raw(m / "hls" / "stream.m3u8", "-f", "lavfi", "-i", "testsrc2=size=640x360:rate=24", "-t", "30", "-c:v", "mpeg4", "-q:v", "3",
+           "-f", "hls", "-hls_time", "2", "-hls_list_size", "0", "-hls_segment_type", "mpegts")
+    # A playlist file of two items.
+    (m / "two.m3u").write_text("#EXTM3U\n" + "".join(f"{m / n}\n" for n in ("playback.mp4", "second.mp4")), encoding="utf-8")
     # A libVLC that can't load: the files exist, so ReVLC tries them, and fails.
     broken = m / "broken-vlc"
     lib = broken if WIN else broken / "lib"
@@ -666,7 +742,8 @@ def fullscreen(ctx):
         app.key("f")
         app.wait("Exit fullscreen", button=True, timeout=10)
         screen = cua("get_screen_size", {})
-        b = wait_for(lambda: (b := app.bounds()) and b["width"] >= screen["width"] - 2 and b["height"] >= screen["height"] - 2 and b,
+        # Notched MacBooks keep fullscreen windows below the notch strip.
+        b = wait_for(lambda: (b := app.bounds()) and b["width"] >= screen["width"] - 2 and b["height"] >= screen["height"] - 60 and b,
                      f"the window to cover the {screen['width']}×{screen['height']} screen", 10)
         app.shot("fullscreen")
         return f"{before['width']:g}×{before['height']:g} → {b['width']:g}×{b['height']:g}, the whole screen"
@@ -1057,6 +1134,409 @@ def subtitles(ctx):
     ctx.check("turning on Bold keeps the subtitle", survives_style_change, app=app)
 
 
+def frame_pair(app, name):
+    """Pauses, takes a frame, and returns its path (the picture must hold still)."""
+    if app.playing():
+        app.press("Pause")
+        app.wait("Play", button=True, timeout=5)
+    time.sleep(0.8)
+    return app.shot(name)
+
+
+def mean_rgb_diff(a, b, invert=False):
+    pa, pb = list(centre(a).getdata()), list(centre(b).getdata())
+    n = min(len(pa), len(pb))
+    f = (lambda x: 255 - x) if invert else (lambda x: x)
+    return sum(abs(f(x[i]) - y[i]) for x, y in zip(pa[:n], pb[:n]) for i in range(3)) / (3 * n)
+
+
+def greyish(path):
+    px = list(centre(path).getdata())
+    return sum(max(p) - min(p) < 24 for p in px) / len(px)
+
+
+@scenario
+def effects(ctx):
+    app = ctx.launch(ctx.media / "playback.mp4")
+    app.finish_onboarding()
+    if not ctx.check("starts playing", lambda: app.wait_playing() or "playing", app=app):
+        return
+
+    def opens():
+        app.gear_item("Effects and filters")
+        app.click_el(app.find(contains="Effects and filters")[-1])
+        wait_for(lambda: all(app.find(t, fresh=False) or app.find(t) for t in ("Equaliser", "Colour", "Overlays")), "the effects tabs", 8)
+        return "Equaliser, Audio, Colour, Video and Overlays tabs"
+
+    if not ctx.check("panel opens from the gear menu", opens, app=app):
+        return
+
+    def invert():
+        if ctx.no_video:
+            raise Skip("this runner can't show video")
+        before = frame_pair(app, "effects-before")
+        app.press("Video", any_role=True)
+        app.click_switch("Invert colours", app.window_id)
+        app.key("e")  # next frame, drawn with the filter
+        time.sleep(1.5)
+        after = app.shot("effects-inverted")
+        inv, same = mean_rgb_diff(before, after, invert=True), mean_rgb_diff(before, after)
+        ensure(inv < same / 2, f"the picture isn't inverted (distance to inverse {inv:.0f}, to original {same:.0f})")
+        app.click_switch("Invert colours", app.window_id)
+        return f"inverted: {inv:.0f} from the inverse, {same:.0f} from the original"
+
+    ctx.check("Invert colours inverts the picture", invert, app=app)
+
+    def greyscale():
+        if ctx.no_video:
+            raise Skip("this runner can't show video")
+        app.press("Colour", any_role=True)
+        app.click_switch("Adjust colours", app.window_id)
+        sat = wait_for(lambda: [e for e in app.read() if e.get("label") == "Saturation" and "slider" in (e.get("role") or "").lower()
+                                or e.get("label") == "Saturation" and e.get("frame") and e["frame"].get("w", 0) > 40],
+                       "the Saturation slider", 5)[0]
+        # Focus the slider and press Home, as a keyboard user does: WebKit
+        # ignores synthetic background clicks on a range input.
+        def saturation():
+            return [e for e in app.read() if e.get("label") == "Saturation" and "slider" in (e.get("role") or "").lower()][0]
+
+        for _ in range(3):
+            cua("click", {"element_token": saturation()["element_token"]})
+            app.key("home")
+            time.sleep(0.8)
+            if str(saturation().get("value")) in ("0", "0.0"):
+                break
+        else:
+            raise Fail(f"couldn't set Saturation to 0 (it's {saturation().get('value')}; enabled={saturation().get('enabled')})")
+        app.key("e")
+        time.sleep(1.5)
+        g = greyish(app.shot("effects-greyscale"))
+        ensure(g > 0.9, f"only {g:.0%} of the picture is grey with saturation at 0")
+        return f"{g:.0%} of the picture is grey"
+
+    ctx.check("Saturation at 0 makes it grey", greyscale, app=app)
+
+    def equaliser():
+        app.press("Equaliser", any_role=True)
+        before = app.switch_on("Equaliser")
+        app.click_switch("Equaliser", app.window_id)
+        after = wait_for(lambda: app.switch_on("Equaliser") != before, "the Equaliser switch to change", 5)
+        return f"switched {'on' if not before else 'off'}"
+
+    ctx.check("Equaliser switch", equaliser, app=app)
+
+    def stays_on():
+        app.press("Video", any_role=True)
+        if not app.switch_on("Invert colours"):
+            app.click_switch("Invert colours", app.window_id)
+        ctx.hand_off(ctx.media / "second.mp4")
+        app.wait("second", timeout=15)
+        if not app.find("Invert colours"):
+            app.press("Video", any_role=True)
+        ensure(app.switch_on("Invert colours"), "Invert colours turned off for the next file")
+        return "still on for the next file"
+
+    ctx.check("filters stay on for the next file", stays_on, app=app)
+
+
+@scenario
+def playback_controls(ctx):
+    app = ctx.launch(ctx.media / "playback.mp4")
+    app.finish_onboarding()
+    if not ctx.check("starts playing", lambda: app.wait_playing() or "playing", app=app):
+        return
+
+    def speed():
+        app.key("]")
+        app.key("]")
+        label = app.gear_item("Playback speed")
+        app.close_menus()
+        ensure("1.5" in label, f"gear menu says {label!r}")
+        t0, w0 = app.time_ms(), time.monotonic()
+        time.sleep(4)
+        t1, w1 = app.time_ms(), time.monotonic()
+        rate = (t1 - t0) / 1000 / (w1 - w0)
+        ensure(1.2 < rate < 1.8, f"the clock ran at {rate:.2f}× real time")
+        app.key("=")
+        ensure("Normal" in app.gear_item("Playback speed"), "= didn't return to normal speed")
+        app.close_menus()
+        return f"{label}; clock ran at {rate:.2f}×; = back to Normal"
+
+    ctx.check("] speeds up, = resets", speed, app=app)
+
+    def jump():
+        app.command(("Playback", "Jump to Time…"), "t")
+        field = wait_for(lambda: [e for e in app.read() if "text" in (e.get("role") or "").lower() and "field" in (e.get("role") or "").lower()
+                                  or (e.get("role") or "").lower() in ("edit", "entry", "axtextfield")], "the time field", 8)[0]
+        app.type_into(field, "0:45")
+        app.key("return")
+        t = wait_for(lambda: 44_000 <= (t := app.time_ms()) <= 50_000 and t, "the clock near 0:45", 8)
+        return f"jumped to {t // 1000} s"
+
+    ctx.check("Jump to time", jump, app=app)
+
+    def ab_loop():
+        app.key("2")  # 20 %
+        time.sleep(1)
+        app.key("l", ("shift",))
+        time.sleep(3)
+        app.key("l", ("shift",))
+        label = app.gear_item("A–B loop")
+        app.close_menus()
+        ensure("Off" not in label, f"gear menu says {label!r}")
+        times = []
+        for _ in range(8):
+            times.append(app.time_ms())
+            time.sleep(1)
+        ensure(max(times) - min(times) <= 6000, f"the clock left the loop: {[t // 1000 for t in times]}")
+        app.key("l", ("shift",))  # third press clears it
+        return f"{label}; clock stayed in {min(times) // 1000}–{max(times) // 1000} s"
+
+    ctx.check("A–B loop holds playback in the loop", ab_loop, app=app)
+
+    def bookmark():
+        app.command(("Playback", "Add Bookmark"), "b")
+        label = wait_for(lambda: (l := app.gear_item("Bookmarks")) and "1" in l and l, "Bookmarks 1", 5)
+        app.close_menus()
+        return label
+
+    ctx.check("Add bookmark", bookmark, app=app)
+
+    def snapshot():
+        shots = ctx.out / "screenshots"
+        before = set(shots.glob("*"))
+        app.key("s", ("shift",))
+        new = wait_for(lambda: [p for p in shots.glob("*") if p not in before and p.suffix.lower() in (".png", ".jpg", ".jpeg")],
+                       "a snapshot file", 10)
+        return f"saved {new[0].name}"
+
+    ctx.check("Shift+S saves a snapshot", snapshot, app=app)
+
+    def sleep_timer():
+        app.gear_item("Sleep timer")
+        app.click_el(app.find(contains="Sleep timer")[0])
+        choice = wait_for(lambda: [e for e in app.read() if (e.get("label") or "").endswith("minutes")], "sleep timer choices", 5)[0]
+        app.click_el(choice)
+        app.close_menus()
+        badge = wait_for(lambda: app.find(contains="Turn off", button=True), "the sleep timer badge", 5)[0]
+        app.click_el(badge)
+        wait_for(lambda: not app.find(contains="Turn off", button=True), "the badge to clear", 5)
+        return f"{choice['label']}, shown and turned off"
+
+    ctx.check("Sleep timer", sleep_timer, app=app)
+
+
+@scenario
+def chapters(ctx):
+    app = ctx.launch(ctx.media / "chapters.mp4")
+    app.finish_onboarding()
+    if not ctx.check("starts playing", lambda: app.wait_playing() or "playing", app=app):
+        return
+    ctx.check("gear menu lists chapters", lambda: app.gear_item("Chapters") and (app.close_menus() or "Chapters shown"), app=app)
+
+    def next_chapter():
+        app.key("n", ("shift",))
+        t = wait_for(lambda: 19_000 <= (t := app.time_ms()) <= 26_000 and t, "the clock at the second chapter", 8)
+        ensure(app.find(contains="Middle part"), "the second chapter's name isn't shown")
+        return f"at {t // 1000} s, showing Middle part"
+
+    ctx.check("Shift+N goes to the next chapter", next_chapter, app=app)
+
+
+@scenario
+def tracks(ctx):
+    app = ctx.launch(ctx.media / "tracks.mkv")
+    app.finish_onboarding()
+    if not ctx.check("starts playing", lambda: app.wait_playing() or "playing", app=app):
+        return
+
+    def audio():
+        first = app.gear_item("Audio")
+        app.close_menus()
+        app.key("b")
+        second = wait_for(lambda: (l := app.gear_item("Audio")) != first and l, "the audio track to change", 5)
+        app.close_menus()
+        return f"{first} → {second}"
+
+    ctx.check("B switches audio track", audio, app=app)
+
+    def subs():
+        app.press("Subtitles")
+        wait_for(lambda: app.find("Off"), "the Subtitles menu", 5)
+        names = [e.get("label") for e in app.elements if "eng" in (e.get("label") or "").lower() or "fre" in (e.get("label") or "").lower()
+                 or (e.get("label") or "").startswith("Track")]
+        app.key("escape")
+        ensure(len(names) >= 2, f"subtitle tracks listed: {names}")
+        return f"listed {names}"
+
+    ctx.check("both subtitle tracks listed", subs, app=app)
+
+
+@scenario
+def streams(ctx):
+    url = f"{ctx.http}/hls/stream.m3u8"
+    app = ctx.launch(url)
+    app.finish_onboarding()
+    ctx.check("plays an HLS stream", lambda: app.wait_playing(30) or f"playing {url}", app=app)
+    ctx.check("its clock moves", lambda: (t := app.time_ms()) is not None and wait_for(lambda: app.time_ms() > t + 1500, "the clock to move", 8)
+              and "advancing", app=app)
+    app.kill()
+
+    app = ctx.launch(name="streams-dialog")
+    app.finish_onboarding()
+
+    def dialog():
+        app.command(("File", "Open Network Stream…"), "n")
+        field = wait_for(lambda: [e for e in app.read() if (e.get("role") or "").lower() in ("axtextfield", "edit", "entry", "text")
+                                  and not e.get("label") or "textfield" in (e.get("role") or "").lower()], "the URL field", 8)[0]
+        app.type_into(field, url)
+        app.key("return")
+        app.wait_playing(30)
+        return "opened from the dialog and playing"
+
+    ctx.check("Open network stream dialog", dialog, app=app)
+
+
+@scenario
+def playlist_files(ctx):
+    app = ctx.launch(ctx.media / "two.m3u")
+    app.finish_onboarding()
+    ctx.check("an M3U starts its first item", lambda: app.wait("playback", timeout=15) and "playing playback.mp4", app=app)
+
+    def listed():
+        app.press("Up next")
+        app.wait_text("second", timeout=5)
+        return "both items in Up next"
+
+    ctx.check("Up next lists the playlist", listed, app=app)
+
+    def remove():
+        b = wait_for(lambda: [e for e in app.read() if (e.get("label") or "").startswith("Remove second")], "Remove second…", 5)[0]
+        app.click_el(b)
+        wait_for(lambda: not [e for e in app.read() if (e.get("label") or "").startswith("Remove second")], "second to leave the queue", 5)
+        return "removed"
+
+    ctx.check("an item can be removed", remove, app=app)
+
+    def shuffle():
+        # A toggle button: a checkbox to accessibility on macOS.
+        before = wait_for(lambda: app.find("Shuffle"), "Shuffle", 5)[0]
+        app.click_el(before)
+        after = wait_for(lambda: (a := app.find("Shuffle")) and (a[0].get("value"), a[0].get("selected")) != (before.get("value"), before.get("selected")) and a,
+                         "Shuffle to change state", 5)[0]
+        app.click_el(after)
+        return "Shuffle toggles"
+
+    ctx.check("Shuffle toggles", shuffle, app=app)
+
+
+@scenario
+def history(ctx):
+    app = ctx.launch(ctx.media / "playback.mp4")
+    app.finish_onboarding()
+    if not ctx.check("starts playing", lambda: app.wait_playing() or "playing", app=app):
+        return
+    # Halfway in: ReVLC lists a file under Recent until it's far enough in
+    # to be worth continuing.
+    app.key("5")
+    time.sleep(3)
+
+    def continue_watching():
+        app.press("Back to home")
+        app.wait_text("Continue watching", timeout=10)
+        ensure(app.find("Remove playback from history", button=True), "playback isn't in Continue watching")
+        return "playback listed under Continue watching"
+
+    if ctx.check("Continue watching lists it", continue_watching, app=app):
+        ctx.check("it can be removed from history", lambda: (app.press("Remove playback from history"),
+                                                             app.wait_gone("Remove playback from history", timeout=5)) and "removed", app=app)
+
+
+@scenario
+def settings_persist(ctx):
+    app = ctx.launch()
+    app.finish_onboarding()
+
+    def find_switch(w, label):
+        """Opens each Settings tab until `label` shows."""
+        for tab in ("General", "Video", "Audio", "Subtitles", "Input & Codecs"):
+            if [e for e in app.read(w) if e.get("label") == label]:
+                return True
+            tabs = [e for e in app.elements if e.get("label") == tab]
+            if tabs:
+                app.click_el(tabs[0], w)
+                time.sleep(0.8)
+        return bool([e for e in app.read(w) if e.get("label") == label])
+
+    def toggle_and_relaunch():
+        w = app.settings_window()
+        ensure(find_switch(w, "Pause when minimised"), "no Pause when minimised switch")
+        before = app.switch_on("Pause when minimised", w)
+        app.click_switch("Pause when minimised", w)
+        wait_for(lambda: app.switch_on("Pause when minimised", w) != before, "the switch to change", 5)
+        time.sleep(1.5)
+        saved = json.loads((ctx.data_dir() / "settings.json").read_text(encoding="utf-8")).get("pauseWhenMinimized")
+        ensure(saved == (not before), f"settings.json has pauseWhenMinimized={saved}")
+        app.close()
+        again = ctx.launch(name="settings_persist-2")
+        again.finish_onboarding()
+        w2 = again.settings_window()
+        ensure(find_switch_for(again, w2), "no Pause when minimised switch after relaunch")
+        ensure(again.switch_on("Pause when minimised", w2) == (not before), "the setting didn't survive a relaunch")
+        return f"{'on' if not before else 'off'} in settings.json and after relaunch"
+
+    def find_switch_for(a, w):
+        nonlocal app
+        app_, app = app, a
+        try:
+            return find_switch(w, "Pause when minimised")
+        finally:
+            app = app_
+
+    ctx.check("a setting survives a relaunch", toggle_and_relaunch, app=app)
+
+
+@scenario
+def shortcuts(ctx):
+    app = ctx.launch(ctx.media / "playback.mp4")
+    app.finish_onboarding()
+    if not ctx.check("starts playing", lambda: app.wait_playing() or "playing", app=app):
+        return
+
+    def rebind():
+        w = app.settings_window()
+        tab = wait_for(lambda: [e for e in app.read(w) if e.get("label") == "Shortcuts"], "the Shortcuts tab", 8)[0]
+        app.click_el(tab, w)
+        key_button = wait_for(lambda: app.button_after("Mute", w), "Mute's shortcut", 8)
+        app.click_el(key_button, w)
+        time.sleep(0.5)
+        app.key("y", window_id=w)
+        time.sleep(1)
+        # Back in the player, Y now mutes.
+        cua("bring_to_front", {"pid": app.pid, "window_id": app.window_id})
+        app.key("y")
+        app.wait("Unmute", button=True, timeout=5)
+        app.key("y")
+        return "Mute moved to Y, and Y mutes"
+
+    ctx.check("a shortcut can be changed", rebind, app=app)
+
+
+def serve_media(ctx):
+    """Serves the media folder on a local port, for the stream scenarios."""
+    import functools
+    import http.server
+    import threading
+
+    class Quiet(http.server.SimpleHTTPRequestHandler):
+        def log_message(self, *args):
+            pass
+
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), functools.partial(Quiet, directory=str(ctx.media)))
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    ctx.http = f"http://127.0.0.1:{server.server_address[1]}"
+
+
 def main():
     # Windows consoles default to a code page that can't print "→" or "—".
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -1071,6 +1551,7 @@ def main():
     a.out = a.out.resolve()
     ctx = Context(a)
     make_media(ctx)
+    serve_media(ctx)
     if not (ctx.out / "backup/manifest.json").exists():
         ctx.appdata("backup")
     only = set(a.only.split(",")) if a.only else None
