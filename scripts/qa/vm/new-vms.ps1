@@ -114,7 +114,7 @@ function New-CleanVm([string]$Name, $Spec) {
     Write-Host "[$Name] creating from $iso"
     Invoke-VBox createvm --name $Name --ostype $Spec.OsType --basefolder $BaseFolder --register --default | Out-Null
     Invoke-VBox modifyvm $Name --memory 4096 --cpus 2 --vram 128 --audio-enabled on --clipboard-mode disabled | Out-Null
-    # Windows 10 on VirtualBox over Hyper-V (this PC): with the defaults
+    # Windows 10 on VirtualBox over Hyper-V on an AMD host (Hitesh's PC): with the defaults
     # (BIOS, Hyper-V paravirtualisation) setup spins forever at "Getting
     # ready" or the boot spinner. EFI and the minimal provider install.
     if ($Spec.Firmware) { Invoke-VBox modifyvm $Name --firmware $Spec.Firmware | Out-Null }
@@ -131,7 +131,7 @@ function New-CleanVm([string]$Name, $Spec) {
         $a += "--image-index=$(Get-ImageIndex $iso $Spec.Edition)"
         $a += "--post-install-command=powershell.exe -NoProfile -ExecutionPolicy Bypass -EncodedCommand $(ConvertTo-EncodedCommand $WindowsPostInstall)"
     } else {
-        $b64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($LinuxPostInstall -replace "`r", ""))
+        $b64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes(($LinuxPostInstall -replace "`r", "")))
         $a += "--post-install-command=/bin/bash -c 'echo $b64 | base64 -d | /bin/bash'"
     }
     Start-Headless $Name { Invoke-VBox @a | Out-Null }

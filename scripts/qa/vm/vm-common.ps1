@@ -154,14 +154,17 @@ function Invoke-GuestDesktop([string]$Vm, [string]$Command, [string]$DoneFile, [
     $task = "revlc-vm-step"
     Invoke-Guest $Vm "C:\Windows\System32\schtasks.exe" @("/create", "/tn", $task, "/tr", $Command, "/sc", "once", "/st", "23:59", "/it", "/f") | Out-Null
     Invoke-Guest $Vm "C:\Windows\System32\schtasks.exe" @("/run", "/tn", $task) | Out-Null
-    Start-Sleep -Seconds 10
+    $script:stoppedPolls = 0
     Wait-Until {
         if (Test-GuestPath $Vm $DoneFile) { return $true }
-        # "TaskName","Next Run Time","Status": stopped without writing
-        # $DoneFile means the command itself failed to start.
-        $row = Invoke-Guest $Vm "C:\Windows\System32\schtasks.exe" @("/query", "/tn", $task, "/fo", "csv", "/nh") -AllowFailure | Select-Object -Last 1
-        if ($row -notmatch '"Running"' -and -not (Test-GuestPath $Vm $DoneFile)) {
-            $info = Invoke-Guest $Vm "C:\Windows\System32\schtasks.exe" @("/query", "/tn", $task, "/v", "/fo", "list") -AllowFailure | Where-Object { $_ -match "Last Result|Status" }
+        # Finished (has run: Last Result isn't 267011, and Ready again) on two
+        # polls running without $DoneFile: the command itself failed. A fresh
+        # Windows 10 can take a while to start the task at all.
+        $info = Invoke-Guest $Vm "C:\Windows\System32\schtasks.exe" @("/query", "/tn", $task, "/v", "/fo", "list") -AllowFailure | Where-Object { $_ -match "^(Status|Last Result):" }
+        $ran = -not ($info -match "^Last Result:\s+267011$")
+        $ready = [bool]($info -match "^Status:\s+Ready$")
+        $script:stoppedPolls = if ($ran -and $ready) { $script:stoppedPolls + 1 } else { 0 }
+        if ($script:stoppedPolls -ge 2 -and -not (Test-GuestPath $Vm $DoneFile)) {
             throw "The task in $Vm stopped without writing $DoneFile`n$($info -join "`n")"
         }
         $false
