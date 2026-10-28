@@ -1,3 +1,0 @@
-# The .sh files run inside the Linux guest; keep them LF even when
-# checked out on Windows (core.autocrlf).
-*.sh text eol=lf
