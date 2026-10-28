@@ -763,9 +763,11 @@ def playback(ctx):
     ctx.check("Space resumes", lambda: (app.key("space"), app.wait("Pause", button=True, timeout=5)) and "playing again", app=app)
 
     def seek():
-        before = app.time_ms()
+        # Net of the time that passes meanwhile: playing on its own, the
+        # clock would gain those seconds without any jump.
+        before, t0 = app.time_ms(), time.monotonic()
         app.key("right")
-        after = wait_for(lambda: (t := app.time_ms()) >= before + 4000 and t, "the clock to jump 5 s", 5)
+        after = wait_for(lambda: (t := app.time_ms()) - before - (time.monotonic() - t0) * 1000 >= 3500 and t, "the clock to jump 5 s", 5)
         return f"{before // 1000} s → {after // 1000} s"
 
     ctx.check("→ jumps forward", seek, app=app)
@@ -1658,12 +1660,20 @@ def main():
     ap.add_argument("app", nargs="+")
     a = ap.parse_args()
     a.out = a.out.resolve()
+    only = set(a.only.split(",")) if a.only else None
+    if only and (unknown := only - {fn.__name__ for fn in SCENARIOS}):
+        sys.exit(f"Unknown scenarios: {', '.join(sorted(unknown))}")
+    # A backup that was already restored is out of date: backing up again
+    # would be refused, and restoring it would undo changes made since.
+    if (a.out / "logs/data-restore-verification.json").exists():
+        sys.exit(f"{a.out} is a finished run; use a new --out")
     ctx = Context(a)
     make_media(ctx)
     serve_media(ctx)
+    # A backup that wasn't restored is from a run cut short: it holds your
+    # data, and what's in the data folders now is test data. Keep it.
     if not (ctx.out / "backup/manifest.json").exists():
         ctx.appdata("backup")
-    only = set(a.only.split(",")) if a.only else None
     started = time.monotonic()
     try:
         for fn in SCENARIOS:
@@ -1688,6 +1698,8 @@ def main():
             ctx.appdata("restore")
         except Exception as e:
             print(f"restore: {e}", flush=True)
+            ctx.results.append({"scenario": "(cleanup)", "check": "your app data restored", "status": "fail",
+                                "detail": f"{e}; the backup is in {ctx.out / 'backup'}", "known_bug": None, "seconds": 0})
     write_report(ctx, time.monotonic() - started)
     sys.exit(1 if any(r["status"] == "fail" for r in ctx.results) else 0)
 

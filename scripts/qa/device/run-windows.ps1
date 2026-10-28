@@ -76,8 +76,10 @@ try {
 }
 finally {
     [void][RevlcQa.ScreenReader]::SystemParametersInfo($SPI_SETSCREENREADER, [uint32]$was, [System.IntPtr]::Zero, $SPIF_SENDCHANGE)
-    # If the run was cut short, put your ReVLC data back.
-    if ((Test-Path (Join-Path $run "backup\manifest.json")) -and -not (Test-Path (Join-Path $run "logs\data-restore-verification.json"))) {
+    # If the run was cut short, or its restore didn't match, put your ReVLC data back.
+    $verification = Join-Path $run "logs\data-restore-verification.json"
+    $restored = (Test-Path $verification) -and (Get-Content $verification -Raw | ConvertFrom-Json).match
+    if ((Test-Path (Join-Path $run "backup\manifest.json")) -and -not $restored) {
         Get-Process revlc -ErrorAction SilentlyContinue | Stop-Process -Force
         Start-Sleep -Seconds 2
         & python -I "$root\scripts\qa\appdata.py" restore $run

@@ -62,9 +62,13 @@ xattr -cr "$run/ReVLC.app"
 defaults read "$run/ReVLC.app/Contents/Info.plist" CFBundleShortVersionString > "$run/version.txt"
 echo "Testing ReVLC $(cat "$run/version.txt")"
 
-# If the run is cut short, put your ReVLC data back.
+# If the run is cut short, or its restore didn't match, put your ReVLC data back.
+restored() {
+  python3 -I -c 'import json, sys; sys.exit(0 if json.load(open(sys.argv[1])).get("match") else 1)' \
+    "$run/logs/data-restore-verification.json" 2>/dev/null
+}
 cleanup() {
-  if [[ -f "$run/backup/manifest.json" && ! -f "$run/logs/data-restore-verification.json" ]]; then
+  if [[ -f "$run/backup/manifest.json" ]] && ! restored; then
     pkill -9 -x revlc 2>/dev/null || true
     sleep 1
     python3 -I "$ROOT/scripts/qa/appdata.py" restore "$run"

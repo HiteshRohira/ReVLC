@@ -22,11 +22,14 @@ $qa = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 $spec = $VmSpecs[$Vm]
 if (-not $spec) { throw "Unknown VM $Vm (one of: $($VmSpecs.Keys -join ', '))" }
 $Installer = (Resolve-Path $Installer).Path
+# The guest command line (a scheduled task's) passes paths unquoted.
+if ((Split-Path $Installer -Leaf) -match '\s') { throw "Rename the installer without spaces: $(Split-Path $Installer -Leaf)" }
 $ext = [IO.Path]::GetExtension($Installer)
 if (($spec.Os -eq "windows" -and $ext -ne ".exe") -or ($spec.Os -eq "linux" -and $ext -ne ".deb")) {
     throw "$Vm needs a $(if ($spec.Os -eq 'windows') { 'setup .exe' } else { '.deb' }), not $(Split-Path $Installer -Leaf)"
 }
 
+$status = 1
 $out = Join-Path $env:USERPROFILE ("revlc-qa\vm-$Vm-" + (Get-Date -Format "yyyyMMdd-HHmmss"))
 New-Item -ItemType Directory -Force $out | Out-Null
 Write-Host "Results: $out"
@@ -63,6 +66,9 @@ try {
     $result = Get-Content (Join-Path $out "out\result.txt") -ErrorAction SilentlyContinue
     $result | ForEach-Object { Write-Host "  $_" }
     $guestRun = ($result | Where-Object { $_ -like "Run folder: *" } | Select-Object -Last 1) -replace "^Run folder: ", ""
+    # The suite's exit code: 0 only if it ran and nothing failed.
+    $code = ($result | Where-Object { $_ -match "^Suite exit code: \d+$" } | Select-Object -Last 1) -replace "^Suite exit code: ", ""
+    if ($code) { $status = [int]$code }
     if ($guestRun) {
         Copy-FromGuest $Vm $guestRun $out
         $report = Get-ChildItem $out -Recurse -Filter report.md | Select-Object -First 1
@@ -78,3 +84,4 @@ finally {
     Stop-Transcript | Out-Null
 }
 Write-Host "Results: $out"
+exit $status
