@@ -52,6 +52,18 @@ class Skip(Exception):
 DAEMON_GONE = ("daemon is not running", "closed connection without response")
 
 
+def long_paths_enabled():
+    """Whether Windows allows paths over 260 characters (always true elsewhere)."""
+    if not WIN:
+        return True
+    import winreg
+    try:
+        with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, r"SYSTEM\CurrentControlSet\Control\FileSystem") as k:
+            return winreg.QueryValueEx(k, "LongPathsEnabled")[0] == 1
+    except OSError:
+        return False
+
+
 def cua(tool, args, shot=None, timeout=60, retry=True):
     cmd = ["cua-driver", "call", tool, json.dumps({**args, "session": SESSION})]
     if shot:
@@ -615,8 +627,9 @@ def make_media(ctx):
         (m / "folder").mkdir(exist_ok=True)
         shutil.copyfile(m / "second.mp4", m / "folder" / name)
     # Over 300 characters with non-ASCII names: Windows' old 260-character
-    # limit and Unicode handling both matter here.
-    deep = m.joinpath(*["Ünïcødé 視頻 テスト フォルダ — long path segment"] * 6)
+    # limit and Unicode handling both matter here. A fresh Windows has long
+    # paths turned off, so no program can use them; keep Unicode only there.
+    deep = m.joinpath(*["Ünïcødé 視頻 テスト フォルダ — long path segment"] * (6 if long_paths_enabled() else 2))
     deep.mkdir(parents=True, exist_ok=True)
     long_file = deep / "長いファイル名 — playback.mp4"
     if not long_file.exists():
