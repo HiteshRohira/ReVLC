@@ -312,8 +312,12 @@ class App:
         return wait_for(find, f"the {placeholder!r} field", 8)
 
     def type_into(self, element, text):
-        """Types into a text field: focus it, then type."""
+        """Types into a text field, replacing what's there: focus it, then
+        type. On Windows the click drops the selection the app made, so
+        select all again first."""
         cua("click", {"element_token": element["element_token"]})
+        if WIN:
+            self.shortcut("a")
         try:
             cua("type_text", {"pid": self.pid, "element_token": element["element_token"], "text": text})
         except RuntimeError:
@@ -828,6 +832,9 @@ def menus(ctx):
         return f"opened and closed 5 times; clock {start // 1000} s → {later // 1000} s"
 
     ctx.check("gear menu opens and closes", gear, app=app)
+    # Back to the start: the 60 s clip can run out before the checks below
+    # finish on a slow machine (Windows took longer than that).
+    app.key("0")
 
     def info():
         if MAC:
@@ -1514,7 +1521,9 @@ def history(ctx):
 
     def continue_watching():
         app.press("Back to home")
-        app.wait_text("Continue watching", timeout=10)
+        # WebView2 leaves headings out of the accessibility tree, so look for
+        # the time left, which only Continue watching tiles show.
+        app.wait_text("min left", timeout=10)
         ensure(app.find("Remove playback from history", button=True), "playback isn't in Continue watching")
         return "playback listed under Continue watching"
 
