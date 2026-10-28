@@ -325,11 +325,13 @@ class App:
 
     def type_into(self, element, text):
         """Types into a text field, replacing what's there: focus it, then
-        type. On Windows the click drops the selection the app made, so
-        select all again first."""
+        type. On Windows the click drops the selection the app made and
+        Ctrl+A doesn't always arrive, so clear the field with keys instead."""
         cua("click", {"element_token": element["element_token"]})
         if WIN:
-            self.shortcut("a")
+            self.key("end")
+            for _ in range(len(element.get("value") or "") + 12):
+                self.key("backspace")
         try:
             cua("type_text", {"pid": self.pid, "element_token": element["element_token"], "text": text})
         except RuntimeError:
@@ -506,6 +508,16 @@ class App:
                 # The whole tree: WebView2's helpers otherwise keep the
                 # profile's files locked.
                 subprocess.run(["taskkill", "/F", "/T", "/PID", str(self.pid)], capture_output=True)
+                # taskkill returns before they've gone, and the next launch
+                # can't open a profile they still hold (a known app bug, but
+                # one that shouldn't take unrelated checks down with it).
+                ps = ("@(Get-CimInstance Win32_Process -Filter \"Name='msedgewebview2.exe'\" | "
+                      "Where-Object { $_.CommandLine -like '*revlc*' }).Count")
+                try:
+                    wait_for(lambda: subprocess.run(["powershell", "-NoProfile", "-Command", ps], capture_output=True, text=True).stdout.strip() == "0",
+                             "ReVLC's WebView2 processes to exit", 20)
+                except Fail:
+                    pass
             elif self.proc:
                 self.proc.kill()
             else:
@@ -617,7 +629,9 @@ def make_media(ctx):
             out.parent.mkdir(parents=True, exist_ok=True)
             subprocess.run([ctx.ffmpeg, "-hide_banner", "-loglevel", "error", "-y", *args, "-c:v", "mpeg4", "-q:v", "3", str(out)], check=True)
 
-    ff(m / "playback.mp4", "-f", "lavfi", "-i", "testsrc2=size=640x360:rate=24", "-t", "60")
+    # Five minutes: a slow machine (a clean VM) takes longer than a minute
+    # over some scenarios, and the clip mustn't end before their checks do.
+    ff(m / "playback.mp4", "-f", "lavfi", "-i", "testsrc2=size=640x360:rate=24", "-t", "300")
     ff(m / "second.mp4", "-f", "lavfi", "-i", "smptebars=size=640x360:rate=24", "-t", "40")
     ff(m / "subtitled.mp4", "-f", "lavfi", "-i", "color=c=0x204060:size=640x360:rate=24", "-t", "60")
     (m / "subtitled.srt").write_text("1\n00:00:00,000 --> 00:01:00,000\nSUBTITLE CHECK\n", encoding="utf-8")
@@ -757,7 +771,7 @@ def playback(ctx):
     ctx.check("→ jumps forward", seek, app=app)
     def jump():
         app.key("5")
-        t = wait_for(lambda: 29_000 <= (t := app.time_ms()) <= 36_000 and t, "the clock near 0:30", 5)
+        t = wait_for(lambda: 149_000 <= (t := app.time_ms()) <= 156_000 and t, "the clock near 2:30", 5)
         return f"at {t // 1000} s"
 
     ctx.check("5 jumps to 50%", jump, app=app)
@@ -845,10 +859,6 @@ def menus(ctx):
         return f"opened and closed 5 times; clock {start // 1000} s → {later // 1000} s"
 
     ctx.check("gear menu opens and closes", gear, app=app)
-    # Back to the start: the 60 s clip can run out before the checks below
-    # finish on a slow machine (Windows took longer than that).
-    app.key("0")
-
     def info():
         if MAC:
             app.menu("Window", "Media Information…")
@@ -1042,8 +1052,10 @@ def corrupt_history(ctx):
     data.mkdir(parents=True, exist_ok=True)
     (data / "history.json").write_text('[{"uri": tru', encoding="utf-8")
     app = ctx.launch(ctx.media / "playback.mp4")
-    app.finish_onboarding()
+    # The notice goes after 6 s and shows over the welcome screen too, so
+    # look before passing it: on a slow machine that alone takes 6 s.
     ctx.check("tells the user", lambda: app.wait_text("history couldn't be read", timeout=15) and "notice shown", app=app)
+    app.finish_onboarding()
     ctx.check("plays anyway", lambda: app.wait_playing() or "playing", app=app)
 
 
