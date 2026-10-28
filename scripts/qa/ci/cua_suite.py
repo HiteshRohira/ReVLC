@@ -534,7 +534,10 @@ class App:
             elif self.proc:
                 self.proc.kill()
             else:
-                os.kill(self.pid, 9)
+                try:
+                    os.kill(self.pid, 9)
+                except ProcessLookupError:
+                    pass  # it quit between the check and the kill
         if self.proc:
             self.proc.wait()
         self.log.close()
@@ -1099,12 +1102,15 @@ def command_line(ctx):
     ctx.check("-f starts in fullscreen", starts_fullscreen, app=app)
     app.kill()
 
+    launched = time.monotonic()
     app = ctx.launch("--play-and-exit", "--run-time=3", ctx.media / "playback.mp4", name="command_line-exit")
 
     def exits():
-        start = time.monotonic()
         ensure(app.wait_exit(30), "still running 30 s later")
-        return f"exited after {time.monotonic() - start:.1f} s"
+        # Quitting sooner than the 3 s it should play means it never did.
+        took = time.monotonic() - launched
+        ensure(took >= 3, f"quit {took:.1f} s after launch, before playing 3 s")
+        return f"exited {took:.1f} s after launch"
 
     ctx.check("--play-and-exit --run-time=3 quits", exits, app=app)
 

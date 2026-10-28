@@ -148,15 +148,19 @@ fn vlc_it_rejects_a_broken_runtime() {
     let (core, main) = lib_names();
     std::fs::write(lib.join(core), b"not a library").unwrap();
     std::fs::write(lib.join(main), b"not a library").unwrap();
-    // REVLC_VLC_DIR is the first place ReVLC looks.
-    let good = std::env::var_os("REVLC_VLC_DIR");
+    // REVLC_VLC_DIR is the first place ReVLC looks. Loading also points
+    // libVLC's plugin and data paths into the folder; put all three back.
+    let vars = ["REVLC_VLC_DIR", "VLC_PLUGIN_PATH", "VLC_DATA_PATH"];
+    let saved = vars.map(std::env::var_os);
     // SAFETY: tests run one at a time (see the module docs).
     unsafe { std::env::set_var("REVLC_VLC_DIR", &dir) };
     let result = Vlc::load(None, &[], &[], &[]);
-    unsafe {
-        match &good {
-            Some(d) => std::env::set_var("REVLC_VLC_DIR", d),
-            None => std::env::remove_var("REVLC_VLC_DIR"),
+    for (var, value) in vars.iter().zip(&saved) {
+        unsafe {
+            match value {
+                Some(v) => std::env::set_var(var, v),
+                None => std::env::remove_var(var),
+            }
         }
     }
     let err = result.err().expect("a broken libVLC must not load");
