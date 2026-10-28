@@ -818,6 +818,17 @@ def playback(ctx):
 
     ctx.check("M mutes", mute, app=app)
 
+    def previews():
+        # Seek previews come from FFmpeg keyframe passes; a pass that fails
+        # (say, a GPU decoder the machine lacks) shows only in the app's log.
+        app.log.flush()
+        log = (ctx.out / "logs" / f"{app.name}.log").read_text(encoding="utf-8", errors="replace")
+        failed = [l for l in log.splitlines() if "keyframe pass failed" in l]
+        ensure(not failed, f"{len(failed)} failed: {failed[0].strip() if failed else ''}")
+        return "no failed keyframe passes in the app log"
+
+    ctx.check("seek previews build without errors", previews, app=app)
+
 
 @scenario
 def fullscreen(ctx):
