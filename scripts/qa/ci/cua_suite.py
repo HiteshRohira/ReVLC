@@ -64,6 +64,22 @@ def long_paths_enabled():
         return False
 
 
+REVLC_WEBVIEW = "Get-CimInstance Win32_Process -Filter \"Name='msedgewebview2.exe'\" | Where-Object { $_.CommandLine -like '*revlc*' }"
+
+
+def revlc_webview_count():
+    """Windows: how many of ReVLC's WebView2 helpers are running (only
+    ReVLC's: other apps use WebView2 too)."""
+    r = subprocess.run(["powershell", "-NoProfile", "-Command", f"@({REVLC_WEBVIEW}).Count"], capture_output=True, text=True)
+    out = r.stdout.strip()
+    return int(out) if out.isdigit() else 0
+
+
+def kill_revlc_webview():
+    subprocess.run(["powershell", "-NoProfile", "-Command", f"{REVLC_WEBVIEW} | ForEach-Object {{ Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }}"],
+                   capture_output=True)
+
+
 def cua(tool, args, shot=None, timeout=60, retry=True):
     cmd = ["cua-driver", "call", tool, json.dumps({**args, "session": SESSION})]
     if shot:
@@ -511,11 +527,8 @@ class App:
                 # taskkill returns before they've gone, and the next launch
                 # can't open a profile they still hold (a known app bug, but
                 # one that shouldn't take unrelated checks down with it).
-                ps = ("@(Get-CimInstance Win32_Process -Filter \"Name='msedgewebview2.exe'\" | "
-                      "Where-Object { $_.CommandLine -like '*revlc*' }).Count")
                 try:
-                    wait_for(lambda: subprocess.run(["powershell", "-NoProfile", "-Command", ps], capture_output=True, text=True).stdout.strip() == "0",
-                             "ReVLC's WebView2 processes to exit", 20)
+                    wait_for(lambda: revlc_webview_count() == 0, "ReVLC's WebView2 processes to exit", 20)
                 except Fail:
                     pass
             elif self.proc:
@@ -552,7 +565,7 @@ class Context:
             # On Windows, WebView2 helpers can hold the profile for a moment.
             if not WIN or "PermissionError" not in r.stderr:
                 break
-            subprocess.run(["taskkill", "/F", "/IM", "msedgewebview2.exe"], capture_output=True)
+            kill_revlc_webview()
             time.sleep(1)
         raise RuntimeError(f"appdata.py {cmd}: {r.stdout}{r.stderr}")
 
@@ -960,7 +973,8 @@ def resume(ctx):
         again.wait("Continue", button=True, timeout=15)
         ensure("continue from" in again.text().lower(), "no Continue from… text")
         again.press("Continue")
-        t = wait_for(lambda: (t := again.time_ms()) >= 28_000 and t, "the clock past 0:28", 8)
+        # It quit about 3 s after jumping to 2:30.
+        t = wait_for(lambda: 148_000 <= (t := again.time_ms()) <= 170_000 and t, "the clock near 2:33", 8)
         return f"offered and resumed at {t // 1000} s"
 
     ctx.check("offers to continue after relaunch", offer, app=again)
@@ -1109,8 +1123,13 @@ def paths_and_folders(ctx):
     def library():
         app.press("Back to home")
         app.wait_text("Videos", timeout=10)
-        ensure(any(e.get("label", "").startswith("Videos") and "2" in e.get("label", "") for e in app.read()) or "2" in app.text(),
-               "Videos doesn't show the folder's 2 files")
+        # The count sits in the Videos button: in its name ("Videos 2"), or
+        # on some platforms as its own element right after it.
+        els = app.read()
+        label = lambda e: (e.get("label") or e.get("value") or "").strip()
+        counts = [label(e).removeprefix("Videos").strip() or (label(els[i + 1]) if i + 1 < len(els) else "")
+                  for i, e in enumerate(els) if label(e).startswith("Videos")]
+        ensure("2" in counts, f"Videos doesn't show the folder's 2 files (count: {counts or 'no Videos button'})")
         return "the folder is in the library"
 
     ctx.check("the folder joins the library", library, app=app)
