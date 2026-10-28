@@ -2363,6 +2363,7 @@ fn preferred_languages() -> Vec<String> {
 }
 
 fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
+    main_window(app)?;
     updater::start(app.handle());
     let resource_dir = app.path().resource_dir().ok();
     let data_dir = app.path().app_data_dir()?;
@@ -2522,6 +2523,59 @@ fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+/// Builds the player window from its tauri.conf entry (marked not to be made
+/// there). Started again right after a copy was closed or killed, Windows can
+/// still have that copy's WebView2 helpers holding the profile folder for a
+/// few seconds, and making the web view fails with "the requested resource is
+/// in use"; that failure is waited out.
+fn main_window(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
+    let config = app.config().app.windows.iter().find(|w| w.label == "main").ok_or("main window missing from tauri.conf")?.clone();
+    retry_while_busy(Duration::from_secs(10), Duration::from_millis(250), || WebviewWindowBuilder::from_config(app.handle(), &config)?.build())?;
+    Ok(())
+}
+
+/// Runs `attempt` until it succeeds, fails some other way, or `limit` passes
+/// with it still failing because the web view's profile is busy.
+fn retry_while_busy<T, E: std::fmt::Display>(limit: Duration, pause: Duration, mut attempt: impl FnMut() -> Result<T, E>) -> Result<T, E> {
+    let start = Instant::now();
+    loop {
+        match attempt() {
+            Err(e) if webview_busy(&e.to_string()) && start.elapsed() < limit => {
+                eprintln!("revlc: web view busy, trying again: {e}");
+                thread::sleep(pause);
+            }
+            done => return done,
+        }
+    }
+}
+
+/// Whether a web view error is WebView2's ERROR_BUSY (0x800700AA): another
+/// process is still using the profile folder.
+fn webview_busy(error: &str) -> bool {
+    let error = error.to_ascii_lowercase();
+    error.contains("0x800700aa") || error.contains("resource is in use")
+}
+
+/// Tells the user ReVLC can't start, in a dialog on Windows (where there's no
+/// terminal to read), and exits.
+fn fail_to_start(error: &dyn std::fmt::Display) -> ! {
+    let error = error.to_string();
+    let mut message = format!("ReVLC couldn't start.\n\n{error}");
+    if webview_busy(&error) {
+        message.push_str("\n\nA copy of ReVLC that was just closed may still be shutting down. Wait a moment, then open ReVLC again.");
+    }
+    eprintln!("revlc: {message}");
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::UI::WindowsAndMessaging::{MB_ICONERROR, MB_OK, MessageBoxW};
+        let wide = |s: &str| s.encode_utf16().chain(Some(0)).collect::<Vec<u16>>();
+        let (text, caption) = (wide(&message), wide("ReVLC"));
+        // SAFETY: both strings are NUL-terminated and outlive the call.
+        unsafe { MessageBoxW(std::ptr::null_mut(), text.as_ptr(), caption.as_ptr(), MB_OK | MB_ICONERROR) };
+    }
+    std::process::exit(1)
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     #[cfg(target_os = "linux")]
@@ -2545,7 +2599,7 @@ pub fn run() {
             core.add_from_main(cli.files, cli.media_options);
         }
     }));
-    let app = builder
+    let app = match builder
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .setup(setup)
@@ -2649,7 +2703,10 @@ pub fn run() {
             open_capture,
         ])
         .build(tauri::generate_context!())
-        .expect("error while building revlc");
+    {
+        Ok(app) => app,
+        Err(e) => fail_to_start(&e),
+    };
 
     app.run(|handle, event| {
         // The Quit menu item ends the app without asking: only Exit comes.
@@ -2695,5 +2752,38 @@ mod tests {
         assert!(!in_history("rtsp://user:secret@cam.local/stream"));
         assert!(!in_history("dshow://"));
         assert!(!in_history("avcapture://"));
+    }
+
+    // As WebView2 reports a profile folder another process still holds.
+    const BUSY: &str = "failed to create webview: WebView2 error: WindowsError(Error { code: HRESULT(0x800700AA), message: \"The requested resource is in use.\" })";
+
+    #[test]
+    fn busy_web_view_is_waited_out() {
+        let mut tries = 0;
+        let got = retry_while_busy(Duration::from_secs(5), Duration::ZERO, || {
+            tries += 1;
+            if tries < 3 { Err(BUSY) } else { Ok("window") }
+        });
+        assert_eq!((got, tries), (Ok("window"), 3));
+    }
+
+    #[test]
+    fn other_failures_and_lasting_busy_give_up() {
+        let mut tries = 0;
+        let got: Result<(), _> = retry_while_busy(Duration::from_secs(5), Duration::ZERO, || {
+            tries += 1;
+            Err("failed to create webview: WebView2 runtime not found")
+        });
+        assert!(got.is_err());
+        assert_eq!(tries, 1);
+        let got: Result<(), _> = retry_while_busy(Duration::from_millis(30), Duration::from_millis(5), || Err(BUSY));
+        assert_eq!(got, Err(BUSY));
+    }
+
+    #[test]
+    fn busy_is_told_apart() {
+        assert!(webview_busy(BUSY));
+        assert!(webview_busy("error encountered during setup hook: HRESULT(0x800700aa)"));
+        assert!(!webview_busy("failed to create webview: HRESULT(0x80070002)"));
     }
 }
