@@ -1371,6 +1371,9 @@ def playback_controls(ctx):
     ctx.check("Add bookmark", bookmark, app=app)
 
     def snapshot():
+        if ctx.no_video:
+            # libVLC snapshots the picture it draws; there's none here.
+            raise Skip("this runner can't show video")
         shots = ctx.out / "screenshots"
         before = set(shots.glob("*"))
         app.key("s", ("shift",))
