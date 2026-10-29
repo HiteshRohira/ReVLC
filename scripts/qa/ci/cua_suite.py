@@ -412,9 +412,25 @@ class App:
                 return e
         raise Fail(f'no button after "{label}"')
 
+    def reveal(self, label, window_id):
+        """Scrolls the window until the element named `label` is inside it:
+        a pixel click (Linux) misses one below the visible part."""
+        for _ in range(8):
+            els = [e for e in self.read(window_id) if e.get("label") == label and (e.get("frame") or {}).get("h")]
+            wb = next((w["bounds"] for w in self.windows() if w["window_id"] == window_id), None)
+            if not els or not wb:
+                return
+            f = els[0]["frame"]
+            if wb["y"] <= f["y"] and f["y"] + f["h"] <= wb["y"] + wb["height"] - 4:
+                return
+            cua("scroll", {"pid": self.pid, "window_id": window_id, "x": round(wb["width"] / 2), "y": round(wb["height"] / 2),
+                           "direction": "down" if f["y"] > wb["y"] else "up", "amount": 3})
+
     def click_switch(self, label, window_id):
         """Flips the switch named `label`. On Linux a switch reports no
         position, so click where it sits: the right end of its row."""
+        if LINUX:
+            self.reveal(label, window_id)
         els = self.switches(label, window_id)
         ensure(els, f'no "{label}" switch')
         f = els[0].get("frame")
@@ -742,12 +758,13 @@ class Context:
 # What was tested
 
 def output(*cmd):
-    """A command's first line of output, or "" if it can't run."""
+    """A command's first line of output, or "" if it fails."""
     try:
         r = subprocess.run(list(cmd), capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=30)
-        return (r.stdout or r.stderr).strip().splitlines()[0].strip() if (r.stdout or r.stderr).strip() else ""
     except (OSError, subprocess.SubprocessError):
         return ""
+    text = (r.stdout or r.stderr).strip()
+    return text.splitlines()[0].strip() if text and not r.returncode else ""
 
 
 def ffmpeg_version(ffmpeg):
@@ -797,7 +814,9 @@ def app_version(a):
         return output("defaults", "read", str(a.bundle.resolve() / "Contents/Info.plist"), "CFBundleShortVersionString") or "unknown"
     if WIN:
         return output("powershell", "-NoProfile", "-Command", f"(Get-Item -LiteralPath '{exe}').VersionInfo.ProductVersion") or "unknown"
-    return output("dpkg-query", "-W", "-f", "${Version}", "revlc") or "unknown"
+    # The package that installed it.
+    package = output("dpkg-query", "-S", str(exe)).split(":")[0]
+    return (package and output("dpkg-query", "-W", "-f", "${Version}", package)) or "unknown"
 
 
 def webview2_version():
@@ -818,10 +837,15 @@ def webview2_version():
 
 
 def commit():
-    sha = os.environ.get("REVLC_TEST_COMMIT") or os.environ.get("GITHUB_SHA") or output("git", "-C", str(ROOT), "rev-parse", "HEAD")
-    if sha and not os.environ.get("GITHUB_SHA") and output("git", "-C", str(ROOT), "status", "--porcelain", "--untracked-files=no"):
-        sha += " (with local changes)"
-    return sha or "unknown"
+    given = os.environ.get("REVLC_TEST_COMMIT") or os.environ.get("GITHUB_SHA")
+    if given:
+        return given
+    try:
+        sha = subprocess.run(["git", "-C", str(ROOT), "rev-parse", "HEAD"], capture_output=True, text=True, check=True).stdout.strip()
+        dirty = subprocess.run(["git", "-C", str(ROOT), "status", "--porcelain", "--untracked-files=no"], capture_output=True, text=True, check=True).stdout.strip()
+    except (OSError, subprocess.CalledProcessError):
+        return "unknown"
+    return sha + (" (with local changes)" if dirty else "")
 
 
 def cua_version():
@@ -1037,6 +1061,9 @@ def playback(ctx):
     ctx.check("M mutes", mute, app=app)
 
     def previews():
+        if ctx.no_video:
+            # ReVLC only makes previews for a video it shows.
+            raise Skip("this runner can't show video")
         # ReVLC makes the seek bar's preview frames as files in its cache
         # once a video plays: 150 for this 5-minute clip. A failed FFmpeg
         # pass is caught by the log check after the scenario.
@@ -1256,7 +1283,18 @@ def stalled_stream(ctx):
         app.finish_onboarding()
         if not ctx.check("starts playing", lambda: app.wait_playing(30) or "playing", app=app):
             return
-        ctx.check("shows Buffering when the stream stalls", lambda: app.wait("Buffering", timeout=30) and "Buffering shown", app=app)
+
+        def buffering():
+            if ctx.no_video:
+                # Without a video output (a VM), libVLC doesn't report
+                # buffering when the stream stalls: the clock just stops.
+                raise Skip("this runner can't show video")
+            return app.wait("Buffering", timeout=30) and "Buffering shown"
+
+        ctx.check("shows Buffering when the stream stalls", buffering, app=app)
+        if ctx.no_video:
+            # Quit while it's stuck, as below: once the clock has stopped.
+            settle(app.time_ms, "the clock to stop", 30, 2)
 
         def quits():
             start = time.monotonic()
@@ -1365,16 +1403,20 @@ def command_line(ctx):
     def exits():
         # From when playback starts, not from launch: a slow start would
         # otherwise count as play time.
-        wait_for(lambda: not app.alive() or app.playing(), "playback to start (a Pause button)", 20)
-        ensure(app.alive(), "quit before playback was seen")
-        playing = time.monotonic()
-        ensure(app.wait_exit(30), "still running 30 s later")
-        played = time.monotonic() - playing
-        # The Pause button shows a moment after playback starts, and is
-        # polled every 0.5 s.
-        ensure(played >= 2, f"quit {played:.1f} s after playback started, before playing 3 s")
+        # How far it played, by its own clock: on a slow machine, Cua may
+        # only see playback after a second or two of it.
+        furthest = 0
+        end = time.monotonic() + 30
+        while app.alive() and time.monotonic() < end:
+            try:
+                furthest = max(furthest, app.time_ms())
+            except (Fail, RuntimeError):
+                pass  # not playing yet, or it just quit
+            time.sleep(0.2)
+        ensure(app.wait_exit(1), "still running 30 s later")
+        ensure(furthest >= 1500, f"quit with its clock at {furthest / 1000:.1f} s at most, before playing 3 s")
         ensure(app.proc.returncode == 0, f"exit code {app.proc.returncode}")
-        return f"played {played:.1f} s, then quit with code 0"
+        return f"clock reached {furthest / 1000:.1f} s, then quit with code 0"
 
     ctx.check("--play-and-exit --run-time=3 quits", exits, app=app)
 

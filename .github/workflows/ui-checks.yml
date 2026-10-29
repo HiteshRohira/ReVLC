@@ -187,6 +187,8 @@ jobs:
           "$HOME/.local/bin/cua-driver" --version
       - name: Drive ReVLC with Cua
         env:
+          # The commit under test, for the report (not the PR's merge commit).
+          REVLC_TEST_COMMIT: ${{ github.event.pull_request.head.sha || github.sha }}
           # The suite runs this if Cua's daemon dies mid-run.
           CUA_DAEMON_RESTART: cua-driver serve --permission-mode unrestricted --dangerously-bypass-approvals --no-overlay >/dev/null 2>&1 &
         run: |
