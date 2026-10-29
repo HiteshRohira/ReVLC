@@ -67,7 +67,9 @@ fn every_released_history_library_and_bookmarks_file_loads() {
         assert!(history.damaged.is_none(), "{v}: history.json set aside as damaged");
         assert_eq!(history.list().len(), 2, "{v}: history entries");
         assert_eq!(history.resume_point(FILM), Some(1_234_000), "{v}: resume point");
-        assert_eq!(Library::load(&dir).folders, ["/Users/someone/Movies", "/Volumes/Media/TV"], "{v}: library folders");
+        // As paths: Windows writes them with its own separators.
+        let folders: Vec<PathBuf> = Library::load(&dir).folders.iter().map(PathBuf::from).collect();
+        assert_eq!(folders, [Path::new("/Users/someone/Movies"), Path::new("/Volumes/Media/TV")], "{v}: library folders");
         if data(v).join("bookmarks.json").exists() {
             let names: Vec<String> = Bookmarks::load(&dir).list(FILM).into_iter().map(|b| b.name).collect();
             assert_eq!(names, ["Opening", "Bookmark 2"], "{v}: bookmarks");

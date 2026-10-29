@@ -450,13 +450,17 @@ fn vlc_it_plays_the_common_codecs_and_sizes() {
         let (vlc, frames) = video_player();
         play(&vlc, &file);
         let (px, fw, fh) = frame(&frames, Duration::from_millis(300));
-        // The frame may carry the decoder's padding (the known bug above);
-        // the picture is its top-left w×h.
-        assert!(fw as u32 >= *w && (fw as u32) < w + 128 && fh as u32 >= *h && (fh as u32) < h + 128, "{name}: frame {fw}×{fh}");
+        // The frame may carry the decoder's padding (the known bug above):
+        // a strip below or to the right, or, for a picture scaled down to
+        // 1080p, a picture scaled from the padded size and so a little
+        // narrower (4K H.264 comes out 1904×1080). The picture is its
+        // top-left part.
+        let near = |got: i32, want: u32| got as u32 + 32 >= want && (got as u32) < want + 128;
+        assert!(near(fw, *w) && near(fh, *h), "{name}: frame {fw}×{fh}");
         if (fw as u32, fh as u32) != (*w, *h) {
             padded.push(format!("{name} {w}×{h} as {fw}×{fh}"));
         }
-        let (w, h) = (*w as i32, *h as i32);
+        let (w, h) = ((*w as i32).min(fw), (*h as i32).min(fh));
         let px: Vec<[u8; 3]> = (0..h).flat_map(|y| px[(y * fw) as usize..(y * fw + w) as usize].to_vec()).collect();
         let (left, right) = (mean(&region(&px, w, h, 0.1, 0.4)), mean(&region(&px, w, h, 0.6, 0.9)));
         assert!(left[0] > 180.0 && left[2] < 80.0, "{name}: left half {left:?}");
@@ -466,7 +470,7 @@ fn vlc_it_plays_the_common_codecs_and_sizes() {
     // Every FFmpeg the tests run with (Linux's, the macOS and Windows
     // sidecars) has these encoders; a missing one means the set shrank.
     assert!(missing.is_empty(), "this FFmpeg can't make: {missing:?}");
-    known_bug("the Linux video output keeps the decoder's padded size (a strip below or to the right of the picture)", move || {
+    known_bug("the memory video output (Linux's) keeps the decoder's padded size: a strip below or to the right, or a slightly squeezed picture when scaled", move || {
         assert!(padded.is_empty(), "padded: {padded:?}");
     });
 }
