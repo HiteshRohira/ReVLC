@@ -520,7 +520,11 @@ class App:
     # Player state
 
     def time_ms(self):
-        for e in self.read():
+        # Only the elements with a "/" (the time reads "0:12 / 9:56"): much
+        # quicker than the whole window on a slow VM.
+        quick = cua("get_window_state", {"pid": self.pid, "window_id": self.window_id, "tree_format": "elements",
+                                         "include_screenshot": False, "query": "/"}).get("elements", [])
+        for e in quick or self.read():
             t = parse_time(e.get("label"))
             if t is not None:
                 return t

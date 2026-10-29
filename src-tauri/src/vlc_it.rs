@@ -426,13 +426,23 @@ fn halves_in(name: &str, w: u32, h: u32, codec: &[&str]) -> PathBuf {
 #[test]
 #[ignore = "needs libVLC and FFmpeg; see the module docs"]
 fn vlc_it_plays_the_common_codecs_and_sizes() {
+    // AV1 with whichever encoder this FFmpeg has: the Windows one has no
+    // SVT-AV1.
+    let av1: (&str, &[&str]) = [
+        ("libsvtav1", &["-c:v", "libsvtav1", "-preset", "12"][..]),
+        ("libaom-av1", &["-c:v", "libaom-av1", "-cpu-used", "8", "-row-mt", "1"][..]),
+        ("librav1e", &["-c:v", "librav1e", "-speed", "10"][..]),
+    ]
+    .into_iter()
+    .find(|(encoder, _)| has_encoder(encoder))
+    .unwrap_or(("an AV1 encoder", &[]));
     // (file, width, height, encoder, its arguments)
     let cases: &[(&str, u32, u32, &str, &[&str])] = &[
         ("h264.mp4", 320, 180, "libx264", &["-c:v", "libx264", "-pix_fmt", "yuv420p"]),
         ("hevc.mp4", 320, 180, "libx265", &["-c:v", "libx265", "-pix_fmt", "yuv420p", "-tag:v", "hvc1"]),
         ("hevc-10bit.mkv", 320, 180, "libx265", &["-c:v", "libx265", "-pix_fmt", "yuv420p10le"]),
         ("vp9.webm", 320, 180, "libvpx-vp9", &["-c:v", "libvpx-vp9", "-deadline", "realtime", "-cpu-used", "8"]),
-        ("av1.mkv", 320, 180, "libsvtav1", &["-c:v", "libsvtav1", "-preset", "12"]),
+        ("av1.mkv", 320, 180, av1.0, av1.1),
         ("odd-size.mp4", 318, 178, "libx264", &["-c:v", "libx264", "-pix_fmt", "yuv420p"]),
         ("portrait.mp4", 180, 320, "libx264", &["-c:v", "libx264", "-pix_fmt", "yuv420p"]),
         ("4k.mp4", 3840, 2160, "libx264", &["-c:v", "libx264", "-pix_fmt", "yuv420p", "-preset", "ultrafast"]),
