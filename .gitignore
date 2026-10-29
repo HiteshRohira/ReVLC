@@ -14,3 +14,7 @@ __pycache__/
 # Playwright output (npx playwright test)
 /test-results/
 /playwright-report/
+
+# cargo-mutants and coverage output
+src-tauri/mutants.out*/
+src-tauri/lcov.info
