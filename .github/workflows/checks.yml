@@ -7,8 +7,9 @@ name: Checks
 
 on:
   pull_request:
-    # edited covers a retarget to another base, which changes the diff.
-    types: [opened, synchronize, reopened, edited]
+    # Not "edited": a description edit fires it too and would cancel and
+    # re-run everything. After retargeting a PR to another base, re-run.
+    types: [opened, synchronize, reopened]
   push:
     branches: [main]
   merge_group:

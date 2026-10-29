@@ -21,7 +21,7 @@ name: UI checks
 
 on:
   pull_request:
-    types: [opened, synchronize, reopened, edited]
+    types: [opened, synchronize, reopened]
   push:
     branches: [main]
   merge_group:
