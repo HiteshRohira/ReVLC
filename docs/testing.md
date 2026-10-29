@@ -69,5 +69,6 @@ can see it, before or with its fix.
   WebView2 errors and failed preview passes.
 - Known app bugs are expected failures (`known_bug` in Rust and Cua,
   `test.fail` in Playwright). A known bug that starts passing fails the run,
-  so its mark gets removed. A Cua or script error is reported as an error,
+  so its mark gets removed, unless the bug only shows on some machines (no
+  GPU decoding, timing). A Cua or script error is reported as an error,
   never as the app's failure or as the known bug.

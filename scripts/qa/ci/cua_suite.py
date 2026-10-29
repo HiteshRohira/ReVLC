@@ -676,7 +676,8 @@ class Context:
             return "no failed preview passes"
 
         self.check("app logs: no failed preview passes", no_failed_previews,
-                   known_bug="Windows: the keyframe pass uses D3D11VA without checking it works (PR #10)" if WIN else None)
+                   known_bug="Windows: the keyframe pass uses D3D11VA without checking it works (PR #10)" if WIN else None,
+                   intermittent=True)  # only on a PC without GPU decoding
 
     def hand_off(self, path):
         """Opens `path` while ReVLC runs, as the OS does: Launch Services
@@ -696,15 +697,17 @@ class Context:
             app.wait_window()
         return app
 
-    def check(self, name, fn, known_bug=None, app=None):
+    def check(self, name, fn, known_bug=None, app=None, intermittent=False):
         """Runs one check and records it. `known_bug` marks an open bug: a
-        failure is expected, and a pass is reported so the mark can go."""
+        failure is expected, and a pass is reported so the mark can go.
+        `intermittent` is for a bug that only shows on some machines or
+        timings (no GPU, a slow start): a pass is then just a pass."""
         start = time.monotonic()
         try:
             detail = fn()
             if detail is False or detail is None:
                 raise Fail("the check proved nothing (it returned no result)")
-            status = "xpass" if known_bug else "pass"
+            status = "xpass" if known_bug and not intermittent else "pass"
         except Skip as e:
             status, detail = "skip", str(e)
         except Fail as e:
@@ -1238,7 +1241,8 @@ def quick_relaunch(ctx):
                 raise Fail(f"relaunch {i + 1}: {'crashed' if not current.alive() else 'no playing window'}")
         return "three kills, three immediate relaunches, each playing"
 
-    ctx.check("starts again right after being killed", relaunch, known_bug=known, app=app)
+    # Timing: a fast PC may not show it.
+    ctx.check("starts again right after being killed", relaunch, known_bug=known, app=app, intermittent=True)
 
 
 @scenario
