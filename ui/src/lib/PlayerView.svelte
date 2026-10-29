@@ -63,8 +63,11 @@
 
 <svelte:window onpointerdown={onWindowPointer} />
 
+<!-- Text, not a label on the spinner: WebView2 leaves an empty element out
+     of UI Automation. Always there, so screen readers hear it change. -->
+<div class="status" role="status">{#if spinner}Buffering{/if}</div>
 {#if spinner}
-  <div class="loading" role="status" aria-label="Buffering"><div class="ring"></div></div>
+  <div class="loading" aria-hidden="true"><div class="ring"></div></div>
 {/if}
 
 <!-- Covers the video while the controls show, so it takes clicks on the video too. -->
@@ -293,6 +296,14 @@
     object-fit: contain;
     background: #000;
     pointer-events: none;
+  }
+  .status {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
   }
   .loading {
     position: absolute;
