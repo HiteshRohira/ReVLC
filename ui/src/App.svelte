@@ -154,6 +154,8 @@
     if (!theme.onboarded || ui.dialog) return;
     const target = e.target as HTMLElement | null;
     if (target?.closest("input, select, textarea")) return;
+    // The shortcut list scrolls with these, not the player.
+    if (target?.closest(".help") && SCROLL_KEYS.has(e.key)) return;
     const menuKey = MENU_KEYS[e.key];
     const primary = isMac ? e.metaKey : e.ctrlKey;
     if (player.inMenu && menuKey && !primary && !e.shiftKey) {
@@ -180,6 +182,16 @@
     }
     e.preventDefault();
     wake();
+  }
+
+  const SCROLL_KEYS = new Set(["ArrowUp", "ArrowDown", "PageUp", "PageDown", "Home", "End"]);
+
+  // The shortcut list takes focus while it's open, so it scrolls from the
+  // keyboard, and gives it back after.
+  function focusHelp(el: HTMLElement) {
+    const before = document.activeElement as HTMLElement | null;
+    el.focus();
+    return () => before?.focus();
   }
 
   const MENU_KEYS: Record<string, "up" | "down" | "left" | "right" | "activate"> = {
@@ -302,7 +314,7 @@
 
   {#if ui.helpOpen}
     <div class="backdrop" role="presentation" onpointerdown={() => (ui.helpOpen = false)}>
-      <div class="help" role="dialog" aria-label="Keyboard shortcuts">
+      <div class="help" role="dialog" aria-label="Keyboard shortcuts" tabindex="0" {@attach focusHelp}>
         <h2>Keyboard shortcuts</h2>
         <dl>
           {#each ACTIONS.filter((a) => bindings[a.id]) as a (a.id)}<dt>{formatBinding(bindings[a.id])}</dt><dd>{a.label}</dd>{/each}
@@ -437,6 +449,7 @@
     border: 1px solid var(--border);
     max-height: 80vh;
     overflow-y: auto;
+    outline: none;
   }
   .help h2 {
     margin: 0 0 14px;

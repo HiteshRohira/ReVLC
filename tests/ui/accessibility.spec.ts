@@ -11,9 +11,7 @@ const summary = (violations: { id: string; nodes: { target: unknown[] }[] }[]) =
 
 // Open problems, by screen: checked on their own as known bugs, so the
 // rest of the screen is still checked.
-const KNOWN: Record<string, { rule: string; bug: string }> = {
-  "shortcut list": { rule: "scrollable-region-focusable", bug: "found by this suite: the shortcut list scrolls, but not from the keyboard" },
-};
+const KNOWN: Record<string, { rule: string; bug: string }> = {};
 
 for (const [name, show] of Object.entries(SCREENS)) {
   test(`${name}: no accessibility problems`, async ({ page }) => {
