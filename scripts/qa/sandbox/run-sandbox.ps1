@@ -29,7 +29,8 @@
 #
 # Needs: Windows Sandbox (Windows Features > Windows Sandbox, then a reboot),
 # Python 3.13 with pip on this PC (to fetch Pillow once), Cua Driver
-# installed here (its binaries are copied), and no other Sandbox open.
+# installed here (its binaries are copied), no other Sandbox open, and for
+# -Previous, ffmpeg on PATH.
 param(
     [Parameter(Mandatory = $true)][string]$Installer,
     [string]$Only,
@@ -82,6 +83,14 @@ Copy-Item $Installer $share
 if ($Previous) {
     New-Item -ItemType Directory -Force "$share\previous" | Out-Null
     Copy-Item $Previous "$share\previous"
+    # The update check's clip, made here: releases before 0.2.10 ship no
+    # FFmpeg, and the new one isn't installed yet when it's needed.
+    $ffmpeg = (Get-Command ffmpeg -ErrorAction SilentlyContinue).Source
+    if (-not $ffmpeg) { throw "-Previous needs ffmpeg on this PC's PATH, to make the update check's clip" }
+    $ErrorActionPreference = "Continue"
+    & $ffmpeg -hide_banner -loglevel error -y -f lavfi -i "testsrc2=size=640x360:rate=24" -t 30 -c:v mpeg4 -q:v 3 "$share\previous\upgrade-clip.mp4"
+    $ErrorActionPreference = "Stop"
+    if (-not (Test-Path "$share\previous\upgrade-clip.mp4")) { throw "ffmpeg didn't make the update check's clip" }
 }
 Copy-Item $qa "$share\repo\scripts\qa" -Recurse
 # Generated test media, kept between runs: the suite only makes what's missing.

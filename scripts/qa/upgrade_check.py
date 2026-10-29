@@ -2,7 +2,7 @@
 """Checks that an update keeps the user's data: run `before` with the
 previous release installed, install the new one over it, then run `after`.
 
-    python3 -I scripts/qa/upgrade_check.py before --exe OLD_EXE --ffmpeg FFMPEG --work DIR
+    python3 -I scripts/qa/upgrade_check.py before --exe OLD_EXE (--ffmpeg FFMPEG | --clip VIDEO) --work DIR
     (install the new release over the old one)
     python3 -I scripts/qa/upgrade_check.py after --exe NEW_EXE --work DIR
 
@@ -10,12 +10,14 @@ previous release installed, install the new one over it, then run `after`.
 them, before the first launch), plays a short clip with the old app and
 records what it saved. `after` plays the clip with the new app and checks
 the settings and history survived, and that the history wasn't set aside
-as damaged. For a throwaway machine (Windows Sandbox, a VM): it uses the
+as damaged. Releases before 0.2.10 ship no FFmpeg, so for those pass a
+ready-made clip with --clip. For a throwaway machine (Windows Sandbox, a VM): it uses the
 real data dir, with no backup.
 """
 import argparse
 import json
 import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -57,6 +59,7 @@ def main():
     ap.add_argument("step", choices=("before", "after"))
     ap.add_argument("--exe", required=True)
     ap.add_argument("--ffmpeg")
+    ap.add_argument("--clip", type=Path, help="a short video to play, instead of making one with --ffmpeg")
     ap.add_argument("--work", required=True, type=Path)
     a = ap.parse_args()
     work = a.work.resolve()
@@ -65,12 +68,15 @@ def main():
     problems = []
 
     if a.step == "before":
-        if not a.ffmpeg:
-            sys.exit("before needs --ffmpeg")
         if data_dir().exists():
             sys.exit(f"{data_dir()} already exists; this is for a fresh machine")
-        subprocess.run([a.ffmpeg, "-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi", "-i", "testsrc2=size=640x360:rate=24",
-                        "-t", "30", "-c:v", "mpeg4", "-q:v", "3", str(clip)], check=True)
+        if a.clip:
+            shutil.copyfile(a.clip, clip)
+        elif a.ffmpeg:
+            subprocess.run([a.ffmpeg, "-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi", "-i", "testsrc2=size=640x360:rate=24",
+                            "-t", "30", "-c:v", "mpeg4", "-q:v", "3", str(clip)], check=True)
+        else:
+            sys.exit("before needs --clip or --ffmpeg")
         data_dir().mkdir(parents=True)
         (data_dir() / "settings.json").write_text(json.dumps(SETTINGS, indent=2), encoding="utf-8")
         code = play(a.exe, clip, work, "before")

@@ -73,7 +73,7 @@ if ($previous) {
     "Previous release: $($old.Entry.DisplayName) $($old.Entry.DisplayVersion), installer exit code $($p.ExitCode)" | Add-Content $result
     if (-not $old.Exe) { throw "No ReVLC executable after installing $previous" }
     $ErrorActionPreference = "Continue"
-    & $python -I "$Share\repo\scripts\qa\upgrade_check.py" before --exe $old.Exe --ffmpeg (Join-Path $old.Dir "ffmpeg.exe") --work "$out\upgrade" 2>&1 |
+    & $python -I "$Share\repo\scripts\qa\upgrade_check.py" before --exe $old.Exe --clip (Join-Path $Share "previous\upgrade-clip.mp4") --work "$out\upgrade" 2>&1 |
         ForEach-Object { "Upgrade: $_" } | Add-Content $result
     $upgradeStatus = $LASTEXITCODE
     $ErrorActionPreference = "Stop"

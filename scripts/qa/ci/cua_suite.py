@@ -2114,7 +2114,7 @@ def write_report(ctx, seconds):
              "| | Scenario | Check | Detail |", "|---|---|---|---|"]
     for r in rs:
         detail = (r["detail"] or "").splitlines()[0][:160].replace("|", "\\|")
-        if r["known_bug"]:
+        if r["known_bug"] and r["status"] in ("xfail", "xpass"):
             detail = f"{r['known_bug']}. {detail}"
         lines.append(f"| {icon[r['status']]} | {r['scenario']} | {r['check']} | {detail} |")
     md = "\n".join(lines) + "\n"
