@@ -164,7 +164,27 @@ impl Settings {
         std::fs::read(file(data_dir))
             .ok()
             .and_then(|b| serde_json::from_slice(&b).ok())
+            .map(Self::from_json)
             .unwrap_or_default()
+    }
+
+    /// A field that can't be read takes its default on its own, so one bad
+    /// value (a hand edit, a type a later version changed) doesn't reset the
+    /// rest, the analytics opt-out above all.
+    fn from_json(json: serde_json::Value) -> Self {
+        if let Ok(s) = serde_json::from_value(json.clone()) {
+            return s;
+        }
+        let serde_json::Value::Object(fields) = json else { return Self::default() };
+        let mut merged = serde_json::to_value(Self::default()).expect("settings serialize");
+        for (key, value) in fields {
+            let mut candidate = merged.clone();
+            candidate[&key] = value;
+            if serde_json::from_value::<Self>(candidate.clone()).is_ok() {
+                merged = candidate;
+            }
+        }
+        serde_json::from_value(merged).unwrap_or_default()
     }
 
     pub fn save(&self, data_dir: &Path) -> Result<(), String> {
