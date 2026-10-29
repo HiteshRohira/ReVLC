@@ -3,7 +3,19 @@
 # maintain, gone when it closes.
 #
 #   scripts\qa\sandbox\run-sandbox.ps1 -Installer ReVLC-0.2.11-alpha-x64-setup.exe
-#   scripts\qa\sandbox\run-sandbox.ps1 -Installer ... -Only playback,effects
+#   scripts\qa\sandbox\run-sandbox.ps1 -Installer ... -Only playback,effects   (or -Quick)
+#   scripts\qa\sandbox\run-sandbox.ps1 -Installer ... -NoGpu
+#   scripts\qa\sandbox\run-sandbox.ps1 -Installer ... -Previous ReVLC-0.2.10-x64-setup.exe
+#
+# -NoGpu turns off the Sandbox's virtual GPU: a PC with no GPU decoding,
+# where the Windows preview and video-output fallbacks get used. -Previous
+# first installs that older release, uses it, and installs -Installer over
+# it, checking settings and history survive the update
+# (scripts\qa\upgrade_check.py); then the suite runs as usual.
+#
+# -Root (default %USERPROFILE%\revlc-sandbox, or $env:REVLC_SANDBOX_ROOT)
+# holds the tools, the generated test media (kept between runs) and each
+# run's folder while it runs.
 #
 # The first run prepares the tools the Sandbox needs in -Root\tools: Python
 # (python.org's NuGet package, no installer) with Pillow, and a copy of this
@@ -21,7 +33,10 @@
 param(
     [Parameter(Mandatory = $true)][string]$Installer,
     [string]$Only,
-    [string]$Root = "G:\revlc-sandbox",
+    [switch]$Quick,
+    [switch]$NoGpu,
+    [string]$Previous,
+    [string]$Root = $(if ($env:REVLC_SANDBOX_ROOT) { $env:REVLC_SANDBOX_ROOT } else { Join-Path $env:USERPROFILE "revlc-sandbox" }),
     [int]$TimeoutMinutes = 150,
     [int]$StallMinutes = 15,
     [string]$PythonVersion = "3.13.15"
@@ -30,6 +45,7 @@ $ErrorActionPreference = "Stop"
 $qa = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 $Installer = (Resolve-Path $Installer).Path
 if ([IO.Path]::GetExtension($Installer) -ne ".exe") { throw "Pass the setup .exe" }
+if ($Previous) { $Previous = (Resolve-Path $Previous).Path }
 $sandboxExe = Join-Path $env:SystemRoot "System32\WindowsSandbox.exe"
 if (-not (Test-Path $sandboxExe)) { throw "Windows Sandbox isn't enabled: Windows Features > Windows Sandbox, then reboot" }
 function Get-SandboxProcesses { @(Get-Process -ErrorAction SilentlyContinue | Where-Object { $_.Name -like "WindowsSandbox*" }) }
@@ -63,16 +79,27 @@ $stamp = Get-Date -Format "yyyyMMdd-HHmmss"
 $share = Join-Path $Root "runs\$stamp"
 New-Item -ItemType Directory -Force "$share\repo\scripts" | Out-Null
 Copy-Item $Installer $share
+if ($Previous) {
+    New-Item -ItemType Directory -Force "$share\previous" | Out-Null
+    Copy-Item $Previous "$share\previous"
+}
 Copy-Item $qa "$share\repo\scripts\qa" -Recurse
-$logon = "powershell.exe -NoProfile -ExecutionPolicy Bypass -File C:\revlc\repo\scripts\qa\sandbox\in-sandbox.ps1"
+# Generated test media, kept between runs: the suite only makes what's missing.
+$media = Join-Path $Root "media-cache"
+New-Item -ItemType Directory -Force $media | Out-Null
+$commit = & git -C $qa rev-parse HEAD 2>$null
+$logon = "powershell.exe -NoProfile -ExecutionPolicy Bypass -File C:\revlc\repo\scripts\qa\sandbox\in-sandbox.ps1 -Commit $(if ($commit) { $commit } else { 'unknown' })"
 if ($Only) { $logon += " -Only $Only" }
+if ($Quick) { $logon += " -Quick" }
 $wsb = Join-Path $share "revlc.wsb"
 @"
 <Configuration>
   <MappedFolders>
     <MappedFolder><HostFolder>$tools</HostFolder><SandboxFolder>C:\revlc-tools</SandboxFolder><ReadOnly>true</ReadOnly></MappedFolder>
     <MappedFolder><HostFolder>$share</HostFolder><SandboxFolder>C:\revlc</SandboxFolder><ReadOnly>false</ReadOnly></MappedFolder>
+    <MappedFolder><HostFolder>$media</HostFolder><SandboxFolder>C:\revlc-media</SandboxFolder><ReadOnly>false</ReadOnly></MappedFolder>
   </MappedFolders>
+  <vGPU>$(if ($NoGpu) { "Disable" } else { "Enable" })</vGPU>
   <LogonCommand><Command>$logon</Command></LogonCommand>
   <Networking>Disable</Networking>
   <MemoryInMB>4096</MemoryInMB>
@@ -88,7 +115,7 @@ New-Item -ItemType Directory -Force $results | Out-Null
 Start-Transcript -Path (Join-Path $results "run-sandbox.log") | Out-Null
 $status = 1
 try {
-    Write-Host "Starting Windows Sandbox ($share)"
+    Write-Host "Starting Windows Sandbox ($share)$(if ($NoGpu) { ', GPU off' })$(if ($Previous) { ', update from ' + (Split-Path $Previous -Leaf) })"
     Start-Process $sandboxExe -ArgumentList "`"$wsb`""
     $done = Join-Path $share "out\done.txt"
     $heartbeat = Join-Path $share "out\heartbeat.txt"
@@ -96,6 +123,9 @@ try {
     $lastBeat = $null; $lastChange = Get-Date; $seen = $false
     while (-not (Test-Path $done)) {
         Start-Sleep 20
+        # The Sandbox shuts down seconds after writing done.txt: look again
+        # before taking a closed Sandbox for a run cut short.
+        if (Test-Path $done) { break }
         $running = [bool](Get-SandboxProcesses)
         if ($running) { $seen = $true }
         if ($seen -and -not $running) { throw "The Sandbox closed before the run finished" }

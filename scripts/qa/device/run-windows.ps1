@@ -5,6 +5,7 @@
 #   scripts\qa\device\run-windows.ps1 -Exe "$env:LOCALAPPDATA\ReVLC\revlc.exe"
 #   scripts\qa\device\run-windows.ps1 -Installer ReVLC_0.2.11_x64-setup.exe   # VMs only
 #   ... -Only playback,effects
+#   ... -Quick                       # a short set of scenarios
 #
 # -Exe tests an installed (or unpacked) ReVLC where it is. -Installer
 # installs into the run folder first; that rewrites ReVLC's registration
@@ -21,10 +22,24 @@
 param(
     [string]$Exe,
     [string]$Installer,
-    [string]$Only
+    [string]$Only,
+    [switch]$Quick,
+    # The installer -Exe was installed from, for its checksum in the report.
+    [string]$InstalledFrom,
+    [string]$MediaCache
 )
 $ErrorActionPreference = "Stop"
 $root = Resolve-Path (Join-Path $PSScriptRoot "..\..\..")
+
+# Windows PowerShell 5.1 turns anything a native program writes to stderr
+# into an error record, and with "Stop" that throws. Runs a native command
+# with its output dropped and returns its exit code instead.
+function Test-Native([scriptblock]$Command) {
+    $saved = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+    try { & $Command *> $null } finally { $ErrorActionPreference = $saved }
+    return $LASTEXITCODE
+}
 if (-not $Exe -and -not $Installer) { throw "Pass -Exe or -Installer" }
 
 $run = Join-Path $env:USERPROFILE ("revlc-qa\device-windows-" + (Get-Date -Format "yyyyMMdd-HHmmss"))
@@ -34,10 +49,8 @@ Write-Host "Run folder: $run"
 # Preconditions: each one is a reason a run would fail for the wrong reason.
 if (Get-Process revlc -ErrorAction SilentlyContinue) { throw "ReVLC is running. Quit it first: the test build would hand its files to it." }
 if (-not (Get-Command cua-driver -ErrorAction SilentlyContinue)) { throw "Cua Driver isn't installed: irm https://cua.ai/driver/install.ps1 | iex" }
-& cua-driver status *> $null
-if ($LASTEXITCODE -ne 0) { throw "Cua Driver's daemon isn't running: start it with 'cua-driver serve'" }
-& python -c "import PIL" 2>$null
-if ($LASTEXITCODE -ne 0) { throw "Python needs Pillow: python -m pip install pillow" }
+if ((Test-Native { cua-driver status }) -ne 0) { throw "Cua Driver's daemon isn't running: start it with 'cua-driver serve'" }
+if ((Test-Native { python -c "import PIL" }) -ne 0) { throw "Python needs Pillow: python -m pip install pillow" }
 
 if ($Installer) {
     $dest = Join-Path $run "app"
@@ -67,6 +80,10 @@ try {
     [void][RevlcQa.ScreenReader]::SystemParametersInfo($SPI_SETSCREENREADER, 1, [System.IntPtr]::Zero, $SPIF_SENDCHANGE)
     $suiteArgs = @("$root\scripts\qa\ci\cua_suite.py", "--out", $run, "--ffmpeg", $ffmpeg)
     if ($Only) { $suiteArgs += @("--only", $Only) }
+    if ($Quick) { $suiteArgs += "--quick" }
+    if ($Installer) { $InstalledFrom = $Installer }
+    if ($InstalledFrom) { $suiteArgs += @("--installer", (Resolve-Path $InstalledFrom).Path) }
+    if ($MediaCache) { $suiteArgs += @("--media-cache", $MediaCache) }
     $suiteArgs += @("--", $Exe)
     # Windows PowerShell 5.1 turns anything a native program writes to stderr
     # into an error record; with "Stop" that would kill the suite mid-run.
@@ -82,7 +99,8 @@ finally {
     if ((Test-Path (Join-Path $run "backup\manifest.json")) -and -not $restored) {
         Get-Process revlc -ErrorAction SilentlyContinue | Stop-Process -Force
         Start-Sleep -Seconds 2
-        & python -I "$root\scripts\qa\appdata.py" restore $run
+        $ErrorActionPreference = "Continue"
+        & python -I "$root\scripts\qa\appdata.py" restore $run 2>&1 | ForEach-Object { "$_" }
     }
 }
 Write-Host ""

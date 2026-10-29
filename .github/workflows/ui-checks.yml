@@ -1,44 +1,89 @@
-# Two jobs on every app PR. browser: the UI in Chromium and WebKit with the
-# backend mocked (tests/ui). linux: the built Linux package driven through
-# Cua (scripts/qa/ci/cua_suite.py), the same suite that runs on the Mac, the PC and the VMs
-# before a release (scripts/qa/device/). macOS and Windows run there rather
-# than here: hosted Macs have no GPU, and WebView2 hides the page from Cua
-# unless a screen reader seems to be running, which the device runs handle
-# without changing the app.
+# On every app change, on main, in the merge queue and before a release.
+# browser: the UI with the backend mocked (tests/ui), in Chromium and WebKit
+# on Linux, and on a real Mac (WebKit) and Windows (Chromium) for their
+# fonts and focus behaviour, with axe accessibility checks. screenshots: the
+# main screens against saved pictures, in Playwright's Linux container so
+# the fonts never change under them. linux: the built Linux package driven through
+# Cua (scripts/qa/ci/cua_suite.py), the same suite that runs on the Mac, the
+# PC, Tart and Windows Sandbox (see docs/testing.md). `required` is the one
+# gate; docs/site-only PRs pass it without running the rest.
 #
-# The job writes its results to the run summary and uploads screenshots,
-# the accessibility tree of every failed check, logs and a screen recording.
+# The linux job writes its results to the run summary and uploads
+# screenshots, the accessibility tree of every failed check, logs and a
+# screen recording.
 #
-# Analytics stay off: CI builds have no PostHog key, and the suite seeds
-# settings with analytics disabled (scripts/qa/appdata.py) before every
-# launch. Never set REVLC_ANALYTICS_SEND here.
+# Analytics can't be sent from here: the test package is built with an
+# empty PostHog key (so it has nothing to send with), PostHog's hosts are
+# blocked, and the suite seeds settings with analytics off
+# (scripts/qa/appdata.py) before every launch. Never set
+# REVLC_ANALYTICS_SEND here.
 name: UI checks
 
 on:
   pull_request:
-    types: [opened, synchronize, reopened]
-    paths-ignore: ['README.md', 'docs/**', 'site/**', '.github/ISSUE_TEMPLATE/**']
+    types: [opened, synchronize, reopened, edited]
+  push:
+    branches: [main]
+  merge_group:
+  workflow_call:
   workflow_dispatch:
+    inputs:
+      update-screenshots:
+        description: Save new screenshots (download them from the run's artifacts and commit them)
+        type: boolean
+        default: false
 
 permissions:
   contents: read
 
 concurrency:
   group: ui-checks-${{ github.event.pull_request.number || github.run_id }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
-  # Pinned so a Cua release can't change the results under us.
-  CUA_DRIVER_RS_VERSION: '0.37.0'
   CUA_TELEMETRY: '0'
   DO_NOT_TRACK: '1'
 
 jobs:
-  # The UI in Chromium and WebKit with the backend mocked (tests/ui):
-  # every layout, dialog, shortcut and state the Rust side can put it in.
+  scope:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      run_app_checks: ${{ steps.scope.outputs.run_app_checks }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          fetch-depth: 0
+      - id: scope
+        uses: ./.github/actions/scope
+
+  # The UI with the backend mocked (tests/ui): every layout, dialog,
+  # shortcut and state the Rust side can put it in. Linux runs both
+  # projects (and the screenshot comparisons, whose baselines are Linux
+  # renders); the Mac and Windows runners run their own project with their
+  # own fonts.
   browser:
-    runs-on: ubuntu-24.04
+    needs: scope
+    if: needs.scope.outputs.run_app_checks == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            browsers: chromium webkit
+            project: ''
+          - os: macos-15
+            browsers: webkit
+            project: --project=macos
+          - os: windows-latest
+            browsers: chromium
+            project: --project=windows
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 20
+    defaults:
+      run:
+        shell: bash
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -46,18 +91,47 @@ jobs:
           node-version: 22
           cache: npm
       - run: npm ci
-      - run: npx playwright install --with-deps chromium webkit
-      - run: npm run test:ui
+      - run: npx playwright install --with-deps ${{ matrix.browsers }}
+      - run: npm run test:ui -- ${{ matrix.project }}
       - uses: actions/upload-artifact@v4
         if: failure()
         with:
-          name: browser-tests-report
+          name: browser-tests-report-${{ matrix.os }}
           path: |
             playwright-report/
             test-results/
           if-no-files-found: ignore
 
+  screenshots:
+    needs: scope
+    if: needs.scope.outputs.run_app_checks == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    # Keep the tag at the @playwright/test version in package-lock.json: the
+    # container has that version's browsers and fonts.
+    container: mcr.microsoft.com/playwright:v1.64.1-noble
+    steps:
+      - uses: actions/checkout@v4
+      - run: npm ci
+      - name: Compare the screens with their saved pictures
+        env:
+          REVLC_SCREENSHOTS: '1'
+          UPDATE: ${{ inputs.update-screenshots && '--update-snapshots' || '' }}
+        run: npx playwright test tests/ui/screenshots.spec.ts $UPDATE
+      # New or changed pictures (a missing one is saved here too), and the
+      # differences when a comparison fails.
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: screenshots
+          path: |
+            tests/ui/screenshots.spec.ts-snapshots/
+            test-results/
+          if-no-files-found: ignore
+
   linux:
+    needs: scope
+    if: needs.scope.outputs.run_app_checks == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
@@ -83,12 +157,31 @@ jobs:
             libvlc5 libvlccore9 vlc-plugin-base vlc-plugin-video-output \
             xvfb dbus-x11 at-spi2-core openbox xcompmgr ffmpeg python3-pil
       - run: npm ci
+      - name: Block analytics
+        run: |
+          # Belt and braces: the package below has no key to send with.
+          echo '0.0.0.0 eu.i.posthog.com eu.posthog.com us.i.posthog.com us.posthog.com' | sudo tee -a /etc/hosts
       - name: Build and install the .deb
+        env:
+          # Empty: this build has no analytics key, so it can't send.
+          REVLC_POSTHOG_KEY: ''
         run: |
           bash scripts/build-linux.sh
           sudo apt-get install -y ./src-tauri/target/release/bundle/deb/*.deb
+          # PostHog project keys start with phc_; this build must have none.
+          if grep -qa 'phc_' "$(command -v revlc)"; then echo "The test build has an analytics key" >&2; exit 1; fi
+      # Generated test media; the suite keys its own folder by its media
+      # code and the FFmpeg version, so a stale cache is never used.
+      - uses: actions/cache@v4
+        with:
+          path: ~/.cache/revlc-qa-media
+          key: cua-media-${{ runner.os }}-${{ hashFiles('scripts/qa/ci/cua_suite.py') }}
+          restore-keys: cua-media-${{ runner.os }}-
       - name: Install Cua Driver
         run: |
+          # Pinned (scripts/qa/cua-version.txt, the same everywhere), so a
+          # Cua release can't change the results under us.
+          export CUA_DRIVER_RS_VERSION="$(cat scripts/qa/cua-version.txt)"
           /bin/bash -c "$(curl -fsSL https://cua.ai/driver/install.sh)" -- --no-modify-path
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
           "$HOME/.local/bin/cua-driver" --version
@@ -128,3 +221,25 @@ jobs:
             ${{ runner.temp }}/run/screenshots/
             ${{ runner.temp }}/run/logs/
           if-no-files-found: warn
+
+  required:
+    name: required
+    if: always()
+    needs: [scope, browser, screenshots, linux]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Require every job when app checks are in scope
+        env:
+          SCOPE_RESULT: ${{ needs.scope.result }}
+          RUN_APP_CHECKS: ${{ needs.scope.outputs.run_app_checks }}
+          BROWSER_RESULT: ${{ needs.browser.result }}
+          SCREENSHOTS_RESULT: ${{ needs.screenshots.result }}
+          LINUX_RESULT: ${{ needs.linux.result }}
+        run: |
+          [[ "$SCOPE_RESULT" == "success" ]]
+          if [[ "$RUN_APP_CHECKS" == "true" ]]; then
+            [[ "$BROWSER_RESULT" == "success" && "$SCREENSHOTS_RESULT" == "success" && "$LINUX_RESULT" == "success" ]]
+          else
+            [[ "$RUN_APP_CHECKS" == "false" && "$BROWSER_RESULT" == "skipped" && "$SCREENSHOTS_RESULT" == "skipped" && "$LINUX_RESULT" == "skipped" ]]
+          fi

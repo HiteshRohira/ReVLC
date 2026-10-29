@@ -4,7 +4,7 @@
 # example before a release:
 #
 #   scripts/qa/device/run-mac.sh --dmg ReVLC_0.2.11_aarch64.dmg
-#   scripts/qa/device/run-mac.sh --app path/to/ReVLC.app [--only playback,effects]
+#   scripts/qa/device/run-mac.sh --app path/to/ReVLC.app [--only playback,effects | --quick]
 #
 # The app is copied into the run folder, so an installed ReVLC isn't touched.
 # Your ReVLC data is backed up before the first launch and restored at the
@@ -17,12 +17,13 @@
 # screenshots, the accessibility tree of every failed check, and app logs.
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/../../.." && pwd)"
-app="" dmg="" only=""
+app="" dmg="" only="" quick=""
 while (($#)); do
   case "$1" in
     --app) app="$2"; shift 2 ;;
     --dmg) dmg="$2"; shift 2 ;;
     --only) only="$2"; shift 2 ;;
+    --quick) quick=1; shift ;;
     *) echo "Unknown option $1" >&2; exit 2 ;;
   esac
 done
@@ -78,6 +79,8 @@ trap cleanup EXIT
 
 args=(--out "$run" --ffmpeg "$run/ReVLC.app/Contents/MacOS/ffmpeg" --bundle "$run/ReVLC.app")
 [[ -n "$only" ]] && args+=(--only "$only")
+[[ -n "$quick" ]] && args+=(--quick)
+[[ -n "$dmg" ]] && args+=(--installer "$dmg")
 status=0
 python3 "$ROOT/scripts/qa/ci/cua_suite.py" "${args[@]}" -- "$run/ReVLC.app/Contents/MacOS/revlc" | tee "$run/suite.log" || status=$?
 echo

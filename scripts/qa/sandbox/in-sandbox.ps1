@@ -11,7 +11,10 @@
 param(
     [string]$Share = "C:\revlc",
     [string]$Tools = "C:\revlc-tools",
-    [string]$Only
+    [string]$Media = "C:\revlc-media",
+    [string]$Commit = "unknown",
+    [string]$Only,
+    [switch]$Quick
 )
 $ErrorActionPreference = "Stop"
 $out = Join-Path $Share "out"
@@ -50,16 +53,48 @@ $present = Get-ChildItem $wvDir -Directory -ErrorAction SilentlyContinue | Where
 if (-not $present) { throw "No WebView2 runtime in $wvDir" }
 $env:WEBVIEW2_BROWSER_EXECUTABLE_FOLDER = Join-Path $wvDir $present
 "WebView2: $env:WEBVIEW2_BROWSER_EXECUTABLE_FOLDER" | Add-Content $result
+"Installer: $(Split-Path $installer -Leaf) sha256 $((Get-FileHash $installer -Algorithm SHA256).Hash.ToLower())" | Add-Content $result
+$python = Join-Path $Tools "python\python.exe"
+function Find-Exe {
+    $entry = Get-ItemProperty "HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\*", "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*" -ErrorAction SilentlyContinue |
+        Where-Object { $_.DisplayName -like "ReVLC*" }
+    if (@($entry).Count -gt 1) { throw "$(@($entry).Count) ReVLC uninstall entries: $(@($entry).DisplayVersion -join ', ')" }
+    $dir = if ($entry -and $entry.InstallLocation) { $entry.InstallLocation.Trim('"') } else { Join-Path $env:LOCALAPPDATA "ReVLC" }
+    $exe = Get-ChildItem $dir -Filter *.exe -ErrorAction SilentlyContinue | Where-Object { $_.Name -notmatch "^(uninstall|ffmpeg)" } | Select-Object -First 1 -ExpandProperty FullName
+    return @{ Entry = $entry; Exe = $exe; Dir = $dir }
+}
+
+# The update check: the previous release, used, then this one over it.
+$upgradeStatus = 0
+$previous = Get-ChildItem (Join-Path $Share "previous") -Filter *.exe -ErrorAction SilentlyContinue | Select-Object -First 1 -ExpandProperty FullName
+if ($previous) {
+    $p = Start-Process $previous -ArgumentList "/S" -Wait -PassThru
+    $old = Find-Exe
+    "Previous release: $($old.Entry.DisplayName) $($old.Entry.DisplayVersion), installer exit code $($p.ExitCode)" | Add-Content $result
+    if (-not $old.Exe) { throw "No ReVLC executable after installing $previous" }
+    $ErrorActionPreference = "Continue"
+    & $python -I "$Share\repo\scripts\qa\upgrade_check.py" before --exe $old.Exe --ffmpeg (Join-Path $old.Dir "ffmpeg.exe") --work "$out\upgrade" 2>&1 |
+        ForEach-Object { "Upgrade: $_" } | Add-Content $result
+    $upgradeStatus = $LASTEXITCODE
+    $ErrorActionPreference = "Stop"
+}
+
 $t = Get-Date
 $p = Start-Process $installer -ArgumentList "/S" -Wait -PassThru
 "Installer exit code: $($p.ExitCode) after $([int]((Get-Date) - $t).TotalSeconds) s" | Add-Content $result
-$entry = Get-ItemProperty "HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\*", "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*" -ErrorAction SilentlyContinue |
-    Where-Object { $_.DisplayName -like "ReVLC*" } | Select-Object -First 1
-$dir = if ($entry -and $entry.InstallLocation) { $entry.InstallLocation.Trim('"') } else { Join-Path $env:LOCALAPPDATA "ReVLC" }
-$exe = Get-ChildItem $dir -Filter *.exe -ErrorAction SilentlyContinue | Where-Object { $_.Name -notmatch "^(uninstall|ffmpeg)" } | Select-Object -First 1 -ExpandProperty FullName
+$installed = Find-Exe
+$entry, $exe = $installed.Entry, $installed.Exe
 "Uninstall entry: $($entry.DisplayName) $($entry.DisplayVersion)" | Add-Content $result
 "Installed exe: $exe" | Add-Content $result
-if (-not $exe) { throw "No ReVLC executable in $dir after installing" }
+if (-not $exe) { throw "No ReVLC executable in $($installed.Dir) after installing" }
+if ($previous -and $upgradeStatus -eq 0) {
+    $ErrorActionPreference = "Continue"
+    & $python -I "$Share\repo\scripts\qa\upgrade_check.py" after --exe $exe --work "$out\upgrade" 2>&1 |
+        ForEach-Object { "Upgrade: $_" } | Add-Content $result
+    $upgradeStatus = $LASTEXITCODE
+    $ErrorActionPreference = "Stop"
+}
+if ($previous) { "Upgrade check exit code: $upgradeStatus" | Add-Content $result }
 
 # The suite log grows as checks run; the host watches its length.
 $heartbeat = Start-Job -ArgumentList $env:USERPROFILE, (Join-Path $out "heartbeat.txt") -ScriptBlock {
@@ -71,8 +106,11 @@ $heartbeat = Start-Job -ArgumentList $env:USERPROFILE, (Join-Path $out "heartbea
     }
 }
 
-$runArgs = @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "$Share\repo\scripts\qa\device\run-windows.ps1", "-Exe", $exe)
+$env:REVLC_TEST_COMMIT = $Commit
+$runArgs = @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "$Share\repo\scripts\qa\device\run-windows.ps1", "-Exe", $exe,
+             "-InstalledFrom", $installer, "-MediaCache", $Media)
 if ($Only) { $runArgs += @("-Only", $Only) }
+if ($Quick) { $runArgs += "-Quick" }
 $ErrorActionPreference = "Continue"
 & powershell @runArgs 2>&1 | ForEach-Object { "$_" } | Set-Content (Join-Path $out "run-windows.log") -Encoding UTF8
 $status = $LASTEXITCODE
@@ -81,9 +119,10 @@ Stop-Job $heartbeat; Remove-Job $heartbeat -Force
 
 $run = Get-ChildItem (Join-Path $env:USERPROFILE "revlc-qa") -Directory -Filter "device-windows-*" | Sort-Object Name | Select-Object -Last 1
 if ($run) {
-    # The suite's media is regenerated each run; leave it behind.
-    robocopy $run.FullName (Join-Path $out $run.Name) /E /XD media /NFL /NDL /NJH /NJS /NP | Out-Null
+    robocopy $run.FullName (Join-Path $out $run.Name) /E /NFL /NDL /NJH /NJS /NP | Out-Null
 }
+# A failed update check fails the run too.
+if ($status -eq 0 -and $upgradeStatus -ne 0) { $status = 1 }
 "Suite exit code: $status" | Add-Content $result
 "Run folder: $(if ($run) { $run.Name })" | Add-Content $result
 "ok" | Set-Content $done

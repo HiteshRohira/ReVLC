@@ -2,7 +2,8 @@
 """Real-app checks for ReVLC, driven through a running Cua Driver daemon.
 
     python3 scripts/qa/ci/cua_suite.py --out RUN_DIR --ffmpeg FFMPEG [--no-video]
-        [--only NAME,...] [--bundle ReVLC.app] -- APP [ARGS...]
+        [--only NAME,... | --quick] [--bundle ReVLC.app] [--installer FILE]
+        [--media-cache DIR] -- APP [ARGS...]
 
 Each scenario launches the built app on generated media, drives its real
 window through Cua (the accessibility tree, clicks and key presses) and checks
@@ -12,14 +13,26 @@ and restored at the end. Every check runs even after another fails.
 
 --no-video skips the picture checks, for runners that can't show video
 (hosted macOS has no GPU, so libVLC can't create its OpenGL view).
+--quick runs a short set of scenarios (QUICK), for a quick look on a device.
+--installer names the installer under test, so the report records its
+SHA-256. Generated media is kept in --media-cache (by default a cache folder
+keyed by this script's media code and the FFmpeg version) and reused.
 
 Writes RUN_DIR/report.json, RUN_DIR/report.md (also appended to the GitHub
-step summary), screenshots and app logs. Exits 1 if any check failed.
-Checks marked as known bugs don't fail the run; if one starts passing, the
-report says so, so the mark can be removed.
+step summary), screenshots and app logs. The report starts with what was
+tested: the commit, the installer's checksum and the app, libVLC, FFmpeg,
+Cua, WebView2 and OS versions.
+
+Exits 1 if any check failed, errored (a Cua or script problem, not the
+app's) or is a known bug that now passes (so its mark gets removed). Known
+bugs that still fail don't fail the run. Uses the Cua Driver version in
+scripts/qa/cua-version.txt, the same everywhere; --any-cua allows another.
 """
 import argparse
+import hashlib
+import inspect
 import json
+import platform
 import os
 import re
 import shutil
@@ -50,6 +63,16 @@ class Skip(Exception):
 
 
 DAEMON_GONE = ("daemon is not running", "closed connection without response")
+
+# App log lines that mean something went wrong, whatever the scenario.
+# libVLC logs many harmless "error" lines (a corrupt file, a stream format
+# change), so those aren't on this list.
+LOG_PROBLEMS = (
+    ("a panic", r"panicked at|thread '[^']*' panicked"),
+    ("a crash", r"fatal runtime error|Segmentation fault|EXC_BAD_ACCESS|stack overflow|double free"),
+    ("a WebView2 error", r"\b0x8007[0-9A-Fa-f]{4}\b"),
+    ("no video output", r"video output creation failed"),
+)
 
 
 def long_paths_enabled():
@@ -110,18 +133,41 @@ def ensure(ok, message):
 
 
 def wait_for(fn, what, timeout=10.0, interval=0.5):
-    """Polls fn until it returns something truthy; Fail if it never does."""
+    """Polls fn until it returns something truthy; Fail if it never does.
+    A Cua error while polling (a stale element, say) is retried; if the
+    last try ended in one, the timeout is a Cua error, not an app failure."""
     end = time.monotonic() + timeout
     while True:
+        error = None
         try:
             value = fn()
-        except (Fail, RuntimeError):
+        except Fail:
             value = None
+        except RuntimeError as e:
+            value, error = None, e
         if value:
             return value
         if time.monotonic() > end:
+            if error:
+                raise RuntimeError(f"timed out after {timeout:g} s waiting for {what}; Cua said: {error}")
             raise Fail(f"timed out after {timeout:g} s waiting for {what}")
         time.sleep(interval)
+
+
+def settle(fn, what, timeout=5.0, interval=0.3):
+    """Waits until fn returns the same thing twice in a row: for a window
+    that's still resizing, or a value still changing."""
+    last = object()
+
+    def same():
+        nonlocal last
+        value = fn()
+        done = value == last
+        last = value
+        return done and (value or True)
+
+    wait_for(same, what, timeout, interval)
+    return last
 
 
 def centre(path):
@@ -173,6 +219,8 @@ class App:
         self.frame = None
         self.snapshot = None
         self.elements = []
+        self.killed = False  # by the suite, so its exit code doesn't count
+        self.known_crash = None  # a known bug's crash: its log isn't checked
 
     # Windows and state
 
@@ -518,19 +566,22 @@ class App:
             self.press("Close")
         ensure(self.wait_exit(timeout), f"app didn't quit within {timeout} s")
 
-    def kill(self):
+    def kill(self, wait_helpers=True):
         if self.alive():
+            self.killed = True
             if WIN:
                 # The whole tree: WebView2's helpers otherwise keep the
                 # profile's files locked.
                 subprocess.run(["taskkill", "/F", "/T", "/PID", str(self.pid)], capture_output=True)
                 # taskkill returns before they've gone, and the next launch
-                # can't open a profile they still hold (a known app bug, but
-                # one that shouldn't take unrelated checks down with it).
-                try:
-                    wait_for(lambda: revlc_webview_count() == 0, "ReVLC's WebView2 processes to exit", 20)
-                except Fail:
-                    pass
+                # can't open a profile they still hold. The relaunch scenario
+                # tests exactly that; elsewhere it shouldn't take unrelated
+                # checks down with it.
+                if wait_helpers:
+                    try:
+                        wait_for(lambda: revlc_webview_count() == 0, "ReVLC's WebView2 processes to exit", 20)
+                    except Fail:
+                        pass
             elif self.proc:
                 self.proc.kill()
             else:
@@ -540,7 +591,8 @@ class App:
                     pass  # it quit between the check and the kill
         if self.proc:
             self.proc.wait()
-        self.log.close()
+        if not self.log.closed:
+            self.log.close()
 
 
 class Context:
@@ -551,12 +603,13 @@ class Context:
         self.ffmpeg = a.ffmpeg
         self.ci = bool(os.environ.get("CI"))
         self.no_video = a.no_video
-        self.media = self.out / "media"
+        self.media = a.media_cache or default_media_cache(a.ffmpeg)
         self.results = []
         self.scenario = None
         self.apps = []
-        for d in ("screenshots", "logs", "media"):
+        for d in ("screenshots", "logs"):
             (self.out / d).mkdir(parents=True, exist_ok=True)
+        self.media.mkdir(parents=True, exist_ok=True)
 
     def appdata(self, cmd):
         for attempt in range(10):
@@ -580,6 +633,50 @@ class Context:
             return Path(os.environ["APPDATA"]) / "app.revlc"
         base = Path(os.environ.get("XDG_DATA_HOME") or Path.home() / ".local/share")
         return base / "app.revlc"
+
+    def cache_dir(self):
+        """Tauri's app cache dir, where seek previews are kept."""
+        if MAC:
+            return Path.home() / "Library/Caches/app.revlc"
+        if WIN:
+            return Path(os.environ["LOCALAPPDATA"]) / "app.revlc"
+        return Path(os.environ.get("XDG_CACHE_HOME") or Path.home() / ".cache") / "app.revlc"
+
+    def check_logs(self, apps):
+        """After a scenario: what its apps logged and how they ended. A
+        panic, a crash, a WebView2 error or a failed preview pass fails the
+        scenario even when every check in it passed."""
+        problems, previews = [], []
+        for app in apps:
+            if app.known_crash:
+                continue
+            if not app.log.closed:
+                app.log.flush()
+            path = self.out / "logs" / f"{app.name}.log"
+            text = path.read_text(encoding="utf-8", errors="replace") if path.exists() else ""
+            for line in text.splitlines():
+                if "keyframe pass failed" in line:
+                    previews.append(f"{app.name}: {line.strip()}")
+                    continue
+                for what, pattern in LOG_PROBLEMS:
+                    if (what != "no video output" or not self.no_video) and re.search(pattern, line):
+                        problems.append(f"{app.name}: {what}: {line.strip()[:200]}")
+            code = app.proc.returncode if app.proc else None
+            if code not in (None, 0) and not app.killed:
+                problems.append(f"{app.name}: exited with code {code}")
+
+        def clean():
+            ensure(not problems, f"{len(problems)} found; first: {problems[0] if problems else ''}")
+            return f"{len(apps)} app log(s) clean"
+
+        self.check("app logs: no panics, crashes or WebView2 errors", clean)
+
+        def no_failed_previews():
+            ensure(not previews, f"{len(previews)} failed; first: {previews[0] if previews else ''}")
+            return "no failed preview passes"
+
+        self.check("app logs: no failed preview passes", no_failed_previews,
+                   known_bug="Windows: the keyframe pass uses D3D11VA without checking it works (PR #10)" if WIN else None)
 
     def hand_off(self, path):
         """Opens `path` while ReVLC runs, as the OS does: Launch Services
@@ -605,14 +702,18 @@ class Context:
         start = time.monotonic()
         try:
             detail = fn()
+            if detail is False or detail is None:
+                raise Fail("the check proved nothing (it returned no result)")
             status = "xpass" if known_bug else "pass"
         except Skip as e:
             status, detail = "skip", str(e)
         except Fail as e:
             status, detail = ("xfail" if known_bug else "fail"), str(e)
-        except Exception as e:  # a broken check is a failure, with its trace
-            status, detail = ("xfail" if known_bug else "fail"), f"{type(e).__name__}: {e}\n{traceback.format_exc(limit=3)}"
-        if status in ("fail", "xfail") and app and app.window_id:
+        except Exception as e:
+            # A Cua or script error isn't the app's failure, nor the known
+            # bug: report it on its own, with its trace.
+            status, detail = "error", f"{type(e).__name__}: {e}\n{traceback.format_exc(limit=3)}"
+        if status in ("fail", "xfail", "error") and app and app.window_id:
             try:
                 base = f"{self.scenario}--{re.sub(r'[^A-Za-z0-9]+', '-', name)}--failed"
                 app.shot(base)
@@ -635,6 +736,110 @@ class Context:
         return status in ("pass", "xpass")
 
 
+# What was tested
+
+def output(*cmd):
+    """A command's first line of output, or "" if it can't run."""
+    try:
+        r = subprocess.run(list(cmd), capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=30)
+        return (r.stdout or r.stderr).strip().splitlines()[0].strip() if (r.stdout or r.stderr).strip() else ""
+    except (OSError, subprocess.SubprocessError):
+        return ""
+
+
+def ffmpeg_version(ffmpeg):
+    return output(ffmpeg, "-hide_banner", "-version").removeprefix("ffmpeg version ").split(" Copyright")[0]
+
+
+def default_media_cache(ffmpeg):
+    """Where generated media is kept between runs: a new folder whenever the
+    media code below or the FFmpeg version changes."""
+    key = hashlib.sha256((inspect.getsource(make_media) + ffmpeg_version(ffmpeg)).encode()).hexdigest()[:12]
+    if MAC:
+        base = Path.home() / "Library/Caches"
+    elif WIN:
+        base = Path(os.environ.get("LOCALAPPDATA") or Path.home())
+    else:
+        base = Path(os.environ.get("XDG_CACHE_HOME") or Path.home() / ".cache")
+    return base / "revlc-qa-media" / key
+
+
+def sha256(path):
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def libvlc_version(app):
+    """The libVLC the app under test loads: the one it ships (macOS,
+    Windows) or the system's (Linux)."""
+    exe = Path(shutil.which(app) or app).resolve()
+    if LINUX:
+        return output("dpkg-query", "-W", "-f", "${Version}", "libvlc5") or "unknown"
+    names = ("libvlccore.dll",) if WIN else ("libvlccore.dylib",)
+    for root in (exe.parent, exe.parent.parent / "Resources"):
+        for lib in (p for n in names for p in root.rglob(n)) if root.exists() else ():
+            if WIN:
+                return output("powershell", "-NoProfile", "-Command", f"(Get-Item -LiteralPath '{lib}').VersionInfo.ProductVersion") or "unknown"
+            m = re.search(rb"\b(3\.0\.\d+(?:\.\d+)?) [A-Z][a-z]+", lib.read_bytes())
+            return m.group(1).decode() if m else "unknown"
+    return "unknown"
+
+
+def app_version(a):
+    exe = Path(shutil.which(a.app[0]) or a.app[0]).resolve()
+    if MAC and a.bundle:
+        return output("defaults", "read", str(a.bundle.resolve() / "Contents/Info.plist"), "CFBundleShortVersionString") or "unknown"
+    if WIN:
+        return output("powershell", "-NoProfile", "-Command", f"(Get-Item -LiteralPath '{exe}').VersionInfo.ProductVersion") or "unknown"
+    return output("dpkg-query", "-W", "-f", "${Version}", "revlc") or "unknown"
+
+
+def webview2_version():
+    if not WIN:
+        return None
+    folder = os.environ.get("WEBVIEW2_BROWSER_EXECUTABLE_FOLDER")
+    if folder:
+        return f"{Path(folder).name} (fixed version)"
+    import winreg
+    for root, key in ((winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\WOW6432Node\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}"),
+                      (winreg.HKEY_CURRENT_USER, r"Software\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}")):
+        try:
+            with winreg.OpenKey(root, key) as k:
+                return winreg.QueryValueEx(k, "pv")[0]
+        except OSError:
+            pass
+    return "unknown"
+
+
+def commit():
+    sha = os.environ.get("REVLC_TEST_COMMIT") or os.environ.get("GITHUB_SHA") or output("git", "-C", str(ROOT), "rev-parse", "HEAD")
+    if sha and not os.environ.get("GITHUB_SHA") and output("git", "-C", str(ROOT), "status", "--porcelain", "--untracked-files=no"):
+        sha += " (with local changes)"
+    return sha or "unknown"
+
+
+def cua_version():
+    return output("cua-driver", "--version").removeprefix("cua-driver ").strip()
+
+
+def tested(a):
+    v = {
+        "commit": commit(),
+        "installer": f"{a.installer.name} sha256 {sha256(a.installer)}" if a.installer else None,
+        "app": app_version(a),
+        "libVLC": libvlc_version(a.app[0]),
+        "FFmpeg": ffmpeg_version(a.ffmpeg),
+        "Cua Driver": cua_version(),
+        "WebView2": webview2_version(),
+        "OS": f"{platform.system()} {platform.release()} ({platform.version()}, {platform.machine()})",
+        "Python": platform.python_version(),
+    }
+    return {k: x for k, x in v.items() if x}
+
+
 # Fixtures
 
 def make_media(ctx):
@@ -652,7 +857,8 @@ def make_media(ctx):
     ff(m / "subtitled.mp4", "-f", "lavfi", "-i", "color=c=0x204060:size=640x360:rate=24", "-t", "60")
     (m / "subtitled.srt").write_text("1\n00:00:00,000 --> 00:01:00,000\nSUBTITLE CHECK\n", encoding="utf-8")
     (m / "zero.mp4").write_bytes(b"")
-    (m / "corrupt.mp4").write_bytes(b"\x00\x00\x00\x18ftypmp42" + os.urandom(200_000))
+    if not (m / "corrupt.mp4").exists():
+        (m / "corrupt.mp4").write_bytes(b"\x00\x00\x00\x18ftypmp42" + os.urandom(200_000))
     for name in ("a.mp4", "b.mp4"):
         (m / "folder").mkdir(exist_ok=True)
         shutil.copyfile(m / "second.mp4", m / "folder" / name)
@@ -703,6 +909,10 @@ def make_media(ctx):
 # Scenarios. Each launches its own app(s) on freshly seeded data.
 
 SCENARIOS = []
+# A short set for a quick look on a device: the real-app basics, plus the
+# relaunch and stalled-stream cases that only show on a real machine.
+QUICK = ("playback", "fullscreen", "resume", "second_instance", "quick_relaunch", "bad_files", "subtitles", "effects",
+         "stalled_stream", "settings_persist")
 
 
 def scenario(fn):
@@ -729,8 +939,7 @@ def onboarding(ctx):
     def fits():
         b = app.bounds()
         cua("set_window_frame", {"pid": app.pid, "window_id": app.window_id, "x": b["x"], "y": b["y"], "width": 720, "height": 450})
-        time.sleep(1)
-        b = app.bounds()
+        b = settle(app.bounds, "the window to finish resizing")
         ensure(abs(b["width"] - 720) < 40 and abs(b["height"] - 450) < 40, f"couldn't resize the window: it's {b['width']:g}×{b['height']:g}")
         app.shot("onboarding-720x450")
         bottom = b["y"] + b["height"]
@@ -750,11 +959,17 @@ def playback(ctx):
     app.finish_onboarding()
     if not ctx.check("starts playing", lambda: app.wait_playing() or "Pause button shown", app=app):
         return
-    time.sleep(3)
-    ctx.check("controls readable", lambda: ensure(all(app.find(l) for l in ("Pause", "Seek", "Volume", "Fullscreen", "Settings", "Up next")),
-                                                  "missing one of Pause, Seek, Volume, Fullscreen, Settings, Up next") and "all six found", app=app)
-    title = app.title()
-    ctx.check("window title", lambda: ensure("playback" in title, f"title is {title!r}") and title, app=app)
+    controls = ("Pause", "Seek", "Volume", "Fullscreen", "Settings", "Up next")
+
+    def readable():
+        try:
+            wait_for(lambda: all(app.find(l) for l in controls), "the player's controls", 10)
+        except Fail:
+            raise Fail(f"missing: {[l for l in controls if not app.find(l)]}")
+        return "all six found"
+
+    ctx.check("controls readable", readable, app=app)
+    ctx.check("window title", lambda: wait_for(lambda: "playback" in (t := app.title()) and t, "the title to show playback.mp4", 10), app=app)
 
     def video():
         if ctx.no_video:
@@ -770,7 +985,7 @@ def playback(ctx):
         if ctx.no_video:
             return "button flipped to Play"
         a = app.shot("paused")
-        time.sleep(1.5)
+        time.sleep(1.5)  # long enough for a playing picture to change
         b = app.shot("paused-later")
         ensure(ImageChops.difference(centre(a), centre(b)).getbbox() is None, "the picture kept moving")
         return "button flipped to Play; picture stopped"
@@ -819,15 +1034,18 @@ def playback(ctx):
     ctx.check("M mutes", mute, app=app)
 
     def previews():
-        # Seek previews come from FFmpeg keyframe passes; a pass that fails
-        # (say, a GPU decoder the machine lacks) shows only in the app's log.
-        app.log.flush()
-        log = (ctx.out / "logs" / f"{app.name}.log").read_text(encoding="utf-8", errors="replace")
-        failed = [l for l in log.splitlines() if "keyframe pass failed" in l]
-        ensure(not failed, f"{len(failed)} failed: {failed[0].strip() if failed else ''}")
-        return "no failed keyframe passes in the app log"
+        # ReVLC makes the seek bar's preview frames as files in its cache
+        # once a video plays: 150 for this 5-minute clip. A failed FFmpeg
+        # pass is caught by the log check after the scenario.
+        scrub = ctx.cache_dir() / "scrub"
+        made = lambda: len(list(scrub.rglob("*.jpg"))) if scrub.exists() else 0
+        try:
+            n = wait_for(lambda: (n := made()) >= 100 and n, "100 preview frames", 60)
+        except Fail:
+            raise Fail(f"only {made()} preview frames after 60 s")
+        return f"{n} preview frames made"
 
-    ctx.check("seek previews build without errors", previews, app=app)
+    ctx.check("seek previews are made", previews, app=app)
 
 
 @scenario
@@ -852,7 +1070,7 @@ def fullscreen(ctx):
         ctx.check("keys still work in fullscreen", lambda: (app.key("space"), app.wait("Play", button=True, timeout=5),
                                                             app.key("space"), app.wait("Pause", button=True, timeout=5)) and "Space paused and resumed", app=app)
         ctx.check("Escape leaves fullscreen", lambda: (app.key("escape"), app.wait("Fullscreen", button=True, timeout=10)) and "back to a window", app=app)
-        time.sleep(1.5)
+        settle(app.bounds, "the window to finish leaving fullscreen", 10)
 
     def double_click():
         if ctx.no_video:
@@ -861,7 +1079,7 @@ def fullscreen(ctx):
             raise Skip("this runner can't show video")
         app.double_click_centre()
         app.wait("Exit fullscreen", button=True, timeout=10)
-        time.sleep(1)
+        settle(app.bounds, "the window to finish entering fullscreen", 10)
         app.double_click_centre()
         app.wait("Fullscreen", button=True, timeout=10)
         return "double-click entered and left fullscreen"
@@ -871,23 +1089,13 @@ def fullscreen(ctx):
 
 @scenario
 def menus(ctx):
+    """The native menus and the dialog they open. How the gear menu, focus
+    in the dialog and the shortcut list behave are browser tests."""
     app = ctx.launch(ctx.media / "playback.mp4")
     app.finish_onboarding()
     if not ctx.check("starts playing", lambda: app.wait_playing() or "playing", app=app):
         return
 
-    def gear():
-        start = app.time_ms()
-        for _ in range(5):
-            app.press("Settings")
-            # Its items show their value too: "Playback speed Normal".
-            wait_for(lambda: app.find(contains="Playback speed"), "the gear menu", 5)
-            app.key("escape")
-            wait_for(lambda: not app.find(contains="Playback speed"), "the gear menu to close", 5)
-        later = wait_for(lambda: (t := app.time_ms()) > start + 1000 and t, "the clock to keep moving", 5)
-        return f"opened and closed 5 times; clock {start // 1000} s → {later // 1000} s"
-
-    ctx.check("gear menu opens and closes", gear, app=app)
     def info():
         if MAC:
             app.menu("Window", "Media Information…")
@@ -903,29 +1111,6 @@ def menus(ctx):
         return "dialog with General, Codec and Statistics"
 
     if ctx.check("media information opens", info, app=app):
-        def trap():
-            for _ in range(12):
-                app.key("tab")
-            for _ in range(6):
-                app.key("tab", ("shift",))
-            app.key("space")
-            time.sleep(1)
-            # The dialog hides the player from the accessibility tree
-            # (aria-modal), so close it before reading the play state.
-            if app.find("Statistics"):
-                app.key("escape")
-                app.wait_gone("Statistics", timeout=5)
-            # Space on a background control would have paused playback.
-            ensure(app.playing(), "focus left the dialog: Space reached the player")
-            if MAC:
-                app.menu("Window", "Media Information…")
-            else:
-                app.gear_item("Media information")
-                app.click_el(app.find(contains="Media information")[-1])
-            app.wait("Statistics", timeout=8)
-            return "12 Tabs, 6 Shift+Tabs and Space stayed inside the dialog"
-
-        ctx.check("focus stays in the dialog", trap, app=app)
         ctx.check("Escape closes it", lambda: (app.key("escape"), app.wait_gone("Statistics", timeout=5)) and "closed", app=app)
 
         if not MAC:
@@ -948,25 +1133,20 @@ def menus(ctx):
 
         ctx.check("title-bar menus while playing", title_menus, known_bug="W6: the Windows and Linux menus only show on Home", app=app)
 
-    def help_text():
-        if app.find("Statistics"):
+    if MAC:
+        # The list itself is a browser test (tests/ui/player.spec.ts); this
+        # is the native Help menu reaching it.
+        def help_menu():
+            if app.find("Statistics"):
+                app.key("escape")
+                app.wait_gone("Statistics", timeout=5)
+            app.menu("Help", "Keyboard Shortcuts")
+            app.wait("Keyboard shortcuts", timeout=8)
+            ensure("⌘" in app.text(), "the list doesn't name ⌘")
             app.key("escape")
-            app.wait_gone("Statistics", timeout=5)
-        if not MAC:
-            app.press("Back to home")
-            app.wait_text("Home", timeout=10)
-        app.menu("Help", "Keyboard Shortcuts")
-        app.wait("Keyboard shortcuts", timeout=8)
-        text = app.text()
-        if MAC:
-            ensure("⌘" in text and "Return" in text, "expected ⌘ and Return")
-        else:
-            ensure("Ctrl+" in text and "Enter" in text and "Return" not in text and "⌘" not in text, "expected Ctrl+ and Enter, not ⌘ or Return")
-        app.key("escape")
-        return "platform names are right"
+            return "Help › Keyboard Shortcuts opens the list"
 
-    ctx.check("shortcut list uses this platform's keys", help_text, app=app)
-
+        ctx.check("Help menu opens the shortcut list", help_menu, app=app)
 
 
 @scenario
@@ -976,7 +1156,8 @@ def resume(ctx):
     if not ctx.check("starts playing", lambda: app.wait_playing() or "playing", app=app):
         return
     app.key("5")
-    time.sleep(3)
+    # A little past 2:30, so the offer below has a time to check.
+    wait_for(lambda: app.time_ms() >= 152_000, "the clock past 2:32", 10)
     if not ctx.check("quits normally", lambda: app.close() or "exited", app=app):
         return
     again = ctx.launch(ctx.media / "playback.mp4")
@@ -1033,6 +1214,67 @@ def second_instance(ctx):
 
 
 @scenario
+def quick_relaunch(ctx):
+    """Kills ReVLC and starts it again at once, three times, as after a
+    crash or a force quit. On Windows the killed copy's WebView2 helpers
+    hold the profile for a moment, and ReVLC used to crash on that."""
+    app = ctx.launch(ctx.media / "playback.mp4")
+    app.finish_onboarding()
+    if not ctx.check("starts playing", lambda: app.wait_playing() or "playing", app=app):
+        return
+    known = "Windows: ReVLC crashes when started while the last copy's WebView2 is still exiting (PR #10)" if WIN else None
+
+    def relaunch():
+        current = app
+        for i in range(3):
+            current.kill(wait_helpers=False)
+            current = ctx.launch(ctx.media / "playback.mp4", name=f"quick_relaunch-{i + 2}", wait=False)
+            try:
+                current.wait_window()
+                current.wait_playing()
+            except Fail:
+                # A known crash is reported here, not again by the log check.
+                current.known_crash = known
+                raise Fail(f"relaunch {i + 1}: {'crashed' if not current.alive() else 'no playing window'}")
+        return "three kills, three immediate relaunches, each playing"
+
+    ctx.check("starts again right after being killed", relaunch, known_bug=known, app=app)
+
+
+@scenario
+def stalled_stream(ctx):
+    """A stream that stops arriving: ReVLC shows it's buffering, quits
+    cleanly while it waits, and keeps the stream in history."""
+    url = f"{ctx.http}/stall/hls/stream.m3u8"
+    ctx.release.clear()
+    try:
+        app = ctx.launch(url)
+        app.finish_onboarding()
+        if not ctx.check("starts playing", lambda: app.wait_playing(30) or "playing", app=app):
+            return
+        ctx.check("shows Buffering when the stream stalls", lambda: app.wait("Buffering", timeout=30) and "Buffering shown", app=app)
+
+        def quits():
+            start = time.monotonic()
+            app.close(timeout=15)
+            return f"quit in {time.monotonic() - start:.1f} s"
+
+        if not ctx.check("quits while buffering", quits, app=app):
+            return
+
+        def kept():
+            entries = json.loads((ctx.data_dir() / "history.json").read_text(encoding="utf-8"))
+            mine = [e for e in entries if e.get("uri") == url]
+            ensure(mine, f"history.json doesn't list the stream ({len(entries)} entries)")
+            ensure(not mine[0].get("finished"), "a stalled stream was saved as finished")
+            return f"in history at {mine[0].get('position', 0) // 1000} s, not finished"
+
+        ctx.check("the stream stays in history", kept)
+    finally:
+        ctx.release.set()
+
+
+@scenario
 def bad_files(ctx):
     app = ctx.launch(ctx.media / "zero.mp4")
     app.finish_onboarding()
@@ -1058,9 +1300,10 @@ def engine_failure(ctx):
     def settings():
         w = app.settings_window()
         wait_for(lambda: "General" in app.text(w), "the Settings tabs", 10)
-        time.sleep(3)
-        text = app.text(w)
-        ensure("Loading…" not in text, 'Settings still says "Loading…"')
+        try:
+            wait_for(lambda: "Loading…" not in app.text(w), "Settings to load", 10)
+        except Fail:
+            raise Fail('Settings still says "Loading…" after 10 s')
         return "Settings opened and loaded"
 
     ctx.check("Settings still opens", settings, app=app)
@@ -1113,15 +1356,21 @@ def command_line(ctx):
     ctx.check("-f starts in fullscreen", starts_fullscreen, app=app)
     app.kill()
 
-    launched = time.monotonic()
     app = ctx.launch("--play-and-exit", "--run-time=3", ctx.media / "playback.mp4", name="command_line-exit")
 
     def exits():
+        # From when playback starts, not from launch: a slow start would
+        # otherwise count as play time.
+        wait_for(lambda: not app.alive() or app.playing(), "playback to start (a Pause button)", 20)
+        ensure(app.alive(), "quit before playback was seen")
+        playing = time.monotonic()
         ensure(app.wait_exit(30), "still running 30 s later")
-        # Quitting sooner than the 3 s it should play means it never did.
-        took = time.monotonic() - launched
-        ensure(took >= 3, f"quit {took:.1f} s after launch, before playing 3 s")
-        return f"exited {took:.1f} s after launch"
+        played = time.monotonic() - playing
+        # The Pause button shows a moment after playback starts, and is
+        # polled every 0.5 s.
+        ensure(played >= 2, f"quit {played:.1f} s after playback started, before playing 3 s")
+        ensure(app.proc.returncode == 0, f"exit code {app.proc.returncode}")
+        return f"played {played:.1f} s, then quit with code 0"
 
     ctx.check("--play-and-exit --run-time=3 quits", exits, app=app)
 
@@ -1181,8 +1430,7 @@ def small_window(ctx):
     def fits():
         b = app.bounds()
         cua("set_window_frame", {"pid": app.pid, "window_id": app.window_id, "x": b["x"], "y": b["y"], "width": 720, "height": 450})
-        time.sleep(1.5)
-        b = app.bounds()
+        b = settle(app.bounds, "the window to finish resizing")
         ensure(abs(b["width"] - 720) < 40 and abs(b["height"] - 450) < 40, f"couldn't resize the window: it's {b['width']:g}×{b['height']:g}")
         app.shot("player-720x450")
         right, bottom = b["x"] + b["width"], b["y"] + b["height"]
@@ -1247,12 +1495,17 @@ def subtitles(ctx):
         # The switch is named after its row's label; its role differs by platform.
         wait_for(lambda: [e for e in app.read(w) if e.get("label") == "Bold"], "the Bold switch", 10)
         app.click_switch("Bold", w)
-        time.sleep(3)
+        saved = lambda: json.loads((ctx.data_dir() / "settings.json").read_text(encoding="utf-8")).get("bold")
+        wait_for(saved, "Bold to be saved", 5)
         if not ctx.no_video:
-            # What a user sees: the subtitle is still on the picture.
-            white = white_text("subtitle-after-bold")
-            ensure(white > 200, f"the subtitle is gone from the picture ({white} white pixels)")
-            return f"still drawn ({white} white pixels)"
+            # What a user sees: the subtitle is still on the picture, in
+            # every frame over the next 2 s (the change restarts it).
+            counts = []
+            for i in range(3):
+                time.sleep(1)
+                counts.append(white_text(f"subtitle-after-bold-{i}"))
+            ensure(min(counts) > 200, f"the subtitle left the picture (white pixels over 3 s: {counts})")
+            return f"still drawn ({counts} white pixels)"
         items = tracks()
         app.key("escape")
         checked = [e.get("label") for e in items if e.get("selected") or str(e.get("value")).lower() in ("1", "true")]
@@ -1267,7 +1520,8 @@ def frame_pair(app, name):
     if app.playing():
         app.press("Pause")
         app.wait("Play", button=True, timeout=5)
-    time.sleep(0.8)
+    shots = iter(range(20))
+    settle(lambda: pixels(centre(app.shot(f"{name}-{next(shots)}"))), "the picture to hold still", 8)
     return app.shot(name)
 
 
@@ -1306,10 +1560,18 @@ def effects(ctx):
         app.press("Video", any_role=True)
         app.click_switch("Invert colours", app.window_id)
         app.key("e")  # next frame, drawn with the filter
-        time.sleep(1.5)
-        after = app.shot("effects-inverted")
-        inv, same = mean_rgb_diff(before, after, invert=True), mean_rgb_diff(before, after)
-        ensure(inv < same / 2, f"the picture isn't inverted (distance to inverse {inv:.0f}, to original {same:.0f})")
+
+        def inverted():
+            after = app.shot("effects-inverted")
+            inv, same = mean_rgb_diff(before, after, invert=True), mean_rgb_diff(before, after)
+            return inv < same / 2 and (inv, same)
+
+        try:
+            inv, same = wait_for(inverted, "the picture to invert", 6)
+        except Fail:
+            after = app.shot("effects-inverted")
+            raise Fail(f"the picture isn't inverted (distance to inverse {mean_rgb_diff(before, after, invert=True):.0f}, "
+                       f"to original {mean_rgb_diff(before, after):.0f})")
         app.click_switch("Invert colours", app.window_id)
         return f"inverted: {inv:.0f} from the inverse, {same:.0f} from the original"
 
@@ -1343,15 +1605,18 @@ def effects(ctx):
             else:
                 cua("click", {"element_token": sat["element_token"]})
             app.key("home")
-            time.sleep(0.8)
-            if str(saturation().get("value")) in ("0", "0.0"):
+            try:
+                wait_for(lambda: str(saturation().get("value")) in ("0", "0.0"), "Saturation 0", 3)
                 break
+            except Fail:
+                pass
         else:
             raise Fail(f"couldn't set Saturation to 0 (it's {saturation().get('value')}; enabled={saturation().get('enabled')})")
         app.key("e")
-        time.sleep(1.5)
-        g = greyish(app.shot("effects-greyscale"))
-        ensure(g > 0.9, f"only {g:.0%} of the picture is grey with saturation at 0")
+        try:
+            g = wait_for(lambda: (g := greyish(app.shot("effects-greyscale"))) > 0.9 and g, "the picture to turn grey", 6)
+        except Fail:
+            raise Fail(f"only {greyish(app.shot('effects-greyscale')):.0%} of the picture is grey with saturation at 0")
         return f"{g:.0%} of the picture is grey"
 
     ctx.check("Saturation at 0 makes it grey", greyscale, app=app)
@@ -1360,7 +1625,7 @@ def effects(ctx):
         app.press("Equaliser", any_role=True)
         before = app.switch_on("Equaliser")
         app.click_switch("Equaliser", app.window_id)
-        after = wait_for(lambda: app.switch_on("Equaliser") != before, "the Equaliser switch to change", 5)
+        wait_for(lambda: app.switch_on("Equaliser") != before, "the Equaliser switch to change", 5)
         return f"switched {'on' if not before else 'off'}"
 
     ctx.check("Equaliser switch", equaliser, app=app)
@@ -1393,7 +1658,7 @@ def playback_controls(ctx):
         app.close_menus()
         ensure("1.5" in label, f"gear menu says {label!r}")
         t0, w0 = app.time_ms(), time.monotonic()
-        time.sleep(4)
+        time.sleep(4)  # the stretch the rate is measured over
         t1, w1 = app.time_ms(), time.monotonic()
         rate = (t1 - t0) / 1000 / (w1 - w0)
         ensure(1.2 < rate < 1.8, f"the clock ran at {rate:.2f}× real time")
@@ -1415,9 +1680,9 @@ def playback_controls(ctx):
 
     def ab_loop():
         app.key("2")  # 20 %
-        time.sleep(1)
+        a = wait_for(lambda: 58_000 <= (t := app.time_ms()) <= 66_000 and t, "the clock near 1:00", 5)
         app.key("l", ("shift",))
-        time.sleep(3)
+        wait_for(lambda: app.time_ms() >= a + 3000, "3 s of playback after A", 8)
         app.key("l", ("shift",))
         label = app.gear_item("A–B loop")
         app.close_menus()
@@ -1425,7 +1690,7 @@ def playback_controls(ctx):
         times = []
         for _ in range(8):
             times.append(app.time_ms())
-            time.sleep(1)
+            time.sleep(1)  # sampling the clock over 8 s
         ensure(max(times) - min(times) <= 6000, f"the clock left the loop: {[t // 1000 for t in times]}")
         app.key("l", ("shift",))  # third press clears it
         return f"{label}; clock stayed in {min(times) // 1000}–{max(times) // 1000} s"
@@ -1519,8 +1784,12 @@ def streams(ctx):
     app = ctx.launch(url)
     app.finish_onboarding()
     ctx.check("plays an HLS stream", lambda: app.wait_playing(30) or f"playing {url}", app=app)
-    ctx.check("its clock moves", lambda: (t := app.time_ms()) is not None and wait_for(lambda: app.time_ms() > t + 1500, "the clock to move", 8)
-              and "advancing", app=app)
+    def clock():
+        start = app.time_ms()
+        later = wait_for(lambda: (t := app.time_ms()) >= start + 1500 and t, "the clock to move 1.5 s", 8)
+        return f"{start // 1000} s → {later // 1000} s"
+
+    ctx.check("its clock moves", clock, app=app)
     app.kill()
 
     app = ctx.launch(name="streams-dialog")
@@ -1580,7 +1849,7 @@ def history(ctx):
     # Halfway in: ReVLC lists a file under Recent until it's far enough in
     # to be worth continuing.
     app.key("5")
-    time.sleep(3)
+    wait_for(lambda: app.time_ms() >= 152_000, "the clock past 2:32", 10)
 
     def continue_watching():
         app.press("Back to home")
@@ -1608,7 +1877,10 @@ def settings_persist(ctx):
             tabs = [e for e in app.elements if e.get("label") == tab]
             if tabs:
                 app.click_el(tabs[0], w)
-                time.sleep(0.8)
+                try:
+                    return wait_for(lambda: [e for e in app.read(w) if e.get("label") == label], f"{label} on {tab}", 2)
+                except Fail:
+                    pass
         return bool([e for e in app.read(w) if e.get("label") == label])
 
     def toggle_and_relaunch():
@@ -1619,9 +1891,10 @@ def settings_persist(ctx):
         app.click_switch("Pause when minimised", w)
         if not LINUX:
             wait_for(lambda: app.switch_on("Pause when minimised", w) != before, "the switch to change", 5)
-        time.sleep(1.5)
-        saved = json.loads((ctx.data_dir() / "settings.json").read_text(encoding="utf-8")).get("pauseWhenMinimized")
-        ensure(saved == (not before), f"settings.json has pauseWhenMinimized={saved}")
+        try:
+            wait_for(lambda: saved_now() == (not before), "settings.json to change", 5)
+        except Fail:
+            raise Fail(f"settings.json has pauseWhenMinimized={saved_now()}")
         app.close()
         again = ctx.launch(name="settings_persist-2")
         again.finish_onboarding()
@@ -1656,9 +1929,9 @@ def shortcuts(ctx):
         app.click_el(tab, w)
         key_button = wait_for(lambda: app.button_after("Mute", w), "Mute's shortcut", 8)
         app.click_el(key_button, w)
-        time.sleep(0.5)
+        wait_for(lambda: app.find("Press keys…", window_id=w), "the shortcut to start recording", 5)
         app.key("y", window_id=w)
-        time.sleep(1)
+        wait_for(lambda: (b := app.button_after("Mute", w)) and (b.get("label") or "").strip().upper() == "Y", "Mute's shortcut to read Y", 5)
         # Back in the player, Y now mutes.
         cua("bring_to_front", {"pid": app.pid, "window_id": app.window_id})
         app.key("y")
@@ -1670,14 +1943,28 @@ def shortcuts(ctx):
 
 
 def serve_media(ctx):
-    """Serves the media folder on a local port, for the stream scenarios."""
+    """Serves the media folder on a local port, for the stream scenarios.
+    Under /stall/, segments after the first two are held until
+    ctx.release is set: a stream that stops arriving (the in-suite form of
+    scripts/qa/slow-hls-server.py)."""
     import functools
     import http.server
     import threading
 
+    ctx.release = threading.Event()
+    ctx.release.set()
+
     class Quiet(http.server.SimpleHTTPRequestHandler):
         def log_message(self, *args):
             pass
+
+        def do_GET(self):
+            if self.path.startswith("/stall/"):
+                self.path = self.path[len("/stall"):]
+                m = re.search(r"(\d+)\.ts$", self.path)
+                if m and int(m.group(1)) >= 2:
+                    ctx.release.wait(120)
+            super().do_GET()
 
     server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), functools.partial(Quiet, directory=str(ctx.media)))
     threading.Thread(target=server.serve_forever, daemon=True).start()
@@ -1693,17 +1980,29 @@ def main():
     ap.add_argument("--bundle", type=Path, help="macOS: the .app, for opening files through Launch Services")
     ap.add_argument("--no-video", action="store_true", help="skip the picture checks")
     ap.add_argument("--only", help="comma-separated scenario names")
+    ap.add_argument("--quick", action="store_true", help=f"only {', '.join(QUICK)}")
+    ap.add_argument("--installer", type=Path, help="the installer under test, for its checksum in the report")
+    ap.add_argument("--media-cache", type=Path, help="where generated media is kept between runs")
+    ap.add_argument("--any-cua", action="store_true", help="allow a Cua Driver other than scripts/qa/cua-version.txt")
     ap.add_argument("app", nargs="+")
     a = ap.parse_args()
     a.out = a.out.resolve()
-    only = set(a.only.split(",")) if a.only else None
+    if a.only and a.quick:
+        sys.exit("--only and --quick don't go together")
+    only = set(a.only.split(",")) if a.only else set(QUICK) if a.quick else None
     if only and (unknown := only - {fn.__name__ for fn in SCENARIOS}):
         sys.exit(f"Unknown scenarios: {', '.join(sorted(unknown))}")
+    pinned = (ROOT / "scripts/qa/cua-version.txt").read_text().strip()
+    if (have := cua_version()) != pinned and not a.any_cua:
+        sys.exit(f"Cua Driver is {have or 'missing'}; this suite is pinned to {pinned} (scripts/qa/cua-version.txt). "
+                 f"Install it with CUA_DRIVER_RS_VERSION={pinned} and Cua's installer, or pass --any-cua.")
     # A backup that was already restored is out of date: backing up again
     # would be refused, and restoring it would undo changes made since.
     if (a.out / "logs/data-restore-verification.json").exists():
         sys.exit(f"{a.out} is a finished run; use a new --out")
     ctx = Context(a)
+    ctx.tested = tested(a)
+    print("Testing: " + "; ".join(f"{k} {v}" for k, v in ctx.tested.items()), flush=True)
     make_media(ctx)
     serve_media(ctx)
     # A backup that wasn't restored is from a run cut short: it holds your
@@ -1725,10 +2024,11 @@ def main():
                                     "detail": f"{type(e).__name__}: {e}\n{traceback.format_exc(limit=4)}", "known_bug": None, "seconds": 0})
                 print(f"  [FAIL ] scenario crashed: {e}", flush=True)
             finally:
-                for app in ctx.apps:
+                apps = ctx.apps
+                for app in apps:
                     app.kill()
                 ctx.apps = []
-                time.sleep(1)
+                ctx.check_logs(apps)
     finally:
         try:
             ctx.appdata("restore")
@@ -1737,16 +2037,18 @@ def main():
             ctx.results.append({"scenario": "(cleanup)", "check": "your app data restored", "status": "fail",
                                 "detail": f"{e}; the backup is in {ctx.out / 'backup'}", "known_bug": None, "seconds": 0})
     write_report(ctx, time.monotonic() - started)
-    sys.exit(1 if any(r["status"] == "fail" for r in ctx.results) else 0)
+    sys.exit(1 if any(r["status"] in ("fail", "error", "xpass") for r in ctx.results) else 0)
 
 
 def write_report(ctx, seconds):
     rs = ctx.results
-    counts = {s: sum(r["status"] == s for r in rs) for s in ("pass", "fail", "skip", "xfail", "xpass")}
-    (ctx.out / "report.json").write_text(json.dumps({"platform": PLATFORM, "seconds": round(seconds), "counts": counts, "results": rs}, indent=2))
-    icon = {"pass": "✅", "fail": "❌", "skip": "⏭️", "xfail": "🐞", "xpass": "⚠️"}
-    lines = [f"### {PLATFORM}: {counts['pass']} passed, {counts['fail']} failed, {counts['skip']} skipped, "
+    counts = {s: sum(r["status"] == s for r in rs) for s in ("pass", "fail", "error", "skip", "xfail", "xpass")}
+    (ctx.out / "report.json").write_text(json.dumps({"platform": PLATFORM, "seconds": round(seconds), "tested": ctx.tested,
+                                                     "counts": counts, "results": rs}, indent=2, ensure_ascii=False), encoding="utf-8")
+    icon = {"pass": "✅", "fail": "❌", "error": "💥", "skip": "⏭️", "xfail": "🐞", "xpass": "⚠️"}
+    lines = [f"### {PLATFORM}: {counts['pass']} passed, {counts['fail']} failed, {counts['error']} errors, {counts['skip']} skipped, "
              f"{counts['xfail']} known bugs, {counts['xpass']} known bugs now passing ({seconds / 60:.1f} min)", "",
+             "Tested: " + "; ".join(f"**{k}** {v}" for k, v in ctx.tested.items()), "",
              "| | Scenario | Check | Detail |", "|---|---|---|---|"]
     for r in rs:
         detail = (r["detail"] or "").splitlines()[0][:160].replace("|", "\\|")
