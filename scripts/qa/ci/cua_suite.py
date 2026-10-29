@@ -209,6 +209,7 @@ class App:
         self.ctx = ctx
         self.name = name
         self.log = open(ctx.out / "logs" / f"{name}.log", "w")
+        self.started = time.monotonic()
         if pid:  # started by someone else, such as Launch Services
             self.proc, self.pid = None, pid
         else:
@@ -1407,20 +1408,24 @@ def command_line(ctx):
     def exits():
         # From when playback starts, not from launch: a slow start would
         # otherwise count as play time.
-        # How far it played, by its own clock: on a slow machine, Cua may
-        # only see playback after a second or two of it.
-        furthest = 0
-        end = time.monotonic() + 30
-        while app.alive() and time.monotonic() < end:
+        # It must have played (its own clock moved) and run for the 3 s. On a
+        # slow VM it plays before its window shows, so Cua may only see the
+        # last second of it; the clock alone can't show the full 3 s.
+        furthest, seen, start = 0, [], time.monotonic()
+        while app.alive() and time.monotonic() < start + 30:
             try:
-                furthest = max(furthest, app.time_ms())
+                t = app.time_ms()
+                furthest = max(furthest, t)
+                seen.append(f"{time.monotonic() - start:.1f}s:{t / 1000:.1f}")
             except (Fail, RuntimeError):
                 pass  # not playing yet, or it just quit
             time.sleep(0.2)
         ensure(app.wait_exit(1), "still running 30 s later")
-        ensure(furthest >= 1500, f"quit with its clock at {furthest / 1000:.1f} s at most, before playing 3 s")
+        lived = time.monotonic() - app.started
+        ensure(furthest >= 500, f"its clock never moved (readings, wall:clock: {' '.join(seen[-8:]) or 'none'})")
+        ensure(lived >= 3, f"quit {lived:.1f} s after launch, before 3 s of playing")
         ensure(app.proc.returncode == 0, f"exit code {app.proc.returncode}")
-        return f"clock reached {furthest / 1000:.1f} s, then quit with code 0"
+        return f"clock reached {furthest / 1000:.1f} s; quit by itself {lived:.1f} s after launch, code 0"
 
     ctx.check("--play-and-exit --run-time=3 quits", exits, app=app)
 
