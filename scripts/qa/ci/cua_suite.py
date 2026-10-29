@@ -1299,7 +1299,9 @@ def stalled_stream(ctx):
                 raise Skip("this runner can't show video")
             return app.wait("Buffering", timeout=30) and "Buffering shown"
 
-        ctx.check("shows Buffering when the stream stalls", buffering, app=app)
+        ctx.check("shows Buffering when the stream stalls", buffering, app=app,
+                  known_bug="found by this suite: on Windows the Buffering spinner is drawn but missing from UI Automation, "
+                            "so screen readers aren't told" if WIN else None)
         if ctx.no_video:
             # Quit while it's stuck, as below: once the clock has stopped.
             settle(app.time_ms, "the clock to stop", 30, 2)
