@@ -338,3 +338,7 @@ mod tests {
         assert_eq!(pts_ms("frame=  10 fps=0.0"), None);
     }
 }
+
+#[cfg(test)]
+#[path = "keyframes_it.rs"]
+mod keyframes_it;

@@ -17,6 +17,12 @@ mod scrub;
 mod settings;
 mod store;
 mod telemetry;
+#[cfg(test)]
+mod data_compat_tests;
+#[cfg(test)]
+mod prop_tests;
+#[cfg(test)]
+mod test_media;
 #[cfg(target_os = "linux")]
 mod surface_linux;
 #[cfg(target_os = "macos")]

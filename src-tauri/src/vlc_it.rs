@@ -15,36 +15,13 @@
 //! a WAV file; nothing needs a screen, a GPU or a sound card.
 
 use super::*;
+use crate::test_media::{known_bug, media, work};
 use crate::effects::{Effects, Filter, StereoMode, Transform};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 type Frames = Arc<Mutex<Option<PresentedFrame>>>;
-
-fn work() -> PathBuf {
-    let dir = std::env::temp_dir().join("revlc-vlc-it");
-    std::fs::create_dir_all(&dir).unwrap();
-    dir
-}
-
-/// Makes `name` with FFmpeg once per machine (the media is deterministic).
-fn media(name: &str, args: &[&str]) -> PathBuf {
-    let out = work().join(name);
-    if !out.exists() {
-        let ffmpeg = std::env::var("REVLC_TEST_FFMPEG").unwrap_or_else(|_| "ffmpeg".into());
-        let tmp = work().join(format!("tmp-{name}"));
-        let status = std::process::Command::new(ffmpeg)
-            .args(["-hide_banner", "-loglevel", "error", "-y"])
-            .args(args)
-            .arg(&tmp)
-            .status()
-            .expect("FFmpeg runs (set REVLC_TEST_FFMPEG)");
-        assert!(status.success(), "FFmpeg couldn't make {name}");
-        std::fs::rename(&tmp, &out).unwrap();
-    }
-    out
-}
 
 fn pattern() -> PathBuf {
     media("pattern.mp4", &["-f", "lavfi", "-i", "testsrc2=size=320x180:rate=24", "-t", "30", "-c:v", "mpeg4", "-q:v", "3"])
@@ -176,9 +153,12 @@ fn vlc_it_plays_seeks_and_reports() {
     assert!(vlc.seekable());
     wait("video", 5, || vlc.has_video().then_some(()));
     let (px, w, h) = frame(&frames, Duration::from_millis(200));
-    // The decoder can pad the height to a multiple of 16; the memory output
-    // passes the padded size through.
-    assert!(w == 320 && (180..=192).contains(&h), "frame {w}×{h}");
+    assert_eq!(w, 320, "frame width");
+    // The decoder pads the height to a multiple of 16 and the memory output
+    // passes that through, so the Linux app draws a strip under the picture.
+    known_bug("the Linux video output keeps the decoder's padded height (320×192 for 320×180 video)", || {
+        assert_eq!(h, 180, "frame height");
+    });
     let colourful = px.iter().filter(|p| p.iter().max().unwrap() - p.iter().min().unwrap() > 100).count();
     assert!(colourful * 3 > px.len(), "the frame isn't the test pattern");
     vlc.set_time(20_000);
@@ -426,4 +406,90 @@ fn vlc_it_opens_long_unicode_paths_and_local_hls() {
     }
     play(&vlc, &list);
     assert!(vlc.length() > 10_000, "HLS length {}", vlc.length());
+}
+
+/// Whether this FFmpeg has `encoder`.
+fn has_encoder(encoder: &str) -> bool {
+    let ffmpeg = std::env::var("REVLC_TEST_FFMPEG").unwrap_or_else(|_| "ffmpeg".into());
+    let out = std::process::Command::new(ffmpeg).args(["-hide_banner", "-encoders"]).output().expect("FFmpeg runs");
+    String::from_utf8_lossy(&out.stdout).lines().any(|l| l.split_whitespace().nth(1) == Some(encoder))
+}
+
+/// Red on the left, blue on the right, `w`×`h`, in `codec`.
+fn halves_in(name: &str, w: u32, h: u32, codec: &[&str]) -> PathBuf {
+    let (half, size) = (format!("color=c=red:size={}x{h}:rate=24", w / 2), format!("color=c=blue:size={}x{h}:rate=24", w - w / 2));
+    let mut args = vec!["-f", "lavfi", "-i", &half, "-f", "lavfi", "-i", &size, "-filter_complex", "[0][1]hstack", "-t", "3"];
+    args.extend_from_slice(codec);
+    media(name, &args)
+}
+
+#[test]
+#[ignore = "needs libVLC and FFmpeg; see the module docs"]
+fn vlc_it_plays_the_common_codecs_and_sizes() {
+    // (file, width, height, encoder, its arguments)
+    let cases: &[(&str, u32, u32, &str, &[&str])] = &[
+        ("h264.mp4", 320, 180, "libx264", &["-c:v", "libx264", "-pix_fmt", "yuv420p"]),
+        ("hevc.mp4", 320, 180, "libx265", &["-c:v", "libx265", "-pix_fmt", "yuv420p", "-tag:v", "hvc1"]),
+        ("hevc-10bit.mkv", 320, 180, "libx265", &["-c:v", "libx265", "-pix_fmt", "yuv420p10le"]),
+        ("vp9.webm", 320, 180, "libvpx-vp9", &["-c:v", "libvpx-vp9", "-deadline", "realtime", "-cpu-used", "8"]),
+        ("av1.mkv", 320, 180, "libsvtav1", &["-c:v", "libsvtav1", "-preset", "12"]),
+        ("odd-size.mp4", 318, 178, "libx264", &["-c:v", "libx264", "-pix_fmt", "yuv420p"]),
+        ("portrait.mp4", 180, 320, "libx264", &["-c:v", "libx264", "-pix_fmt", "yuv420p"]),
+        ("4k.mp4", 3840, 2160, "libx264", &["-c:v", "libx264", "-pix_fmt", "yuv420p", "-preset", "ultrafast"]),
+    ];
+    let (mut missing, mut padded) = (Vec::new(), Vec::new());
+    for (name, w, h, encoder, codec) in cases {
+        if !has_encoder(encoder) {
+            missing.push(*encoder);
+            continue;
+        }
+        let file = halves_in(name, *w, *h, codec);
+        // The memory output scales anything bigger down to fit 1080p.
+        let scale = (1920.0 / *w as f64).min(1080.0 / *h as f64).min(1.0);
+        let (w, h) = (&((*w as f64 * scale) as u32), &((*h as f64 * scale) as u32));
+        let (vlc, frames) = video_player();
+        play(&vlc, &file);
+        let (px, fw, fh) = frame(&frames, Duration::from_millis(300));
+        // The frame may carry the decoder's padding (the known bug above);
+        // the picture is its top-left w×h.
+        assert!(fw as u32 >= *w && (fw as u32) < w + 128 && fh as u32 >= *h && (fh as u32) < h + 128, "{name}: frame {fw}×{fh}");
+        if (fw as u32, fh as u32) != (*w, *h) {
+            padded.push(format!("{name} {w}×{h} as {fw}×{fh}"));
+        }
+        let (w, h) = (*w as i32, *h as i32);
+        let px: Vec<[u8; 3]> = (0..h).flat_map(|y| px[(y * fw) as usize..(y * fw + w) as usize].to_vec()).collect();
+        let (left, right) = (mean(&region(&px, w, h, 0.1, 0.4)), mean(&region(&px, w, h, 0.6, 0.9)));
+        assert!(left[0] > 180.0 && left[2] < 80.0, "{name}: left half {left:?}");
+        assert!(right[2] > 180.0 && right[0] < 80.0, "{name}: right half {right:?}");
+        vlc.stop();
+    }
+    // Every FFmpeg the tests run with (Linux's, the macOS and Windows
+    // sidecars) has these encoders; a missing one means the set shrank.
+    assert!(missing.is_empty(), "this FFmpeg can't make: {missing:?}");
+    known_bug("the Linux video output keeps the decoder's padded size (a strip below or to the right of the picture)", move || {
+        assert!(padded.is_empty(), "padded: {padded:?}");
+    });
+}
+
+#[test]
+#[ignore = "needs libVLC and FFmpeg; see the module docs"]
+fn vlc_it_broken_files_end_cleanly_and_the_next_file_plays() {
+    let good = std::fs::read(pattern()).unwrap();
+    let truncated = work().join("truncated.mp4");
+    std::fs::write(&truncated, &good[..good.len() / 3]).unwrap();
+    let garbage = work().join("garbage.mp4");
+    std::fs::write(&garbage, (0..200_000u32).map(|i| (i.wrapping_mul(2_654_435_761) >> 24) as u8).collect::<Vec<_>>()).unwrap();
+    let empty = work().join("empty.mp4");
+    std::fs::write(&empty, b"").unwrap();
+    let (vlc, frames) = video_player();
+    for bad in [&truncated, &garbage, &empty] {
+        vlc.open(bad.to_str().unwrap(), &[], true).unwrap();
+        // Ends or fails within a few seconds; never stuck opening.
+        wait(&format!("{} to end or fail", bad.display()), 20, || {
+            matches!(vlc.state(), State::Ended | State::Error | State::Stopped).then_some(())
+        });
+    }
+    play(&vlc, &pattern());
+    let (_, w, _) = frame(&frames, Duration::from_millis(200));
+    assert_eq!(w, 320, "the player still works after the broken files");
 }
