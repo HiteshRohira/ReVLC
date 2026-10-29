@@ -412,9 +412,12 @@ fn has_encoder(encoder: &str) -> bool {
     String::from_utf8_lossy(&out.stdout).lines().any(|l| l.split_whitespace().nth(1) == Some(encoder))
 }
 
-/// Red on the left, blue on the right, `w`×`h`, in `codec`.
+/// Red on the left, blue on the right, `w`×`h`, in `codec`. Each half is
+/// an even width: some FFmpegs (Ubuntu's) round an odd one down on the way
+/// to 4:2:0, so 318 wide came out 316.
 fn halves_in(name: &str, w: u32, h: u32, codec: &[&str]) -> PathBuf {
-    let (half, size) = (format!("color=c=red:size={}x{h}:rate=24", w / 2), format!("color=c=blue:size={}x{h}:rate=24", w - w / 2));
+    let left = (w / 2 + 1) & !1;
+    let (half, size) = (format!("color=c=red:size={left}x{h}:rate=24"), format!("color=c=blue:size={}x{h}:rate=24", w - left));
     let mut args = vec!["-f", "lavfi", "-i", &half, "-f", "lavfi", "-i", &size, "-filter_complex", "[0][1]hstack", "-t", "3"];
     args.extend_from_slice(codec);
     media(name, &args)
