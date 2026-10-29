@@ -1,0 +1,63 @@
+# Mutation testing (cargo-mutants): changes ReVLC's Rust code in small ways
+# (a > becomes >=, a function returns a default) and reports each change no
+# test notices. Those are places where a bug could slip through. Weekly and
+# by hand; report only, it never blocks anything. Split into shards because
+# a full run builds and tests the crate once per change (about 2,200).
+name: Mutation tests
+
+on:
+  schedule:
+    - cron: '0 3 * * 0'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: mutants
+  cancel-in-progress: true
+
+jobs:
+  mutants:
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3, 4, 5, 6, 7]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 350
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Linux build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev build-essential libssl-dev librsvg2-dev libx11-dev patchelf
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+          key: mutants
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-mutants,cargo-nextest
+      - run: npm ci && npm run build && mkdir -p src-tauri/vlc
+      - name: Mutate and test
+        working-directory: src-tauri
+        run: |
+          cargo mutants --shard ${{ matrix.shard }}/8 --test-tool nextest --no-shuffle --timeout-multiplier 3 || status=$?
+          # 2 means some changes went unnoticed: that's the report, not a failure.
+          [[ -z "${status:-}" || "$status" == 2 || "$status" == 3 ]] || exit "$status"
+          {
+            echo "## Shard ${{ matrix.shard }}: changes no test noticed"
+            echo '```'
+            cat mutants.out/missed.txt 2>/dev/null || echo none
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: mutants-shard-${{ matrix.shard }}
+          path: src-tauri/mutants.out/
