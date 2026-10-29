@@ -15,7 +15,7 @@
 //! a WAV file; nothing needs a screen, a GPU or a sound card.
 
 use super::*;
-use crate::test_media::{known_bug, media, work};
+use crate::test_media::{media, work};
 use crate::effects::{Effects, Filter, StereoMode, Transform};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -154,11 +154,8 @@ fn vlc_it_plays_seeks_and_reports() {
     wait("video", 5, || vlc.has_video().then_some(()));
     let (px, w, h) = frame(&frames, Duration::from_millis(200));
     assert_eq!(w, 320, "frame width");
-    // The decoder pads the height to a multiple of 16 and the memory output
-    // passes that through, so the Linux app draws a strip under the picture.
-    known_bug("the Linux video output keeps the decoder's padded height (320×192 for 320×180 video)", || {
-        assert_eq!(h, 180, "frame height");
-    });
+    // Not the decoder's padded 192, which drew a strip under the picture.
+    assert_eq!(h, 180, "frame height");
     let colourful = px.iter().filter(|p| p.iter().max().unwrap() - p.iter().min().unwrap() > 100).count();
     assert!(colourful * 3 > px.len(), "the frame isn't the test pattern");
     vlc.set_time(20_000);
@@ -460,18 +457,15 @@ fn vlc_it_plays_the_common_codecs_and_sizes() {
         let (vlc, frames) = video_player();
         play(&vlc, &file);
         let (px, fw, fh) = frame(&frames, Duration::from_millis(300));
-        // The frame may carry the decoder's padding (the known bug above):
-        // a strip below or to the right, or, for a picture scaled down to
-        // 1080p, a picture scaled from the padded size and so a little
-        // narrower (4K H.264 comes out 1904×1080). The picture is its
-        // top-left part.
-        let near = |got: i32, want: u32| got as u32 + 32 >= want && (got as u32) < want + 128;
-        assert!(near(fw, *w) && near(fh, *h), "{name}: frame {fw}×{fh}");
+        // Not the decoder's padded size: that drew a strip below or to the
+        // right, or, scaled down to 1080p, a squeezed picture (4K H.264
+        // came out 1904×1080).
         if (fw as u32, fh as u32) != (*w, *h) {
             padded.push(format!("{name} {w}×{h} as {fw}×{fh}"));
+            vlc.stop();
+            continue;
         }
-        let (w, h) = ((*w as i32).min(fw), (*h as i32).min(fh));
-        let px: Vec<[u8; 3]> = (0..h).flat_map(|y| px[(y * fw) as usize..(y * fw + w) as usize].to_vec()).collect();
+        let (w, h) = (fw, fh);
         let (left, right) = (mean(&region(&px, w, h, 0.1, 0.4)), mean(&region(&px, w, h, 0.6, 0.9)));
         assert!(left[0] > 180.0 && left[2] < 80.0, "{name}: left half {left:?}");
         assert!(right[2] > 180.0 && right[0] < 80.0, "{name}: right half {right:?}");
@@ -480,9 +474,7 @@ fn vlc_it_plays_the_common_codecs_and_sizes() {
     // Every FFmpeg the tests run with (Linux's, the macOS and Windows
     // sidecars) has these encoders; a missing one means the set shrank.
     assert!(missing.is_empty(), "this FFmpeg can't make: {missing:?}");
-    known_bug("the memory video output (Linux's) keeps the decoder's padded size: a strip below or to the right, or a slightly squeezed picture when scaled", move || {
-        assert!(padded.is_empty(), "padded: {padded:?}");
-    });
+    assert!(padded.is_empty(), "frames at the wrong size: {padded:?}");
 }
 
 #[test]

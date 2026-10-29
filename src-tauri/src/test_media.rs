@@ -36,7 +36,9 @@ pub(crate) fn media(name: &str, args: &[&str]) -> PathBuf {
 }
 
 /// A check for an open bug: it must fail. If it starts passing, the test
-/// fails so the mark gets removed (the Cua suite does the same).
+/// fails so the mark gets removed (the Cua suite does the same). Kept for
+/// the next bug a test finds while no Rust test has one open.
+#[allow(dead_code)]
 pub(crate) fn known_bug(bug: &str, check: impl FnOnce() + std::panic::UnwindSafe) {
     match std::panic::catch_unwind(check) {
         Err(_) => eprintln!("known bug, still there: {bug}"),
