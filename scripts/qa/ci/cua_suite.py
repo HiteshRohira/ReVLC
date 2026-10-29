@@ -424,8 +424,11 @@ class App:
             f = els[0]["frame"]
             if wb["y"] <= f["y"] and f["y"] + f["h"] <= wb["y"] + wb["height"] - 4:
                 return
-            cua("scroll", {"pid": self.pid, "window_id": window_id, "x": round(wb["width"] / 2), "y": round(wb["height"] / 2),
-                           "direction": "down" if f["y"] > wb["y"] else "up", "amount": 3})
+            # Cua takes window-local pixels of its latest screenshot, as for clicks.
+            st = cua("get_window_state", {"pid": self.pid, "window_id": window_id, "include_accessibility_tree": False})
+            scale = (st.get("screenshot_width") or wb["width"]) / wb["width"]
+            cua("scroll", {"pid": self.pid, "window_id": window_id, "x": round(wb["width"] / 2 * scale),
+                           "y": round(wb["height"] / 2 * scale), "direction": "down" if f["y"] > wb["y"] else "up", "amount": 3})
 
     def click_switch(self, label, window_id):
         """Flips the switch named `label`. On Linux a switch reports no
