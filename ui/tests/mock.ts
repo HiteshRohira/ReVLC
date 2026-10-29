@@ -74,6 +74,14 @@ const calls: { cmd: string; args: unknown }[] = [];
 const unknown: string[] = [];
 /** Commands made to fail, by name, with the error text. */
 const failing: Record<string, string> = {};
+/** Delays for a command's next replies, in ms, used up in call order: for
+ *  answers that arrive late or out of order. */
+const delays: Record<string, number[]> = {};
+/** How many calls of each command were waiting for a reply at once, at most. */
+const inFlight: Record<string, number> = {};
+const maxInFlight: Record<string, number> = {};
+/** The window's title as the window has it: the last set_title to finish. */
+let windowTitle = "ReVLC";
 
 async function push(event: string, payload: unknown) {
   await emit(event, payload);
@@ -135,16 +143,37 @@ const handlers: Record<string, (args: Json) => unknown> = {
   stop: () => setState({ state: "stopped", time: 0, length: 0, hasVideo: false }),
 };
 
+/**
+ * Player commands the UI sends without needing an answer. Exact names, so a
+ * misspelt or removed command fails the test (tests/ui/commands.spec.ts
+ * checks this list and the handlers against the app's real commands).
+ */
+const NO_ANSWER = new Set([
+  "add_subtitle", "app_menu_item", "bookmark_add", "bookmark_remove", "bookmark_rename", "hide_cursor", "library_add",
+  "library_remove", "navigate", "next", "next_frame", "open", "open_capture", "open_disc", "open_settings", "play_index",
+  "playlist_clear", "playlist_move", "playlist_remove", "playlist_save", "playlist_sort", "previous", "resume_at",
+  "scrub_cancel", "scrub_focus", "set_ab_loop", "set_adjust", "set_aspect_ratio", "set_audio_delay", "set_audio_track",
+  "set_chapter", "set_crop", "set_deinterlace", "set_equalizer", "set_equalizer_preset", "set_filter", "set_logo", "set_marquee",
+  "set_menu_shortcuts", "set_repeat", "set_shuffle", "set_sleep_timer", "set_stereo_mode", "set_subtitle_delay",
+  "set_subtitle_track", "set_teletext", "set_teletext_transparent", "set_title", "set_transform", "set_video_track", "set_zoom",
+  "take_snapshot", "update_check", "update_install", "update_restart"
+]);
+
 mockWindows(view === "settings" ? "settings" : "main", "main", "settings");
 mockIPC(
-  (cmd, args) => {
+  async (cmd, args) => {
     calls.push({ cmd, args });
+    inFlight[cmd] = (inFlight[cmd] ?? 0) + 1;
+    maxInFlight[cmd] = Math.max(maxInFlight[cmd] ?? 0, inFlight[cmd]);
+    const delay = delays[cmd]?.shift();
+    if (delay) await new Promise((r) => setTimeout(r, delay));
+    inFlight[cmd]--;
+    if (cmd === "plugin:window|set_title") windowTitle = (args as Json).value as string;
     if (cmd in failing) throw failing[cmd];
     if (cmd in handlers) return handlers[cmd]((args ?? {}) as Json);
     // Window, webview and dialog plugin calls: nothing to do here.
     if (cmd.startsWith("plugin:")) return null;
-    // Player commands the UI sends without needing an answer.
-    if (/^(set_|open|next|previous|play_index|playlist_|bookmark_|add_subtitle|navigate|take_snapshot|resume_at|app_menu_item|hide_cursor|open_settings|update_|scrub_|library_|history_)/.test(cmd)) return null;
+    if (NO_ANSWER.has(cmd)) return null;
     unknown.push(cmd);
     return null;
   },
@@ -157,6 +186,9 @@ declare global {
       calls: typeof calls;
       unknown: string[];
       failing: Record<string, string>;
+      delays: Record<string, number[]>;
+      maxInFlight: Record<string, number>;
+      windowTitle(): string;
       emit: typeof push;
       setState: typeof setState;
       callsTo(cmd: string): unknown[];
@@ -168,6 +200,9 @@ window.__mock = {
   calls,
   unknown,
   failing,
+  delays,
+  maxInFlight,
+  windowTitle: () => windowTitle,
   emit: push,
   setState,
   callsTo: (cmd) => calls.filter((c) => c.cmd === cmd).map((c) => c.args),

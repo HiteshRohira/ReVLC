@@ -16,6 +16,20 @@ export const calls = (page: Page, cmd: string) => page.evaluate((c) => window.__
 export const isMacProject = (name: string) => name === "macos";
 
 /**
+ * The app a layout test stands for, when this machine can stand for it:
+ * the browser draws with this machine's fonts, so a test of what fits
+ * where only means something on the matching OS. The macOS project on a
+ * Mac, the Windows project on Windows, and the Windows project on Linux
+ * (the Linux app uses the same layout); otherwise null, and the test skips.
+ */
+export function layoutHost(project: string): "macos" | "windows" | "linux" | null {
+  if (project === "macos") return process.platform === "darwin" ? "macos" : null;
+  if (process.platform === "win32") return "windows";
+  if (process.platform === "linux") return "linux";
+  return null;
+}
+
+/**
  * Fails a test on any uncaught exception, console error (Svelte's "update
  * depth exceeded" among them) or command the mock doesn't know.
  */

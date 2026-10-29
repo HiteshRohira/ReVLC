@@ -163,3 +163,23 @@ test("the player fits a minimum-size window", async ({ page }) => {
   }
   expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(720);
 });
+
+test("the window title ends on the newest file when replies come back out of order", async ({ page }) => {
+  // Tauri runs each set_title on its own thread, so two quick ones can land
+  // in either order. Found by the Cua suite on a slow Windows VM.
+  test.fail(true, "found by the Cua suite: the window title can land out of order (fixed in PR #10)");
+  const playlist = (current: number) => ({
+    items: [{ uri: "/media/Big Buck Bunny.mp4", title: "Big Buck Bunny.mp4" }, { uri: "/media/Sintel.mkv", title: "Sintel.mkv" }],
+    current, repeat: "off", shuffle: false,
+  });
+  await page.evaluate(() => (window.__mock.delays["plugin:window|set_title"] = [400]));
+  await page.evaluate((p) => window.__mock.emit("player://playlist", p), playlist(1));
+  await page.evaluate((p) => window.__mock.emit("player://playlist", p), playlist(0));
+  const asked = async () => ((await calls(page, "plugin:window|set_title")).at(-1) as { value: string }).value;
+  await expect.poll(asked).toContain("Big Buck Bunny");
+  // Every reply in, then the window has the newest title, and titles were
+  // sent one at a time.
+  await page.waitForTimeout(600);
+  expect(await page.evaluate(() => window.__mock.windowTitle())).toBe(await asked());
+  expect(await page.evaluate(() => window.__mock.maxInFlight["plugin:window|set_title"])).toBe(1);
+});
