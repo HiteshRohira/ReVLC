@@ -159,7 +159,8 @@ jobs:
           path: src-tauri/lcov.info
 
   required:
-    name: required
+    # The branch protection on main requires this check by name.
+    name: Checks passed
     if: always()
     needs: [scope, site, checks]
     runs-on: ubuntu-latest

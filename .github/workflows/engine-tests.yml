@@ -4,7 +4,7 @@
 # the tests check the frames and samples) and the FFmpeg seek-preview tests
 # (src-tauri/src/keyframes_it.rs, with the FFmpeg that ships). No screen,
 # GPU or sound card needed. On every app change, on main, in the merge
-# queue and before a release; `required` is the one gate.
+# queue and before a release; "Engine tests passed" is the one gate.
 name: Engine tests
 
 on:
@@ -111,7 +111,8 @@ jobs:
           if-no-files-found: ignore
 
   required:
-    name: required
+    # The branch protection on main requires this check by name.
+    name: Engine tests passed
     if: always()
     needs: [scope, vlc-it]
     runs-on: ubuntu-latest

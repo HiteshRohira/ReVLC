@@ -5,7 +5,7 @@
 # main screens against saved pictures, in Playwright's Linux container so
 # the fonts never change under them. linux: the built Linux package driven through
 # Cua (scripts/qa/ci/cua_suite.py), the same suite that runs on the Mac, the
-# PC, Tart and Windows Sandbox (see docs/testing.md). `required` is the one
+# PC, Tart and Windows Sandbox (see docs/testing.md). "UI checks passed" is the one
 # gate; docs/site-only PRs pass it without running the rest.
 #
 # The linux job writes its results to the run summary and uploads
@@ -225,7 +225,8 @@ jobs:
           if-no-files-found: warn
 
   required:
-    name: required
+    # The branch protection on main requires this check by name.
+    name: UI checks passed
     if: always()
     needs: [scope, browser, screenshots, linux]
     runs-on: ubuntu-latest
