@@ -42,9 +42,25 @@
     if (controlsHidden) invoke("hide_cursor");
   });
 
+  // Tauri runs each setTitle on its own task, so two quick calls can reach
+  // the window in either order. One at a time, and the newest wins.
+  let wantedTitle = "";
+  let sendingTitle = false;
+  async function showTitle(title: string) {
+    wantedTitle = title;
+    if (sendingTitle) return;
+    sendingTitle = true;
+    let sent: string | undefined;
+    while (sent !== wantedTitle) {
+      sent = wantedTitle;
+      await appWindow.setTitle(sent).catch(() => {});
+    }
+    sendingTitle = false;
+  }
+
   $effect(() => {
     const title = player.current?.title;
-    appWindow.setTitle(showPlayer && title ? `${cleanTitle(title)} — ReVLC` : "ReVLC");
+    showTitle(showPlayer && title ? `${cleanTitle(title)} — ReVLC` : "ReVLC");
   });
 
   // Media opened before onboarding finishes (e.g. a first launch from

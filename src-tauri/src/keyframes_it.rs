@@ -11,7 +11,7 @@
 
 use super::*;
 use crate::scrub::WIDTH;
-use crate::test_media::{known_bug_on_some_machines, media};
+use crate::test_media::media;
 use std::path::PathBuf;
 
 fn ffmpeg() -> PathBuf {
@@ -63,17 +63,8 @@ fn keyframes_it_the_decoder_revlc_picks_makes_previews() {
     let video = ten_seconds();
     let accel = accel(&ffmpeg(), video.to_str().unwrap(), 0, WIDTH);
     eprintln!("decoder picked: {accel:?}");
-    let run = move || {
-        let got = passes(&accel, &video, 0, 10_000).unwrap_or_else(|e| panic!("keyframe pass failed with {accel:?}: {e}"));
-        check_frames(&got);
-    };
-    if cfg!(windows) {
-        // ReVLC picks D3D11VA on Windows without trying it; with no GPU
-        // decoding (CI, a VM), every pass fails. Fixed in PR #10.
-        known_bug_on_some_machines("Windows: the keyframe pass uses D3D11VA without checking it works", run);
-    } else {
-        run();
-    }
+    let got = passes(&accel, &video, 0, 10_000).unwrap_or_else(|e| panic!("keyframe pass failed with {accel:?}: {e}"));
+    check_frames(&got);
 }
 
 #[test]
@@ -90,12 +81,7 @@ fn keyframes_it_a_gpu_that_cant_decode_is_not_picked() {
     assert!(!decodes(&ffmpeg(), video, 0, &Accel::Vaapi("/dev/dri/no-such-gpu".into()), WIDTH), "a missing GPU can't decode");
     assert!(decodes(&ffmpeg(), video, 0, &Accel::Cpu, WIDTH), "the CPU can");
     let picked = accel(&ffmpeg(), video, 0, WIDTH);
-    let works = move || assert!(decodes(&ffmpeg(), video, 0, &picked, WIDTH), "ReVLC picked {picked:?}, which can't decode here");
-    if cfg!(windows) {
-        known_bug_on_some_machines("Windows: the keyframe pass uses D3D11VA without checking it works", works);
-    } else {
-        works();
-    }
+    assert!(decodes(&ffmpeg(), video, 0, &picked, WIDTH), "ReVLC picked {picked:?}, which can't decode here");
 }
 
 #[test]

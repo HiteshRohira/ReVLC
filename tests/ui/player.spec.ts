@@ -196,7 +196,6 @@ test("the player fits a minimum-size window", async ({ page }) => {
 test("the window title ends on the newest file when replies come back out of order", async ({ page }) => {
   // Tauri runs each set_title on its own thread, so two quick ones can land
   // in either order. Found by the Cua suite on a slow Windows VM.
-  test.fail(true, "found by the Cua suite: the window title can land out of order (fixed in PR #10)");
   const playlist = (current: number) => ({
     items: [{ uri: "/media/Big Buck Bunny.mp4", title: "Big Buck Bunny.mp4" }, { uri: "/media/Sintel.mkv", title: "Sintel.mkv" }],
     current, repeat: "off", shuffle: false,

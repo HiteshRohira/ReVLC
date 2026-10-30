@@ -66,21 +66,36 @@ impl Accel {
 }
 
 /// How to decode video track `track` of `video`, dedicated GPU first: NVIDIA's
-/// NVDEC (on Windows, or on Linux with NVIDIA's driver), then on Linux each
-/// VA-API GPU, dedicated before integrated, then the CPU. On macOS,
-/// VideoToolbox picks the GPU itself; on Windows, D3D11VA uses the default
-/// one.
+/// NVDEC (on Windows, or on Linux with NVIDIA's driver), then on Windows
+/// D3D11VA on the default GPU, or on Linux each VA-API GPU, dedicated before
+/// integrated, then the CPU. Each is tried on one keyframe first: a PC
+/// without the GPU decoder fails every pass with it. On macOS, VideoToolbox
+/// picks the GPU itself.
 pub fn accel(ffmpeg: &Path, video: &str, track: usize, width: u32) -> Accel {
     if cfg!(target_os = "macos") {
         return Accel::Copy("videotoolbox");
     }
-    if (cfg!(windows) || nvidia_driver()) && decodes(ffmpeg, video, track, &Accel::Cuda, width) {
-        return Accel::Cuda;
+    let nvidia = cfg!(windows) || nvidia_driver();
+    let nodes = if cfg!(windows) { Vec::new() } else { vaapi_nodes() };
+    first_working(candidates(cfg!(windows), nvidia, nodes), |a| decodes(ffmpeg, video, track, a, width))
+}
+
+/// The GPU decoders to try, in order (see [`accel`]).
+fn candidates(windows: bool, nvidia: bool, vaapi: Vec<String>) -> Vec<Accel> {
+    let mut list = Vec::new();
+    if nvidia {
+        list.push(Accel::Cuda);
     }
-    if cfg!(windows) {
-        return Accel::Copy("d3d11va");
+    if windows {
+        list.push(Accel::Copy("d3d11va"));
     }
-    vaapi_nodes().into_iter().map(Accel::Vaapi).find(|a| decodes(ffmpeg, video, track, a, width)).unwrap_or(Accel::Cpu)
+    list.extend(vaapi.into_iter().map(Accel::Vaapi));
+    list
+}
+
+/// The first of `candidates` that `works`, or else the CPU.
+fn first_working(candidates: Vec<Accel>, works: impl FnMut(&Accel) -> bool) -> Accel {
+    candidates.into_iter().find(works).unwrap_or(Accel::Cpu)
 }
 
 /// Whether NVIDIA's own driver is loaded (Linux). Without it (nouveau, say),
@@ -303,6 +318,39 @@ mod tests {
         let mut out = std::io::Cursor::new(Vec::new());
         img.write_to(&mut out, image::ImageFormat::Jpeg).unwrap();
         out.into_inner()
+    }
+
+    fn names(list: &[Accel]) -> Vec<String> {
+        list.iter().map(|a| format!("{a:?}")).collect()
+    }
+
+    #[test]
+    fn windows_tries_nvdec_then_d3d11va() {
+        assert_eq!(names(&candidates(true, true, Vec::new())), ["Cuda", "Copy(\"d3d11va\")"]);
+    }
+
+    #[test]
+    fn linux_tries_nvdec_then_each_vaapi_gpu() {
+        let nodes = vec!["/dev/dri/renderD129".to_string(), "/dev/dri/renderD128".to_string()];
+        assert_eq!(names(&candidates(false, true, nodes)), ["Cuda", "Vaapi(\"/dev/dri/renderD129\")", "Vaapi(\"/dev/dri/renderD128\")"]);
+        assert!(candidates(false, false, Vec::new()).is_empty());
+    }
+
+    #[test]
+    fn a_gpu_that_cant_decode_falls_back() {
+        let windows = || candidates(true, true, Vec::new());
+        // No NVIDIA GPU: D3D11VA.
+        assert_eq!(format!("{:?}", first_working(windows(), |a| !matches!(a, Accel::Cuda))), "Copy(\"d3d11va\")");
+        // No GPU decoding at all: the CPU, after trying each in order.
+        let mut tried = Vec::new();
+        let got = first_working(windows(), |a| {
+            tried.push(format!("{a:?}"));
+            false
+        });
+        assert!(matches!(got, Accel::Cpu));
+        assert_eq!(tried, ["Cuda", "Copy(\"d3d11va\")"]);
+        // NVDEC that works is used without trying the rest.
+        assert!(matches!(first_working(windows(), |_| true), Accel::Cuda));
     }
 
     #[test]
