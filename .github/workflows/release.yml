@@ -1,5 +1,6 @@
 # Builds a release on GitHub's runners, for the version in package.json:
-# runs the checks (checks.yml), makes a draft pre-release (if there isn't one), builds macOS (Apple
+# runs the checks, UI checks and engine tests (checks.yml, ui-checks.yml,
+# engine-tests.yml) and stops if any fails, makes a draft pre-release (if there isn't one), builds macOS (Apple
 # Silicon) and Windows side by side, attaches their files, and writes the
 # update manifest with both platforms. The manifest is kept as the run's
 # "latest-json" artifact: download it into site/, commit it, publish the
@@ -24,8 +25,14 @@ jobs:
   checks:
     uses: ./.github/workflows/checks.yml
 
+  ui-checks:
+    uses: ./.github/workflows/ui-checks.yml
+
+  engine-tests:
+    uses: ./.github/workflows/engine-tests.yml
+
   draft:
-    needs: checks
+    needs: [checks, ui-checks, engine-tests]
     runs-on: ubuntu-latest
     outputs:
       tag: ${{ steps.tag.outputs.tag }}
@@ -51,7 +58,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [macos-14, windows-latest]
+        os: [macos-15, windows-latest]
     runs-on: ${{ matrix.os }}
     defaults:
       run:

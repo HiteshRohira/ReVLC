@@ -1,0 +1,24 @@
+# cargo nextest: each test in its own process, so one crash or hang names
+# the test instead of taking the whole run down.
+
+[profile.default]
+# A test still running after 3 × 60 s is stuck: stop it and fail.
+slow-timeout = { period = "60s", terminate-after = 3 }
+
+# The libVLC and FFmpeg tests (`_it_`, run with --run-ignored only): one at
+# a time, as libVLC keeps process-wide state and they use shared media.
+[test-groups]
+engine = { max-threads = 1 }
+
+[[profile.default.overrides]]
+filter = "test(/_it_/)"
+test-group = "engine"
+slow-timeout = { period = "120s", terminate-after = 3 }
+
+[profile.ci]
+fail-fast = false
+# No retries: a flaky test should fail and be fixed, not hide.
+retries = 0
+
+[profile.ci.junit]
+path = "junit.xml"

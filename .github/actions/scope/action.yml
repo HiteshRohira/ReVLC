@@ -1,0 +1,34 @@
+# Decides whether a run needs the app checks: always, except on a pull
+# request (or merge-queue entry) that only touches docs, the site or issue
+# templates. Fails if git can't list the changes, so a gate can't pass by
+# accident. Needs a checkout with full history (fetch-depth: 0).
+name: Scope
+description: Whether this change touches the app
+outputs:
+  run_app_checks:
+    description: "'true' or 'false'"
+    value: ${{ steps.scope.outputs.run_app_checks }}
+runs:
+  using: composite
+  steps:
+    - id: scope
+      shell: bash
+      env:
+        EVENT_NAME: ${{ github.event_name }}
+        BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha }}
+      run: |
+        set -euo pipefail
+        if [[ "$EVENT_NAME" != "pull_request" && "$EVENT_NAME" != "merge_group" ]]; then
+          echo "run_app_checks=true" >> "$GITHUB_OUTPUT"
+          exit 0
+        fi
+        git fetch --no-tags origin "$BASE_SHA"
+        git diff --name-only --no-renames -z "$BASE_SHA...HEAD" > "$RUNNER_TEMP/changed"
+        run_app_checks=false
+        while IFS= read -r -d '' path; do
+          case "$path" in
+            README.md|docs/*|site/*|.github/ISSUE_TEMPLATE/*) ;;
+            *) run_app_checks=true; break ;;
+          esac
+        done < "$RUNNER_TEMP/changed"
+        echo "run_app_checks=$run_app_checks" >> "$GITHUB_OUTPUT"
