@@ -47,7 +47,9 @@ pub(crate) fn known_bug(bug: &str, check: impl FnOnce() + std::panic::UnwindSafe
 }
 
 /// A known bug that only shows on some machines (one without GPU
-/// decoding, say): a failure is the bug, a pass is just a pass.
+/// decoding, say): a failure is the bug, a pass is just a pass. Kept, like
+/// [`known_bug`], for the next one.
+#[allow(dead_code)]
 pub(crate) fn known_bug_on_some_machines(bug: &str, check: impl FnOnce() + std::panic::UnwindSafe) {
     if std::panic::catch_unwind(check).is_err() {
         eprintln!("known bug, shows on this machine: {bug}");
