@@ -31,12 +31,16 @@ for (const [name, { rule, bug }] of Object.entries(KNOWN)) {
   });
 }
 
-test("text has enough contrast everywhere", async ({ page }) => {
-  const found: string[] = [];
-  for (const [name, show] of Object.entries(SCREENS)) {
-    await show(page);
-    const { violations } = await axe(page).withRules(["color-contrast"]).analyze();
-    found.push(...summary(violations).map((v) => `${name}: ${v}`));
-  }
-  expect(found).toEqual([]);
-});
+// With each accent: text on the accent (buttons, the selected item) changes.
+for (const accent of ["white", "orange"]) {
+  test(`text has enough contrast everywhere, ${accent} accent`, async ({ page }) => {
+    await page.addInitScript((id) => localStorage.setItem("revlc.accent", id), accent);
+    const found: string[] = [];
+    for (const [name, show] of Object.entries(SCREENS)) {
+      await show(page);
+      const { violations } = await axe(page).withRules(["color-contrast"]).analyze();
+      found.push(...summary(violations).map((v) => `${name}: ${v}`));
+    }
+    expect(found).toEqual([]);
+  });
+}
