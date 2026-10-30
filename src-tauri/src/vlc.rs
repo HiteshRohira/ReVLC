@@ -1804,28 +1804,29 @@ impl VideoSizes {
 /// The size to ask the memory output for. libVLC 3's format callback gets
 /// the decoder's padded size (320×192 for 320×180 H.264, 3840×2176 for 4K),
 /// and VLC scales the visible picture to whatever size it's given, so
-/// passing that on left a strip of padding or a squeezed picture. Uses a
-/// video track's visible size, already turned for a rotated picture, when
-/// it's the padded one less a decoder's alignment and no other track's size
-/// also is (the selected track can't be told safely here). Failing that,
-/// one the other way round, in case a rotation wasn't applied. Anything
-/// else (a filter that changes the size, no size, two tracks that both fit)
-/// keeps the size given. Then bounds CPU copies to 1080p: VLC scales larger
-/// files down to this output.
+/// passing that on left a strip of padding or a squeezed picture. Uses the
+/// video track's visible size, already turned for a rotated picture, that's
+/// the padded one less the least padding (the selected track can't be told
+/// safely here; avcodec pads 240 to 258, so a 180 track would fit too).
+/// Failing that, one the other way round, in case a rotation wasn't
+/// applied. Anything else (a filter that changes the size, no size, two
+/// sizes equally close) keeps the size given. Then bounds CPU copies to
+/// 1080p: VLC scales larger files down to this output.
 #[cfg(any(target_os = "linux", test))]
 fn gtk_frame_size(padded: (u32, u32), visible: &[(u32, u32)]) -> (u32, u32) {
     let trims = |&(w, h): &(u32, u32)| w > 0 && h > 0 && w <= padded.0 && h <= padded.1 && padded.0 - w < 128 && padded.1 - h < 128;
-    let fitting = |sizes: Vec<(u32, u32)>| {
-        let mut fit: Vec<_> = sizes.into_iter().filter(trims).collect();
+    let closest = |sizes: Vec<(u32, u32)>| {
+        let mut fit: Vec<_> = sizes.into_iter().filter(trims).map(|(w, h)| (padded.0 - w + padded.1 - h, (w, h))).collect();
         fit.sort_unstable();
         fit.dedup();
-        fit
+        match fit[..] {
+            [] => None,
+            [(_, only)] => Some(only),
+            [(a, best), (b, _), ..] => Some(if a < b { best } else { padded }),
+        }
     };
-    let mut fit = fitting(visible.to_vec());
-    if fit.is_empty() {
-        fit = fitting(visible.iter().map(|&(w, h)| (h, w)).collect());
-    }
-    let (width, height) = if let [only] = fit[..] { only } else { padded };
+    let (width, height) =
+        closest(visible.to_vec()).or_else(|| closest(visible.iter().map(|&(w, h)| (h, w)).collect())).unwrap_or(padded);
     let scale = (1920.0 / width as f64).min(1080.0 / height as f64).min(1.0);
     (((width as f64 * scale) as u32).max(1), ((height as f64 * scale) as u32).max(1))
 }
@@ -1890,11 +1891,13 @@ fn the_memory_output_drops_the_decoders_padding() {
     // turned size decides. One the wrong way round is still used alone.
     assert_eq!(gtk_frame_size((320, 320), &[(310, 318)]), (310, 318));
     assert_eq!(gtk_frame_size((192, 320), &[(320, 180)]), (180, 320));
-    // Of several video tracks, the one that fits.
-    assert_eq!(gtk_frame_size((320, 192), &[(320, 240), (320, 180)]), (320, 180));
+    // Of several video tracks, the one with the least padding: avcodec
+    // pads 240 to 258 and 180 to 194.
+    assert_eq!(gtk_frame_size((320, 194), &[(320, 240), (320, 180)]), (320, 180));
+    assert_eq!(gtk_frame_size((320, 258), &[(320, 180), (320, 240)]), (320, 240));
     assert_eq!(gtk_frame_size((320, 192), &[(320, 180), (320, 180)]), (320, 180));
-    // Two that fit can't be told apart: keep what libVLC gave.
-    assert_eq!(gtk_frame_size((320, 240), &[(320, 180), (320, 240)]), (320, 240));
+    // Two equally close can't be told apart: keep what libVLC gave.
+    assert_eq!(gtk_frame_size((320, 200), &[(320, 190), (310, 200)]), (320, 200));
     // Unknown, or a filter changed the size: keep what libVLC gave.
     assert_eq!(gtk_frame_size((320, 192), &[]), (320, 192));
     assert_eq!(gtk_frame_size((320, 192), &[(0, 0)]), (320, 192));

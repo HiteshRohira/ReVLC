@@ -45,9 +45,11 @@ fn load(extra: &[&str]) -> Vlc {
     Vlc::load(None, &args, &[], &[]).unwrap_or_else(|e| panic!("libVLC didn't load ({}): {}", e.stage, e.message))
 }
 
-/// A player whose video goes to memory, like the Linux build's.
+/// A player whose video goes to memory, like the Linux build's, which
+/// decodes in software for it (macOS's VideoToolbox surfaces can't be
+/// rotated on the way there, and stop on a video track change).
 fn video_player() -> (Vlc, Frames) {
-    let vlc = load(&["--no-audio"]);
+    let vlc = load(if cfg!(target_os = "macos") { &["--no-audio", "--no-videotoolbox"] } else { &["--no-audio"] });
     let frames: Frames = Arc::default();
     vlc.set_gtk_surface(frames.clone());
     (vlc, frames)
@@ -478,6 +480,56 @@ fn vlc_it_plays_the_common_codecs_and_sizes() {
     // sidecars) has these encoders; a missing one means the set shrank.
     assert!(missing.is_empty(), "this FFmpeg can't make: {missing:?}");
     assert!(padded.is_empty(), "frames at the wrong size: {padded:?}");
+}
+
+#[test]
+#[ignore = "needs libVLC and FFmpeg; see the module docs"]
+fn vlc_it_shows_rotated_video_turned() {
+    // Near square, so its padded size fits it either way round: the
+    // track's rotation decides. Shown turned a quarter, 310×318.
+    let plain = halves_in("near-square.mp4", 318, 310, &["-c:v", "libx264", "-pix_fmt", "yuv420p"]);
+    let turned = media("near-square-rotated.mp4", &["-display_rotation", "90", "-i", plain.to_str().unwrap(), "-c", "copy"]);
+    let (vlc, frames) = video_player();
+    play(&vlc, &turned);
+    let (px, w, h) = frame(&frames, Duration::from_millis(300));
+    assert_eq!((w, h), (310, 318), "frame size");
+    // A quarter turn anticlockwise: red on the left goes to the bottom.
+    let rows = |y0: f64, y1: f64| -> Vec<[u8; 3]> { px[(h as f64 * y0) as usize * w as usize..(h as f64 * y1) as usize * w as usize].to_vec() };
+    let (top, bottom) = (mean(&rows(0.1, 0.4)), mean(&rows(0.6, 0.9)));
+    assert!(top[2] > 180.0 && top[0] < 80.0, "top {top:?}");
+    assert!(bottom[0] > 180.0 && bottom[2] < 80.0, "bottom {bottom:?}");
+    vlc.stop();
+}
+
+#[test]
+#[ignore = "needs libVLC and FFmpeg; see the module docs"]
+fn vlc_it_switches_video_tracks() {
+    // Red 320×240, then blue 320×180, with a keyframe every half second
+    // so the switch has one to start from.
+    let two = media(
+        "two-video-tracks.mkv",
+        &[
+            "-f", "lavfi", "-i", "color=c=red:size=320x240:rate=24",
+            "-f", "lavfi", "-i", "color=c=blue:size=320x180:rate=24",
+            "-map", "0", "-map", "1", "-t", "10", "-c:v", "libx264", "-pix_fmt", "yuv420p", "-g", "12",
+        ],
+    );
+    let (vlc, frames) = video_player();
+    play(&vlc, &two);
+    // Each at its own size: both fit the first's padded size.
+    let (px, w, h) = frame(&frames, Duration::from_millis(300));
+    assert_eq!((w, h), (320, 240), "first track");
+    assert!(mean(&px)[0] > 180.0, "the first track isn't red");
+    let ids: Vec<i32> = vlc.video_tracks().into_iter().map(|t| t.id).filter(|&id| id >= 0).collect();
+    assert_eq!(ids.len(), 2, "video tracks {ids:?}");
+    vlc.set_video_track(ids[1]);
+    let (_, w, h) = wait("the second track", 10, || {
+        let (px, w, h) = frame(&frames, Duration::from_millis(100));
+        let c = mean(&px);
+        (c[2] > 180.0 && c[0] < 80.0).then_some((px, w, h))
+    });
+    assert_eq!((w, h), (320, 180), "second track");
+    vlc.stop();
 }
 
 #[test]
