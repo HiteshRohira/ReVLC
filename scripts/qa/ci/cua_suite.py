@@ -1262,8 +1262,6 @@ def quick_relaunch(ctx):
     app.finish_onboarding()
     if not ctx.check("starts playing", lambda: app.wait_playing() or "playing", app=app):
         return
-    known = "Windows: ReVLC crashes when started while the last copy's WebView2 is still exiting (PR #10)" if WIN else None
-
     def relaunch():
         current = app
         for i in range(3):
@@ -1273,13 +1271,10 @@ def quick_relaunch(ctx):
                 current.wait_window()
                 current.wait_playing()
             except Fail:
-                # A known crash is reported here, not again by the log check.
-                current.known_crash = known
                 raise Fail(f"relaunch {i + 1}: {'crashed' if not current.alive() else 'no playing window'}")
         return "three kills, three immediate relaunches, each playing"
 
-    # Timing: a fast PC may not show it.
-    ctx.check("starts again right after being killed", relaunch, known_bug=known, app=app, intermittent=True)
+    ctx.check("starts again right after being killed", relaunch, app=app)
 
 
 @scenario
@@ -1301,9 +1296,7 @@ def stalled_stream(ctx):
                 raise Skip("this runner can't show video")
             return app.wait("Buffering", timeout=30) and "Buffering shown"
 
-        ctx.check("shows Buffering when the stream stalls", buffering, app=app,
-                  known_bug="found by this suite: on Windows the Buffering spinner is drawn but missing from UI Automation, "
-                            "so screen readers aren't told" if WIN else None)
+        ctx.check("shows Buffering when the stream stalls", buffering, app=app)
         if ctx.no_video:
             # Quit while it's stuck, as below: once the clock has stopped.
             settle(app.time_ms, "the clock to stop", 30, 2)
