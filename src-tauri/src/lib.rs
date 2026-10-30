@@ -2530,7 +2530,7 @@ fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
 }
 
 /// Builds the player window from its tauri.conf entry (marked not to be made
-/// there). Started again right after a copy was closed or killed, Windows can
+/// there, in each platform's file too: those replace the list). Started again right after a copy was closed or killed, Windows can
 /// still have that copy's WebView2 helpers holding the profile folder for a
 /// few seconds, and making the web view fails with "the requested resource is
 /// in use"; that failure is waited out.
@@ -2608,7 +2608,14 @@ pub fn run() {
     let app = match builder
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
-        .setup(setup)
+        // Tauri panics on a setup error, which with panic = "abort" closes
+        // the app without a word.
+        .setup(|app| {
+            if let Err(e) = setup(app) {
+                fail_to_start(&e);
+            }
+            Ok(())
+        })
         // The player is the app: closing it quits, even with Settings open,
         // rather than leaving playback running with no window to show it.
         .on_window_event(|window, event| {
@@ -2784,6 +2791,23 @@ mod tests {
         assert_eq!(tries, 1);
         let got: Result<(), _> = retry_while_busy(Duration::from_millis(30), Duration::from_millis(5), || Err(BUSY));
         assert_eq!(got, Err(BUSY));
+    }
+
+    #[test]
+    fn every_config_leaves_the_main_window_to_setup() {
+        // A platform file's window list replaces the main one, so each needs
+        // "create": false, or Tauri makes the window and setup's fails.
+        for (file, json) in [
+            ("tauri.conf.json", include_str!("../tauri.conf.json")),
+            ("tauri.linux.conf.json", include_str!("../tauri.linux.conf.json")),
+            ("tauri.windows.conf.json", include_str!("../tauri.windows.conf.json")),
+            ("tauri.macos.conf.json", include_str!("../tauri.macos.conf.json")),
+        ] {
+            let config: serde_json::Value = serde_json::from_str(json).unwrap();
+            for window in config["app"]["windows"].as_array().into_iter().flatten() {
+                assert_eq!(window["create"], false, "{file}: window {}", window["label"]);
+            }
+        }
     }
 
     #[test]
