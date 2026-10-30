@@ -105,6 +105,35 @@ test("the shortcut list names this platform's keys", async ({ page }, info) => {
   }
 });
 
+test("the shortcut list scrolls from the keyboard, not the player", async ({ page }) => {
+  await page.keyboard.press("?");
+  const help = page.getByRole("dialog", { name: "Keyboard shortcuts" });
+  await expect(help).toBeFocused();
+  const scrolled = () => help.evaluate((el) => el.scrollTop);
+  expect(await help.evaluate((el) => el.scrollHeight > el.clientHeight), "the list is long enough to scroll").toBe(true);
+  await page.keyboard.press("ArrowDown");
+  await expect.poll(scrolled).toBeGreaterThan(0);
+  await page.keyboard.press("End");
+  await expect.poll(scrolled).toBe(await help.evaluate((el) => el.scrollHeight - el.clientHeight));
+  expect(await calls(page, "set_volume"), "ArrowDown went to the player").toEqual([]);
+  await page.keyboard.press("Escape");
+  await expect(help).toHaveCount(0);
+});
+
+test("a stalled stream is announced as Buffering", async ({ page }) => {
+  // The mock's clock stands still, which the player reads as a stall.
+  const status = page.getByRole("status").filter({ hasText: /^(Buffering)?$/ });
+  await expect(status).toHaveText("Buffering");
+  // The same live region, emptied, so the next stall is announced too.
+  await status.evaluate((el) => ((window as unknown as { region: Element }).region = el));
+  await page.getByRole("button", { name: "Pause" }).click();
+  await expect(page.getByRole("button", { name: "Play", exact: true })).toBeVisible();
+  expect(await page.evaluate(() => {
+    const el = (window as unknown as { region: Element }).region;
+    return { connected: el.isConnected, text: el.textContent };
+  })).toEqual({ connected: true, text: "" });
+});
+
 test("the title-bar menus are reachable while playing", async ({ page }, info) => {
   test.skip(isMacProject(info.project.name), "macOS uses the menu bar");
   test.fail(true, "W6: the Windows and Linux menus only show on Home");

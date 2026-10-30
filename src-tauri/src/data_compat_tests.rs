@@ -91,9 +91,9 @@ fn one_unreadable_setting_keeps_the_others() {
     let file = dir.join("settings.json");
     let text = std::fs::read_to_string(&file).unwrap().replace("\"fontSize\": 12", "\"fontSize\": \"large\"");
     std::fs::write(&file, text).unwrap();
-    crate::test_media::known_bug("one setting of the wrong type resets every setting, the analytics opt-out included", move || {
-        let s = Settings::load(&dir);
-        assert!(!s.analytics, "analytics turned back on");
-        assert_eq!(s.resume, Resume::Never, "resume reset");
-    });
+    let s = Settings::load(&dir);
+    assert!(!s.analytics, "analytics turned back on");
+    assert_eq!(s.resume, Resume::Never, "resume reset");
+    assert_eq!(s.network_caching, 5000, "network caching reset");
+    assert_eq!(s.font_size, Settings::default().font_size, "the unreadable font size takes its default");
 }

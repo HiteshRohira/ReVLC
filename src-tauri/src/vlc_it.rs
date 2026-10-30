@@ -15,7 +15,7 @@
 //! a WAV file; nothing needs a screen, a GPU or a sound card.
 
 use super::*;
-use crate::test_media::{known_bug, media, work};
+use crate::test_media::{media, work};
 use crate::effects::{Effects, Filter, StereoMode, Transform};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -45,9 +45,11 @@ fn load(extra: &[&str]) -> Vlc {
     Vlc::load(None, &args, &[], &[]).unwrap_or_else(|e| panic!("libVLC didn't load ({}): {}", e.stage, e.message))
 }
 
-/// A player whose video goes to memory, like the Linux build's.
+/// A player whose video goes to memory, like the Linux build's, which
+/// decodes in software for it (macOS's VideoToolbox surfaces can't be
+/// rotated on the way there, and stop on a video track change).
 fn video_player() -> (Vlc, Frames) {
-    let vlc = load(&["--no-audio"]);
+    let vlc = load(if cfg!(target_os = "macos") { &["--no-audio", "--no-videotoolbox"] } else { &["--no-audio"] });
     let frames: Frames = Arc::default();
     vlc.set_gtk_surface(frames.clone());
     (vlc, frames)
@@ -154,11 +156,8 @@ fn vlc_it_plays_seeks_and_reports() {
     wait("video", 5, || vlc.has_video().then_some(()));
     let (px, w, h) = frame(&frames, Duration::from_millis(200));
     assert_eq!(w, 320, "frame width");
-    // The decoder pads the height to a multiple of 16 and the memory output
-    // passes that through, so the Linux app draws a strip under the picture.
-    known_bug("the Linux video output keeps the decoder's padded height (320×192 for 320×180 video)", || {
-        assert_eq!(h, 180, "frame height");
-    });
+    // Not the decoder's padded 192, which drew a strip under the picture.
+    assert_eq!(h, 180, "frame height");
     let colourful = px.iter().filter(|p| p.iter().max().unwrap() - p.iter().min().unwrap() > 100).count();
     assert!(colourful * 3 > px.len(), "the frame isn't the test pattern");
     vlc.set_time(20_000);
@@ -415,9 +414,12 @@ fn has_encoder(encoder: &str) -> bool {
     String::from_utf8_lossy(&out.stdout).lines().any(|l| l.split_whitespace().nth(1) == Some(encoder))
 }
 
-/// Red on the left, blue on the right, `w`×`h`, in `codec`.
+/// Red on the left, blue on the right, `w`×`h`, in `codec`. Each half is
+/// an even width: some FFmpegs (Ubuntu's) round an odd one down on the way
+/// to 4:2:0, so 318 wide came out 316.
 fn halves_in(name: &str, w: u32, h: u32, codec: &[&str]) -> PathBuf {
-    let (half, size) = (format!("color=c=red:size={}x{h}:rate=24", w / 2), format!("color=c=blue:size={}x{h}:rate=24", w - w / 2));
+    let left = (w / 2 + 1) & !1;
+    let (half, size) = (format!("color=c=red:size={left}x{h}:rate=24"), format!("color=c=blue:size={}x{h}:rate=24", w - left));
     let mut args = vec!["-f", "lavfi", "-i", &half, "-f", "lavfi", "-i", &size, "-filter_complex", "[0][1]hstack", "-t", "3"];
     args.extend_from_slice(codec);
     media(name, &args)
@@ -460,18 +462,15 @@ fn vlc_it_plays_the_common_codecs_and_sizes() {
         let (vlc, frames) = video_player();
         play(&vlc, &file);
         let (px, fw, fh) = frame(&frames, Duration::from_millis(300));
-        // The frame may carry the decoder's padding (the known bug above):
-        // a strip below or to the right, or, for a picture scaled down to
-        // 1080p, a picture scaled from the padded size and so a little
-        // narrower (4K H.264 comes out 1904×1080). The picture is its
-        // top-left part.
-        let near = |got: i32, want: u32| got as u32 + 32 >= want && (got as u32) < want + 128;
-        assert!(near(fw, *w) && near(fh, *h), "{name}: frame {fw}×{fh}");
+        // Not the decoder's padded size: that drew a strip below or to the
+        // right, or, scaled down to 1080p, a squeezed picture (4K H.264
+        // came out 1904×1080).
         if (fw as u32, fh as u32) != (*w, *h) {
             padded.push(format!("{name} {w}×{h} as {fw}×{fh}"));
+            vlc.stop();
+            continue;
         }
-        let (w, h) = ((*w as i32).min(fw), (*h as i32).min(fh));
-        let px: Vec<[u8; 3]> = (0..h).flat_map(|y| px[(y * fw) as usize..(y * fw + w) as usize].to_vec()).collect();
+        let (w, h) = (fw, fh);
         let (left, right) = (mean(&region(&px, w, h, 0.1, 0.4)), mean(&region(&px, w, h, 0.6, 0.9)));
         assert!(left[0] > 180.0 && left[2] < 80.0, "{name}: left half {left:?}");
         assert!(right[2] > 180.0 && right[0] < 80.0, "{name}: right half {right:?}");
@@ -480,9 +479,57 @@ fn vlc_it_plays_the_common_codecs_and_sizes() {
     // Every FFmpeg the tests run with (Linux's, the macOS and Windows
     // sidecars) has these encoders; a missing one means the set shrank.
     assert!(missing.is_empty(), "this FFmpeg can't make: {missing:?}");
-    known_bug("the memory video output (Linux's) keeps the decoder's padded size: a strip below or to the right, or a slightly squeezed picture when scaled", move || {
-        assert!(padded.is_empty(), "padded: {padded:?}");
+    assert!(padded.is_empty(), "frames at the wrong size: {padded:?}");
+}
+
+#[test]
+#[ignore = "needs libVLC and FFmpeg; see the module docs"]
+fn vlc_it_shows_rotated_video_turned() {
+    // Near square, so its padded size fits it either way round: the
+    // track's rotation decides. Shown turned a quarter, 310×318.
+    let plain = halves_in("near-square.mp4", 318, 310, &["-c:v", "libx264", "-pix_fmt", "yuv420p"]);
+    let turned = media("near-square-rotated.mp4", &["-display_rotation", "90", "-i", plain.to_str().unwrap(), "-c", "copy"]);
+    let (vlc, frames) = video_player();
+    play(&vlc, &turned);
+    let (px, w, h) = frame(&frames, Duration::from_millis(300));
+    assert_eq!((w, h), (310, 318), "frame size");
+    // A quarter turn anticlockwise: red on the left goes to the bottom.
+    let rows = |y0: f64, y1: f64| -> Vec<[u8; 3]> { px[(h as f64 * y0) as usize * w as usize..(h as f64 * y1) as usize * w as usize].to_vec() };
+    let (top, bottom) = (mean(&rows(0.1, 0.4)), mean(&rows(0.6, 0.9)));
+    assert!(top[2] > 180.0 && top[0] < 80.0, "top {top:?}");
+    assert!(bottom[0] > 180.0 && bottom[2] < 80.0, "bottom {bottom:?}");
+    vlc.stop();
+}
+
+#[test]
+#[ignore = "needs libVLC and FFmpeg; see the module docs"]
+fn vlc_it_switches_video_tracks() {
+    // Red 320×240, then blue 320×180, with a keyframe every half second
+    // so the switch has one to start from.
+    let two = media(
+        "two-video-tracks.mkv",
+        &[
+            "-f", "lavfi", "-i", "color=c=red:size=320x240:rate=24",
+            "-f", "lavfi", "-i", "color=c=blue:size=320x180:rate=24",
+            "-map", "0", "-map", "1", "-t", "10", "-c:v", "libx264", "-pix_fmt", "yuv420p", "-g", "12",
+        ],
+    );
+    let (vlc, frames) = video_player();
+    play(&vlc, &two);
+    // Each at its own size: both fit the first's padded size.
+    let (px, w, h) = frame(&frames, Duration::from_millis(300));
+    assert_eq!((w, h), (320, 240), "first track");
+    assert!(mean(&px)[0] > 180.0, "the first track isn't red");
+    let ids: Vec<i32> = vlc.video_tracks().into_iter().map(|t| t.id).filter(|&id| id >= 0).collect();
+    assert_eq!(ids.len(), 2, "video tracks {ids:?}");
+    vlc.set_video_track(ids[1]);
+    let (_, w, h) = wait("the second track", 10, || {
+        let (px, w, h) = frame(&frames, Duration::from_millis(100));
+        let c = mean(&px);
+        (c[2] > 180.0 && c[0] < 80.0).then_some((px, w, h))
     });
+    assert_eq!((w, h), (320, 180), "second track");
+    vlc.stop();
 }
 
 #[test]

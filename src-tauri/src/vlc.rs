@@ -70,6 +70,8 @@ struct VideoTrack {
     sar_den: c_uint,
     frame_rate_num: c_uint,
     frame_rate_den: c_uint,
+    /// libvlc_video_orient_t; 4 and up are a quarter turn, width and height swapped.
+    orientation: c_int,
 }
 
 #[repr(C)]
@@ -821,7 +823,14 @@ impl Vlc {
     pub fn set_gtk_surface(&self, frames: std::sync::Arc<std::sync::Mutex<Option<PresentedFrame>>>) {
         // The main player and its callbacks live until process exit, like
         // the event subscription. Attach once, before media can be opened.
-        let output = Box::into_raw(Box::new(GtkOutput { frame: std::cell::UnsafeCell::new(None), frames }));
+        let visible = Some(VideoSizes {
+            mp: self.mp,
+            get_media: self.api.libvlc_media_player_get_media,
+            tracks_get: self.api.libvlc_media_tracks_get,
+            tracks_release: self.api.libvlc_media_tracks_release,
+            media_release: self.api.libvlc_media_release,
+        });
+        let output = Box::into_raw(Box::new(GtkOutput { frame: std::cell::UnsafeCell::new(None), frames, visible }));
         unsafe {
             (self.api.libvlc_video_set_callbacks)(self.mp, gtk_lock, None, Some(gtk_display), output.cast());
             (self.api.libvlc_video_set_format_callbacks)(self.mp, gtk_format, None);
@@ -1744,6 +1753,82 @@ struct GtkOutput {
     // on its video thread. GTK only receives an owned copy of these pixels.
     frame: std::cell::UnsafeCell<Option<GtkFrame>>,
     frames: std::sync::Arc<std::sync::Mutex<Option<PresentedFrame>>>,
+    /// The video tracks' visible sizes, which the format callback doesn't
+    /// get (see [`gtk_frame_size`]).
+    visible: Option<VideoSizes>,
+}
+
+/// Reads the playing media's video track sizes from the format callback.
+/// Not `libvlc_video_get_size`, which reads the first video track only and
+/// ignores rotation; and not the selected track's id, which takes the input
+/// lock that stopping holds while it waits for this video thread.
+#[cfg(any(target_os = "linux", test))]
+#[derive(Clone, Copy)]
+struct VideoSizes {
+    mp: *mut Player,
+    get_media: unsafe extern "C" fn(*mut Player) -> *mut Media,
+    tracks_get: unsafe extern "C" fn(*mut Media, *mut *mut *mut MediaTrack) -> c_uint,
+    tracks_release: unsafe extern "C" fn(*mut *mut MediaTrack, c_uint),
+    media_release: unsafe extern "C" fn(*mut Media),
+}
+
+#[cfg(any(target_os = "linux", test))]
+impl VideoSizes {
+    /// Each video track's visible size, the way round it's shown.
+    unsafe fn get(&self) -> Vec<(u32, u32)> {
+        let mut sizes = Vec::new();
+        unsafe {
+            let media = (self.get_media)(self.mp);
+            if media.is_null() {
+                return sizes;
+            }
+            let mut tracks: *mut *mut MediaTrack = std::ptr::null_mut();
+            let count = (self.tracks_get)(media, &mut tracks);
+            for i in 0..count as usize {
+                let track = &**tracks.add(i);
+                if track.kind == 1 && !track.details.is_null() {
+                    let video = &*(track.details as *const VideoTrack);
+                    let turned = video.orientation & 4 != 0;
+                    sizes.push(if turned { (video.height, video.width) } else { (video.width, video.height) });
+                }
+            }
+            if count > 0 {
+                (self.tracks_release)(tracks, count);
+            }
+            (self.media_release)(media);
+        }
+        sizes
+    }
+}
+
+/// The size to ask the memory output for. libVLC 3's format callback gets
+/// the decoder's padded size (320×192 for 320×180 H.264, 3840×2176 for 4K),
+/// and VLC scales the visible picture to whatever size it's given, so
+/// passing that on left a strip of padding or a squeezed picture. Uses the
+/// video track's visible size, already turned for a rotated picture, that's
+/// the padded one less the least padding (the selected track can't be told
+/// safely here; avcodec pads 240 to 258, so a 180 track would fit too).
+/// Failing that, one the other way round, in case a rotation wasn't
+/// applied. Anything else (a filter that changes the size, no size, two
+/// sizes equally close) keeps the size given. Then bounds CPU copies to
+/// 1080p: VLC scales larger files down to this output.
+#[cfg(any(target_os = "linux", test))]
+fn gtk_frame_size(padded: (u32, u32), visible: &[(u32, u32)]) -> (u32, u32) {
+    let trims = |&(w, h): &(u32, u32)| w > 0 && h > 0 && w <= padded.0 && h <= padded.1 && padded.0 - w < 128 && padded.1 - h < 128;
+    let closest = |sizes: Vec<(u32, u32)>| {
+        let mut fit: Vec<_> = sizes.into_iter().filter(trims).map(|(w, h)| (padded.0 - w + padded.1 - h, (w, h))).collect();
+        fit.sort_unstable();
+        fit.dedup();
+        match fit[..] {
+            [] => None,
+            [(_, only)] => Some(only),
+            [(a, best), (b, _), ..] => Some(if a < b { best } else { padded }),
+        }
+    };
+    let (width, height) =
+        closest(visible.to_vec()).or_else(|| closest(visible.iter().map(|&(w, h)| (h, w)).collect())).unwrap_or(padded);
+    let scale = (1920.0 / width as f64).min(1080.0 / height as f64).min(1.0);
+    (((width as f64 * scale) as u32).max(1), ((height as f64 * scale) as u32).max(1))
 }
 
 #[cfg(any(target_os = "linux", test))]
@@ -1759,13 +1844,11 @@ unsafe extern "C" fn gtk_format(
         if *width == 0 || *height == 0 {
             return 0;
         }
-        // Bound CPU copies to 1080p; VLC scales larger files to this output.
-        let scale = (1920.0 / *width as f64).min(1080.0 / *height as f64).min(1.0);
-        let w = ((*width as f64 * scale) as u32).max(1);
-        let h = ((*height as f64 * scale) as u32).max(1);
+        let output = &*(*opaque as *const GtkOutput);
+        let visible = output.visible.map(|v| v.get()).unwrap_or_default();
+        let (w, h) = gtk_frame_size((*width, *height), &visible);
         let stride = (w * 4 + 31) & !31;
         let Some(buf) = FrameBuf::new(stride as usize * h as usize) else { return 0 };
-        let output = &*(*opaque as *const GtkOutput);
         *output.frame.get() = Some(GtkFrame { buf, width: w, height: h, stride });
         std::ptr::copy_nonoverlapping(b"RV32".as_ptr().cast(), chroma, 4);
         (*width, *height, *pitches, *lines) = (w, h, stride, h);
@@ -1797,6 +1880,31 @@ unsafe extern "C" fn gtk_display(opaque: *mut c_void, _picture: *mut c_void) {
     }
 }
 
+#[test]
+fn the_memory_output_drops_the_decoders_padding() {
+    // Padded H.264 and 4K, an odd size, portrait and a rotated picture.
+    assert_eq!(gtk_frame_size((320, 192), &[(320, 180)]), (320, 180));
+    assert_eq!(gtk_frame_size((3840, 2176), &[(3840, 2160)]), (1920, 1080));
+    assert_eq!(gtk_frame_size((320, 192), &[(318, 178)]), (318, 178));
+    assert_eq!(gtk_frame_size((192, 320), &[(180, 320)]), (180, 320));
+    // A near-square rotated picture fits either way round: the track's
+    // turned size decides. One the wrong way round is still used alone.
+    assert_eq!(gtk_frame_size((320, 320), &[(310, 318)]), (310, 318));
+    assert_eq!(gtk_frame_size((192, 320), &[(320, 180)]), (180, 320));
+    // Of several video tracks, the one with the least padding: avcodec
+    // pads 240 to 258 and 180 to 194.
+    assert_eq!(gtk_frame_size((320, 194), &[(320, 240), (320, 180)]), (320, 180));
+    assert_eq!(gtk_frame_size((320, 258), &[(320, 180), (320, 240)]), (320, 240));
+    assert_eq!(gtk_frame_size((320, 192), &[(320, 180), (320, 180)]), (320, 180));
+    // Two equally close can't be told apart: keep what libVLC gave.
+    assert_eq!(gtk_frame_size((320, 200), &[(320, 190), (310, 200)]), (320, 200));
+    // Unknown, or a filter changed the size: keep what libVLC gave.
+    assert_eq!(gtk_frame_size((320, 192), &[]), (320, 192));
+    assert_eq!(gtk_frame_size((320, 192), &[(0, 0)]), (320, 192));
+    assert_eq!(gtk_frame_size((640, 360), &[(320, 180)]), (640, 360));
+    assert_eq!(gtk_frame_size((320, 180), &[(640, 360)]), (320, 180));
+}
+
 #[cfg(all(test, target_os = "linux"))]
 mod gtk_output_tests {
     use super::*;
@@ -1804,7 +1912,7 @@ mod gtk_output_tests {
     #[test]
     fn bounded_aligned_frames_are_copied_before_gtk_uses_them() {
         let frames = std::sync::Arc::new(std::sync::Mutex::new(None));
-        let mut output = GtkOutput { frame: std::cell::UnsafeCell::new(None), frames: frames.clone() };
+        let mut output = GtkOutput { frame: std::cell::UnsafeCell::new(None), frames: frames.clone(), visible: None };
         let mut opaque = std::ptr::from_mut(&mut output).cast();
         let (mut width, mut height, mut pitch, mut lines) = (3840, 2160, 0, 0);
         let mut chroma = [0; 4];
