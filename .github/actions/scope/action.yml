@@ -1,5 +1,5 @@
 # Decides whether a run needs the app checks: always, except on a pull
-# request (or merge-queue entry) that only touches docs, the site or issue
+# request (or merge-queue entry) that only touches docs, plans, the site or issue
 # templates. Fails if git can't list the changes, so a gate can't pass by
 # accident. Needs a checkout with full history (fetch-depth: 0).
 name: Scope
@@ -27,7 +27,7 @@ runs:
         run_app_checks=false
         while IFS= read -r -d '' path; do
           case "$path" in
-            README.md|docs/*|site/*|.github/ISSUE_TEMPLATE/*) ;;
+            README.md|docs/*|plans/*|site/*|.github/ISSUE_TEMPLATE/*) ;;
             *) run_app_checks=true; break ;;
           esac
         done < "$RUNNER_TEMP/changed"
