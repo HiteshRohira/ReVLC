@@ -1,15 +1,15 @@
 {
-  "version": "0.2.10",
-  "notes": "Seek-bar previews, precise seeking, preview cache and cancellation fixes, selected-track previews, and experimental Linux support.",
-  "pub_date": "2026-10-25T03:04:28Z",
+  "version": "0.2.11",
+  "notes": "Music, Playlists, Network shares and Internet radio in the sidebar. Windows and Linux keep their menus while playing. Space and Return press the button the keyboard is on. Live radio is no longer offered a place to continue from. The welcome screen fits the smallest window. macOS keeps Settings in the menu bar when the engine can't start.",
+  "pub_date": "2026-11-15T15:44:56Z",
   "platforms": {
     "darwin-aarch64": {
-      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSVlR1Wml6L0lBejRTYUg0Wnh4ZFFCVldLa0lSSDFIWEFuNENTdm5tZHhKZktqR0hFbGx6WldraFBNeWdac1hvMlBuMWJPSVVZYlNXUnRDWXhncTUzUHRSZVJCemgwa2dvPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkyODk3MzU0CWZpbGU6UmVWTEMuYXBwLnRhci5negl2ZXJzaW9uOjAuMi4xMApNeEhHQ1lmUFllVjltS25rNzZwTTB3NUxUekNPaVVUYTJvZFhkaDd3L0o0OWkwY1NqbG1YVkU4NGNWWjRKOU9DOGNnZ0lmNmFsK29xaW8xTUZnSmhBUT09Cg==",
-      "url": "https://github.com/HiteshRohira/ReVLC/releases/download/v0.2.10-alpha/ReVLC-0.2.10-alpha-arm64.app.tar.gz"
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSVlR1Wml6L0lBejYyRVlRZmV1Y0Z2azZ3cFBVY2Q1Rktvd3JrUnlLS29DSnB5eTRTVmlnYlh2MTROYnlobmlTdGNaWnR3M1d4TmNwamU1U2traHVucithc2VTRlZ2ZHdjPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzk0NzU3MjUzCWZpbGU6UmVWTEMuYXBwLnRhci5negl2ZXJzaW9uOjAuMi4xMQpnQ0VXNXJhMjVNWGFEREpIVzNjcTlxa3BhN0Z2RXZOUEJLMTlVMjB0d2VBcDFIQUZNNEx6OFVqNDBlZm9rQk1KQU9FNUFiL09WZHhRWU8rSks3Z2FDQT09Cg==",
+      "url": "https://github.com/HiteshRohira/ReVLC/releases/download/v0.2.11-alpha/ReVLC-0.2.11-alpha-arm64.app.tar.gz"
     },
     "windows-x86_64": {
-      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSVlR1Wml6L0lBejBxY2d1bDVxNDV4VU5YUjloRWppWVcxUXJYMDlXTzNxNHV6ME42Ujg5SWdiMHpBd1pCZDMwb1hibmNpakdMemtzQ1NFQ1FqdFlMSUxEcUxVdGpVd3dNPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkyODk3NDE1CWZpbGU6UmVWTENfMC4yLjEwX3g2NC1zZXR1cC5leGUJdmVyc2lvbjowLjIuMTAKWXZJQ2xUTWNDejFrcXJuYktUQWczQ2twalB0aW1ZdGtwSmNpQ1lld00vTytrN0NlWlYwN2lMdmM0YzJQaHgvT1pudWZkRWgvMXJQeWxIRGxINUNPQ2c9PQo=",
-      "url": "https://github.com/HiteshRohira/ReVLC/releases/download/v0.2.10-alpha/ReVLC-0.2.10-alpha-x64-setup.exe"
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSVlR1Wml6L0lBejdyMmVlbE4rUTZHRnVzeWZGRGx5U0RObFJ1WXIrU2F1OVZ2REFRaVdBN01VMDJDQjJZbzNXak9BeUhreG43RGJEYVN2NjZpTVdkTmtTWU5NSmZZU1EwPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzk0NzU3NDQyCWZpbGU6UmVWTENfMC4yLjExX3g2NC1zZXR1cC5leGUJdmVyc2lvbjowLjIuMTEKUm8zeWxMVmRYV3hCWk1FdTJ1RkZnZUJzM1RYaG9PODg3VnJiamgyVWRmUXVKeDdLeTFkODdkNnlQSFhQK211cXplZkpmWUxHTWNZajEyaGtaN2ErQlE9PQo=",
+      "url": "https://github.com/HiteshRohira/ReVLC/releases/download/v0.2.11-alpha/ReVLC-0.2.11-alpha-x64-setup.exe"
     }
   }
 }
