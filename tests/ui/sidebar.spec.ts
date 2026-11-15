@@ -1,4 +1,4 @@
-import { test, expect, open, calls } from "./fixtures";
+import { test, expect, open, calls, isMacProject } from "./fixtures";
 
 // The sidebar's sections beyond Home and Videos: Music, Playlists, Network
 // shares and Internet radio, on the mocked backend (ui/tests/mock.ts).
@@ -150,6 +150,23 @@ test("radio stations are searched, starred and played by name", async ({ page })
   await search.fill("zzz");
   await search.press("Enter");
   await expect(page.getByText("No stations match that search.")).toBeVisible();
+});
+
+test("Space on a station's star stars it, as Return does", async ({ page }, info) => {
+  await open(page, "home");
+  await section(page, "Internet radio").click();
+  // Tab from the station to its star. (On a Mac, WebKit's plain Tab skips buttons.)
+  await page.getByRole("list", { name: "Stations", exact: true }).getByRole("button", { name: /^Jazz FM/ }).focus();
+  await page.keyboard.press(isMacProject(info.project.name) && process.platform === "darwin" ? "Alt+Tab" : "Tab");
+  await expect(page.getByRole("button", { name: "Add Jazz FM to favourites" })).toBeFocused();
+  await page.keyboard.press("Space");
+  await expect(page.getByRole("button", { name: "Remove Jazz FM from favourites" })).toBeFocused();
+  await page.keyboard.press("Enter");
+  await expect(page.getByRole("button", { name: "Add Jazz FM to favourites" })).toBeVisible();
+  expect(await calls(page, "radio_favorite")).toHaveLength(2);
+  // Nothing started playing.
+  expect(await calls(page, "toggle_pause")).toHaveLength(0);
+  expect(await calls(page, "open")).toHaveLength(0);
 });
 
 test("an unreachable radio directory says so and can be tried again", async ({ page }) => {

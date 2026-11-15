@@ -1,5 +1,6 @@
 <script lang="ts">
   import { invoke } from "@tauri-apps/api/core";
+  import { untrack } from "svelte";
   import { ACTION_BY_ID, effectiveBindings, formatBinding, type Host } from "./actions";
   import { MENUS } from "./menus";
   import { settings } from "./settings.svelte";
@@ -8,7 +9,9 @@
 
   // The Windows title strip over the home screen: app icon, VLC-style menus
   // and room to drag. The window buttons sit over its right end.
-  let { host }: { host: Host } = $props();
+  // In the player (`overlay`) it's only the menus, over the video between
+  // the back button and the title, and they hide with the controls.
+  let { host, overlay = false, hidden = false, width = $bindable(0) }: { host: Host; overlay?: boolean; hidden?: boolean; width?: number } = $props();
 
   let open = $state<number | null>(null);
   let active = $state(-1);
@@ -18,6 +21,14 @@
 
   const bindings = $derived(effectiveBindings(settings.value?.shortcuts ?? {}));
   const items = $derived(open === null ? [] : MENUS[open].items);
+
+  // An open menu keeps the player's controls (and these menus) showing.
+  // Written, not depended on, as in PlayerView.
+  $effect(() => {
+    if (open === null) return;
+    untrack(() => ui.openMenus++);
+    return () => untrack(() => ui.openMenus--);
+  });
 
   function show(i: number | null, first = false) {
     open = i;
@@ -77,9 +88,9 @@
 
 <svelte:window onkeydowncapture={onKeyDown} onkeyupcapture={onKeyUp} onpointerdowncapture={onPointerDown} onblur={onBlur} />
 
-<header bind:this={bar} data-tauri-drag-region>
-  <img src={icon} alt="" data-tauri-drag-region />
-  <nav>
+<header bind:this={bar} class:overlay class:hidden data-tauri-drag-region>
+  {#if !overlay}<img src={icon} alt="" data-tauri-drag-region />{/if}
+  <nav bind:clientWidth={width}>
     {#each MENUS as m, i}
       <div class="m">
         <button class:open={open === i} onclick={() => show(open === i ? null : i)} onpointerenter={() => open !== null && open !== i && show(i)}>
@@ -114,6 +125,21 @@
     background: var(--sidebar);
     border-bottom: 1px solid var(--border);
     box-sizing: border-box;
+  }
+  /* After the player's back button (12px in, 26px wide). */
+  header.overlay {
+    inset: 0 auto auto 42px;
+    padding: 0;
+    background: none;
+    border: 0;
+    transition: opacity 0.25s;
+  }
+  header.overlay.hidden {
+    opacity: 0;
+    pointer-events: none;
+  }
+  header.overlay nav > .m > button {
+    color: rgb(255 255 255 / 0.82);
   }
   img {
     width: 16px;

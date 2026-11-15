@@ -910,7 +910,7 @@ export function chapterAt(chapters: Chapter[], ms: number): Chapter | null {
 
 /** Whether a history entry was left part-way through (mirrors the backend's rule). */
 export function resumable(e: HistoryEntry) {
-  return !e.finished && e.position > 15_000 && (e.length === 0 || e.position < e.length - 15_000);
+  return !e.finished && e.position > 15_000 && e.length > 0 && e.position < e.length - 15_000;
 }
 
 /** Parses "1:02:03", "2:03" or "123" (seconds) into ms; null if invalid. */

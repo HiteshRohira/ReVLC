@@ -10,7 +10,8 @@
   import { ui } from "./ui.svelte";
   import { modKey } from "./platform";
 
-  let { hidden, onfullscreen, onadd }: { hidden: boolean; onfullscreen: () => void; onadd: () => void } = $props();
+  // `menusWidth`: room to leave after the back button for the Windows and Linux menus.
+  let { hidden, onfullscreen, onadd, menusWidth = 0 }: { hidden: boolean; onfullscreen: () => void; onadd: () => void; menusWidth?: number } = $props();
 
   const s = $derived(player.state);
   const VolumeIcon = $derived(s.muted || s.volume === 0 ? VolumeX : s.volume < 50 ? Volume1 : Volume2);
@@ -94,7 +95,7 @@
   <div class="top" data-tauri-drag-region>
     <div class="bar" data-tauri-drag-region>
       <button class="back" data-tip="Back to home" aria-label="Back to home" onclick={player.stop}><ChevronLeft size={18} /></button>
-      <div class="title" data-tauri-drag-region>
+      <div class="title" data-tauri-drag-region style:margin-left={menusWidth ? `${menusWidth + 8}px` : null}>
         {cleanTitle(player.current?.title ?? "")}{#if chapterName}<span>&nbsp;·&nbsp;{chapterName}</span>{/if}
       </div>
     </div>
