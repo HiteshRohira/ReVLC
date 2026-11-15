@@ -235,9 +235,84 @@ export interface LibraryItem {
   groupArt: string | null;
 }
 
+/** A music file in the library. */
+export interface Song {
+  uri: string;
+  /** The song's title: its tag, or its file name without a track number. */
+  name: string;
+  root: string;
+  folder: string;
+  modified: number;
+  artist: string | null;
+  album: string | null;
+  albumArtist: string | null;
+  genre: string | null;
+  track: number | null;
+  disc: number | null;
+  year: number | null;
+  duration: number;
+  /** The album cover (a cached copy). */
+  art: string | null;
+}
+
 export interface Library {
   folders: string[];
+  /** The videos. */
   items: LibraryItem[];
+  music: Song[];
+}
+
+/** A playlist the user saved (not the queue of what's playing). */
+export interface SavedPlaylist {
+  id: string;
+  name: string;
+  items: Item[];
+  /** When it last changed, Unix seconds. */
+  updated: number;
+}
+
+/** A folder or a media file on a server or a mounted share. */
+export interface BrowseEntry {
+  uri: string;
+  name: string;
+  dir: boolean;
+}
+
+export interface Listing {
+  /** A local path, or a URL without a password. */
+  location: string;
+  name: string;
+  /** A folder on this computer (a mounted share), which can join the library. */
+  local: boolean;
+  entries: BrowseEntry[];
+}
+
+/** A server the user saved. Passwords are never saved. */
+export interface Server {
+  url: string;
+  name: string;
+  user: string | null;
+}
+
+export interface Places {
+  /** Network volumes the system has mounted. */
+  mounted: { name: string; path: string }[];
+  servers: Server[];
+  /** Servers and streams found on the local network so far. */
+  found: { uri: string; name: string; dir: boolean; source: string }[];
+}
+
+/** A radio station from the directory. */
+export interface Station {
+  id: string;
+  name: string;
+  url: string;
+  /** Two-letter country code, or "". */
+  country: string;
+  tags: string[];
+  codec: string;
+  /** kbit/s, 0 when unknown. */
+  bitrate: number;
 }
 
 export interface Item {
@@ -347,7 +422,11 @@ class Player {
   titles = $state<Title[]>([]);
   bookmarks = $state<Bookmark[]>([]);
   history = $state<HistoryEntry[]>([]);
-  library = $state<Library>({ folders: [], items: [] });
+  library = $state<Library>({ folders: [], items: [], music: [] });
+  /** The playlists the user saved. */
+  playlists = $state<SavedPlaylist[]>([]);
+  /** Favourite radio stations. */
+  stations = $state<Station[]>([]);
   /** Bumped when a thumbnail file changes, to bust the web view's image cache. */
   thumbVersion = $state(0);
   /**
@@ -483,9 +562,55 @@ class Player {
     try {
       this.library = await invoke<Library>(rescan ? "library_rescan" : "library_list");
     } catch {
-      this.library = { folders: [], items: [] };
+      this.library = { folders: [], items: [], music: [] };
     }
   }
+
+  async loadPlaylists() {
+    try {
+      this.playlists = await invoke<SavedPlaylist[]>("playlists_list");
+    } catch {
+      this.playlists = [];
+    }
+  }
+
+  /** Runs a command that answers with the saved playlists. Returns whether it worked. */
+  async #playlists(cmd: string, args: Record<string, unknown>): Promise<boolean> {
+    try {
+      this.playlists = await invoke<SavedPlaylist[]>(cmd, args);
+      return true;
+    } catch (e) {
+      this.notify("error", String(e));
+      return false;
+    }
+  }
+
+  createPlaylist = (name: string, fromQueue: boolean) => this.#playlists("playlists_create", { name, fromQueue });
+  importPlaylist = (path: string) => this.#playlists("playlists_import", { path });
+  renamePlaylist = (id: string, name: string) => this.#playlists("playlists_rename", { id, name });
+  deletePlaylist = (id: string) => this.#playlists("playlists_delete", { id });
+  addToPlaylist = (id: string, uris: string[]) => this.#playlists("playlists_add", { id, uris });
+  removeFromPlaylist = (id: string, index: number) => this.#playlists("playlists_remove_item", { id, index });
+  /** Plays a saved playlist from one of its items; it takes the queue's place. */
+  playPlaylist = (id: string, index = 0) => this.#call("playlists_play", { id, index });
+
+  async loadStations() {
+    try {
+      this.stations = await invoke<Station[]>("radio_favorites");
+    } catch {
+      this.stations = [];
+    }
+  }
+
+  async setFavoriteStation(station: Station, on: boolean) {
+    try {
+      this.stations = await invoke<Station[]>("radio_favorite", { station: $state.snapshot(station), on });
+    } catch (e) {
+      this.notify("error", String(e));
+    }
+  }
+
+  playStation = (station: Station) => this.#call("radio_play", { station: $state.snapshot(station) });
 
   #refreshTimer: ReturnType<typeof setTimeout> | undefined;
   // Thumbnails arrive one by one; refresh the lists at most every couple of seconds.

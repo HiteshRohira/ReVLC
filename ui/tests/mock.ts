@@ -66,7 +66,37 @@ let settings: Json = { ...settingsDefaults };
 const history = [
   { uri: VIDEO, title: "Big Buck Bunny.mp4", position: 120_000, length: 596_000, updated: 1_790_000_000, finished: false, thumb: null },
 ];
-const library = { folders: ["/media"], items: [] as Json[] };
+const song = (file: string, name: string, track: number | null, album: string | null, artist: string | null, duration: number): Json => ({
+  uri: `/media/Music/${file}`, name, root: "/media", folder: "Music/Mezzanine", modified: 1_790_000_000, artist, album, albumArtist: artist,
+  genre: null, track, disc: null, year: album ? 1998 : null, duration, art: null,
+});
+const library = {
+  folders: ["/media"],
+  items: [] as Json[],
+  music: [
+    song("02 Risingson.flac", "Risingson", 2, "Mezzanine", "Massive Attack", 298_000),
+    song("01 Angel.flac", "Angel", 1, "Mezzanine", "Massive Attack", 379_000),
+    song("Loose/Field recording.wav", "Field recording", null, null, null, 61_000),
+  ],
+};
+let playlists: Json[] = [
+  { id: "p1", name: "Road trip", updated: 1_790_000_000, items: [{ uri: VIDEO, title: "Big Buck Bunny.mp4" }, { uri: SECOND, title: "Sintel.mkv" }] },
+];
+let nextPlaylist = 2;
+let servers: Json[] = [{ url: "ftp://nas.local/films", name: "Films", user: "me" }];
+const station = (id: string, name: string, tags: string[]): Json => ({ id, name, url: `https://radio.example/${id}`, country: "GB", tags, codec: "MP3", bitrate: 128 });
+const directory = [station("s1", "BBC World Service", ["news", "talk"]), station("s2", "Jazz FM", ["jazz"]), station("s3", "Radio Paradise", ["eclectic"])];
+let favorites: Json[] = [];
+/** Folders the network view can open, by location. */
+const folders: Record<string, Json[]> = {
+  "/Volumes/films": [
+    { uri: "/Volumes/films/Season 1", name: "Season 1", dir: true },
+    { uri: "/Volumes/films/Pilot.mkv", name: "Pilot.mkv", dir: false },
+    { uri: "/Volumes/films/Theme.mp3", name: "Theme.mp3", dir: false },
+  ],
+  "/Volumes/films/Season 1": [{ uri: "/Volumes/films/Season 1/Episode 1.mkv", name: "Episode 1.mkv", dir: false }],
+  "ftp://nas.local/films": [{ uri: "ftp://nas.local/films/Trailer.mp4", name: "Trailer.mp4", dir: false }],
+};
 
 /** Every command the UI sent, with its arguments. */
 const calls: { cmd: string; args: unknown }[] = [];
@@ -114,6 +144,68 @@ const handlers: Record<string, (args: Json) => unknown> = {
   },
   library_list: () => library,
   library_rescan: () => library,
+  library_add: () => library,
+  playlists_list: () => playlists,
+  playlists_create: (a) => {
+    const name = String(a.name).trim();
+    if (playlists.some((p) => String(p.name).toLowerCase() === name.toLowerCase())) throw `There's already a playlist called “${name}”`;
+    playlists = [{ id: `p${nextPlaylist++}`, name, updated: 1_790_000_100, items: a.fromQueue ? [...(playlist.items as Json[])] : [] }, ...playlists];
+    return playlists;
+  },
+  playlists_import: (a) => {
+    const name = String(a.path).split("/").pop()!.replace(/\.[^.]+$/, "");
+    playlists = [{ id: `p${nextPlaylist++}`, name, updated: 1_790_000_100, items: [{ uri: SECOND, title: "Sintel.mkv" }] }, ...playlists];
+    return playlists;
+  },
+  playlists_rename: (a) => {
+    playlists = playlists.map((p) => (p.id === a.id ? { ...p, name: String(a.name).trim() } : p));
+    return playlists;
+  },
+  playlists_delete: (a) => {
+    playlists = playlists.filter((p) => p.id !== a.id);
+    return playlists;
+  },
+  playlists_add: (a) => {
+    const added = (a.uris as string[]).map((uri) => ({ uri, title: uri.split("/").pop() }));
+    playlists = playlists.map((p) => (p.id === a.id ? { ...p, items: [...(p.items as Json[]), ...added] } : p));
+    return playlists;
+  },
+  playlists_remove_item: (a) => {
+    playlists = playlists.map((p) => (p.id === a.id ? { ...p, items: (p.items as Json[]).filter((_, i) => i !== a.index) } : p));
+    return playlists;
+  },
+  network_places: () => ({
+    mounted: [{ name: "films", path: "/Volumes/films" }],
+    servers,
+    found: [
+      { uri: "smb://attic.local", name: "Attic", dir: true, source: "Bonjour Network Discovery" },
+      { uri: "rtp://239.0.0.1:5004", name: "Lobby camera", dir: false, source: "Network streams (SAP)" },
+    ],
+  }),
+  network_browse: (a) => {
+    const location = String(a.location);
+    if (location === "ftp://nas.local/films" && a.password !== "secret") throw "Couldn't open that folder. Check the address, and the user name and password if it needs them";
+    if (!(location in folders)) throw "Couldn't connect to that server. Check the address and that it's turned on";
+    return { location, name: location.split("/").pop(), local: !location.includes("://"), entries: folders[location] };
+  },
+  network_save: (a) => {
+    servers = [...servers.filter((s) => s.url !== a.url), { url: a.url, name: String(a.url).split("://")[1], user: a.user }];
+    return servers;
+  },
+  network_forget: (a) => {
+    servers = servers.filter((s) => s.url !== a.url);
+    return servers;
+  },
+  radio_stations: (a) => {
+    const [query, tag] = [String(a.query).toLowerCase(), String(a.tag).toLowerCase()];
+    return directory.filter((s) => String(s.name).toLowerCase().includes(query) && (!tag || (s.tags as string[]).includes(tag)));
+  },
+  radio_favorites: () => favorites,
+  radio_favorite: (a) => {
+    const s = a.station as Json;
+    favorites = [...favorites.filter((f) => f.id !== s.id), ...(a.on ? [s] : [])];
+    return favorites;
+  },
   filter_specs: () => ({
     video: [
       { id: "invert", label: "Invert colours", module: "invert", params: [] },
@@ -149,9 +241,9 @@ const handlers: Record<string, (args: Json) => unknown> = {
  * checks this list and the handlers against the app's real commands).
  */
 const NO_ANSWER = new Set([
-  "add_subtitle", "app_menu_item", "bookmark_add", "bookmark_remove", "bookmark_rename", "hide_cursor", "library_add",
-  "library_remove", "navigate", "next", "next_frame", "open", "open_capture", "open_disc", "open_settings", "play_index",
-  "playlist_clear", "playlist_move", "playlist_remove", "playlist_save", "playlist_sort", "previous", "resume_at",
+  "add_subtitle", "app_menu_item", "bookmark_add", "bookmark_remove", "bookmark_rename", "hide_cursor",
+  "library_remove", "navigate", "network_leave", "next", "next_frame", "open", "open_capture", "open_disc", "open_settings", "play_index",
+  "playlist_clear", "playlist_move", "playlist_remove", "playlist_save", "playlist_sort", "playlists_play", "previous", "radio_play", "resume_at",
   "scrub_cancel", "scrub_focus", "set_ab_loop", "set_adjust", "set_aspect_ratio", "set_audio_delay", "set_audio_track",
   "set_chapter", "set_crop", "set_deinterlace", "set_equalizer", "set_equalizer_preset", "set_filter", "set_logo", "set_marquee",
   "set_menu_shortcuts", "set_repeat", "set_shuffle", "set_sleep_timer", "set_stereo_mode", "set_subtitle_delay",

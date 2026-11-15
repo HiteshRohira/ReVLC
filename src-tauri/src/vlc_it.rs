@@ -554,3 +554,60 @@ fn vlc_it_broken_files_end_cleanly_and_the_next_file_plays() {
     let (_, w, _) = frame(&frames, Duration::from_millis(200));
     assert_eq!(w, 320, "the player still works after the broken files");
 }
+
+#[test]
+#[ignore = "needs libVLC and FFmpeg; see the module docs"]
+fn vlc_it_reads_a_songs_tags_and_cover() {
+    // A tagged song with a cover picture inside it.
+    let song = media("tagged.mp3", &[
+        "-f", "lavfi", "-t", "3", "-i", "sine=frequency=440:sample_rate=44100", "-f", "lavfi", "-i", "color=c=red:size=64x64:rate=25:duration=0.04",
+        "-map", "0:a", "-map", "1:v", "-c:a", "libmp3lame", "-c:v", "mjpeg", "-disposition:v", "attached_pic",
+        "-id3v2_version", "3", "-metadata", "title=Teardrop", "-metadata", "artist=Massive Attack", "-metadata", "album=Mezzanine",
+        "-metadata", "album_artist=Massive Attack", "-metadata", "track=3/11", "-metadata", "disc=1/1", "-metadata", "genre=Trip hop",
+        "-metadata", "date=1998",
+    ]);
+    let vlc = load(&["--no-audio"]);
+    let tags = vlc.parse(song.to_str().unwrap(), 10_000).unwrap();
+    assert_eq!(tags.title.as_deref(), Some("Teardrop"));
+    assert_eq!(tags.artist.as_deref(), Some("Massive Attack"));
+    assert_eq!(tags.album.as_deref(), Some("Mezzanine"));
+    assert_eq!(tags.album_artist.as_deref(), Some("Massive Attack"));
+    assert_eq!(tags.genre.as_deref(), Some("Trip hop"));
+    assert_eq!((tags.track, tags.disc), (Some(3), Some(1)), "\"3/11\" is track 3");
+    assert_eq!(tags.date.as_deref().and_then(|d| d.get(..4)), Some("1998"));
+    assert!((2_500..4_000).contains(&tags.duration), "duration {} ms", tags.duration);
+    let cover = tags.artwork.expect("the cover inside the file");
+    assert!(crate::meta::resize_art(Path::new(&cover), &work().join("tagged-cover.jpg"), 360).is_ok(), "the cover at {cover} opens as a picture");
+}
+
+#[test]
+#[ignore = "needs libVLC and FFmpeg; see the module docs"]
+fn vlc_it_browses_a_folder_the_way_it_browses_a_server() {
+    // libVLC lists a file:// folder through the same path as an FTP or
+    // UPnP one, so this checks ReVLC's side of browsing without a network.
+    let dir = work().join(format!("browse-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("Season 1")).unwrap();
+    std::fs::copy(pattern(), dir.join("Pilot episode.mp4")).unwrap();
+    std::fs::copy(left_tone(), dir.join("Season 1").join("Theme.wav")).unwrap();
+    let vlc = load(&["--no-audio"]);
+    let url = crate::playlist_file::file_uri(dir.to_str().unwrap());
+    let listed = vlc.browse(&url, 10_000).unwrap();
+    let mut found: Vec<(String, bool)> = listed.iter().map(|e| (e.name.clone(), e.dir)).collect();
+    found.sort();
+    assert_eq!(found, [("Pilot episode.mp4".to_string(), false), ("Season 1".to_string(), true)]);
+    // Each entry's address opens in turn: a folder lists, a file is one to play.
+    let season = listed.iter().find(|e| e.dir).unwrap();
+    let inside = vlc.browse(&season.uri, 10_000).unwrap();
+    assert_eq!(inside.iter().map(|e| e.name.as_str()).collect::<Vec<_>>(), ["Theme.wav"]);
+    assert!(inside[0].uri.starts_with("file://") && inside[0].uri.ends_with("Theme.wav"), "{}", inside[0].uri);
+    // Nothing there: an error to show, not an empty folder.
+    assert!(vlc.browse(&format!("{url}/missing"), 5_000).is_err());
+    // Looking for servers starts and stops without one being there.
+    vlc.discovery_start();
+    vlc.discovery_start();
+    let _ = vlc.discovered();
+    vlc.discovery_stop();
+    assert_eq!(vlc.discovered(), []);
+    let _ = std::fs::remove_dir_all(&dir);
+}

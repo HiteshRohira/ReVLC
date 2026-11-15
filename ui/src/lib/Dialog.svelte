@@ -81,6 +81,7 @@
     font-size: 13px;
   }
   .dialog :global(input[type="text"]),
+  .dialog :global(input[type="password"]),
   .dialog :global(.select.field) {
     box-sizing: border-box;
     width: 100%;
@@ -95,6 +96,7 @@
     outline: none;
   }
   .dialog :global(input[type="text"]:focus),
+  .dialog :global(input[type="password"]:focus),
   .dialog :global(.select.field:focus-visible),
   .dialog :global(.select.field.open) {
     border-color: var(--acc);

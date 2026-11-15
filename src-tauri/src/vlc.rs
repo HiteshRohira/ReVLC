@@ -117,6 +117,15 @@ struct SubtitleTrack {
 }
 
 type Equalizer = c_void;
+type Discoverer = c_void;
+
+/// libvlc_media_discoverer_description_t.
+#[repr(C)]
+struct DiscovererDescription {
+    name: *mut c_char,
+    longname: *mut c_char,
+    category: c_int,
+}
 
 macro_rules! api {
     ($($name:ident: fn($($arg:ty),*) $(-> $ret:ty)?;)*) => {
@@ -241,6 +250,14 @@ api! {
     libvlc_video_set_marquee_string: fn(*mut Player, c_uint, *const c_char);
     libvlc_video_set_scale: fn(*mut Player, c_float);
     libvlc_video_set_teletext: fn(*mut Player, c_int);
+    libvlc_media_get_type: fn(*mut Media) -> c_int;
+    libvlc_media_discoverer_list_get: fn(*mut Inst, c_int, *mut *mut *mut DiscovererDescription) -> usize;
+    libvlc_media_discoverer_list_release: fn(*mut *mut DiscovererDescription, usize);
+    libvlc_media_discoverer_new: fn(*mut Inst, *const c_char) -> *mut Discoverer;
+    libvlc_media_discoverer_start: fn(*mut Discoverer) -> c_int;
+    libvlc_media_discoverer_stop: fn(*mut Discoverer);
+    libvlc_media_discoverer_release: fn(*mut Discoverer);
+    libvlc_media_discoverer_media_list: fn(*mut Discoverer) -> *mut MediaList;
 }
 
 /// libvlc_media_option_t: an option the application chose, which libVLC
@@ -363,6 +380,32 @@ pub struct MediaMeta {
     pub artwork: Option<String>,
     /// Milliseconds, 0 when unknown.
     pub duration: i64,
+    pub artist: Option<String>,
+    pub album: Option<String>,
+    pub album_artist: Option<String>,
+    pub genre: Option<String>,
+    /// Track and disc numbers ("3", or "3/12" in the tag).
+    pub track: Option<u32>,
+    pub disc: Option<u32>,
+}
+
+/// Something found while browsing a server or folder.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct BrowseEntry {
+    pub uri: String,
+    pub name: String,
+    pub dir: bool,
+}
+
+/// A server or share libVLC found on the local network.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct Found {
+    pub uri: String,
+    pub name: String,
+    /// A server to browse, rather than a stream to play.
+    pub dir: bool,
+    /// The kind of discovery that found it, such as "Bonjour Network Discovery".
+    pub source: String,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -528,6 +571,8 @@ pub struct Vlc {
     openings: std::sync::Mutex<std::collections::HashMap<OpeningKey, Option<Opening>>>,
     /// Command-line options libVLC wouldn't start with (see [`Vlc::load`]).
     pub rejected_args: Vec<String>,
+    /// Running network discoveries: each one's name and its libVLC object.
+    discoverers: std::sync::Mutex<Vec<(String, usize)>>,
 }
 
 // libVLC's media player API is thread-safe.
@@ -714,7 +759,7 @@ impl Vlc {
             // The web UI handles all keyboard and mouse input.
             (api.libvlc_video_set_key_input)(mp, 0);
             (api.libvlc_video_set_mouse_input)(mp, 0);
-            Ok(Self { api, core, inst, mp, software_decoding: AtomicBool::new(false), version, rejected_args, openings: Default::default() })
+            Ok(Self { api, core, inst, mp, software_decoding: AtomicBool::new(false), version, rejected_args, openings: Default::default(), discoverers: Default::default() })
         }
     }
 
@@ -1251,6 +1296,12 @@ impl Vlc {
         use std::time::{Duration, Instant};
         // libvlc_meta_t values.
         const TITLE: c_int = 0;
+        const ARTIST: c_int = 1;
+        const GENRE: c_int = 2;
+        const ALBUM: c_int = 4;
+        const TRACK_NUMBER: c_int = 5;
+        const ALBUM_ARTIST: c_int = 23;
+        const DISC_NUMBER: c_int = 24;
         const DATE: c_int = 8;
         const ARTWORK_URL: c_int = 15;
         const SEASON: c_int = 19;
@@ -1289,7 +1340,8 @@ impl Vlc {
                 (self.api.libvlc_free)(raw as *mut c_void);
                 Some(s).filter(|s| !s.is_empty())
             };
-            let number = |ty: c_int| meta(ty).and_then(|s| s.parse::<u32>().ok());
+            // "3/12" is track 3 of 12.
+            let number = |ty: c_int| meta(ty).and_then(|s| s.split('/').next().and_then(|n| n.trim().parse::<u32>().ok()));
             let result = if status == PARSED_DONE {
                 let artwork = meta(ARTWORK_URL)
                     .and_then(|url| crate::playlist_file::file_uri_path(&url))
@@ -1302,6 +1354,12 @@ impl Vlc {
                     date: meta(DATE),
                     artwork,
                     duration: (self.api.libvlc_media_get_duration)(media).max(0),
+                    artist: meta(ARTIST),
+                    album: meta(ALBUM),
+                    album_artist: meta(ALBUM_ARTIST),
+                    genre: meta(GENRE),
+                    track: number(TRACK_NUMBER),
+                    disc: number(DISC_NUMBER),
                 })
             } else {
                 Err(format!("could not parse {path}"))
@@ -1327,6 +1385,174 @@ impl Vlc {
             (self.api.libvlc_free)(raw as *mut c_void);
             Some(title).filter(|t| !t.trim().is_empty())
         }
+    }
+}
+
+/// Browsing servers and folders, and finding servers on the local network.
+impl Vlc {
+    /// A media's location and title; missing ones come back empty.
+    unsafe fn location_and_title(&self, media: *mut Media) -> (String, String) {
+        unsafe {
+            let take = |raw: *mut c_char| {
+                if raw.is_null() {
+                    return String::new();
+                }
+                let s = CStr::from_ptr(raw).to_string_lossy().trim().to_string();
+                (self.api.libvlc_free)(raw as *mut c_void);
+                s
+            };
+            (take((self.api.libvlc_media_get_mrl)(media)), take((self.api.libvlc_media_get_meta)(media, 0)))
+        }
+    }
+
+    /// The media in `list` as (location, title, is a folder).
+    unsafe fn list_entries(&self, list: *mut MediaList) -> Vec<(String, String, bool)> {
+        // libvlc_media_type_t.
+        const DIRECTORY: c_int = 2;
+        let mut out = Vec::new();
+        unsafe {
+            (self.api.libvlc_media_list_lock)(list);
+            for i in 0..(self.api.libvlc_media_list_count)(list) {
+                let media = (self.api.libvlc_media_list_item_at_index)(list, i);
+                if media.is_null() {
+                    continue;
+                }
+                let (uri, title) = self.location_and_title(media);
+                let dir = (self.api.libvlc_media_get_type)(media) == DIRECTORY;
+                (self.api.libvlc_media_release)(media);
+                if !uri.is_empty() {
+                    out.push((uri, title, dir));
+                }
+            }
+            (self.api.libvlc_media_list_unlock)(list);
+        }
+        out
+    }
+
+    /// Lists what's inside a folder on a server (`ftp://`, `sftp://`,
+    /// `nfs://`, `upnp://`, and `smb://` where libVLC has it), or a local
+    /// folder given as a `file://` URL. Blocks for up to `timeout_ms`;
+    /// doesn't touch playback.
+    pub fn browse(&self, url: &str, timeout_ms: i32) -> Result<Vec<BrowseEntry>, String> {
+        use std::time::{Duration, Instant};
+        // libvlc_media_parse_network.
+        const FLAGS: c_int = 0x01;
+        const PARSED_TIMEOUT: c_int = 3;
+        const PARSED_DONE: c_int = 4;
+
+        let c = cstr(url);
+        unsafe {
+            let media = (self.api.libvlc_media_new_location)(self.inst, c.as_ptr());
+            if media.is_null() {
+                return Err("That address couldn't be opened".into());
+            }
+            if (self.api.libvlc_media_parse_with_options)(media, FLAGS, timeout_ms) != 0 {
+                (self.api.libvlc_media_release)(media);
+                return Err("That address couldn't be opened".into());
+            }
+            let start = Instant::now();
+            let limit = Duration::from_millis(timeout_ms as u64 + 500);
+            let mut status = 0;
+            while start.elapsed() < limit {
+                status = (self.api.libvlc_media_get_parsed_status)(media);
+                if status != 0 {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            let list = (self.api.libvlc_media_subitems)(media);
+            let entries = if list.is_null() {
+                Vec::new()
+            } else {
+                let entries = self.list_entries(list);
+                (self.api.libvlc_media_list_release)(list);
+                entries
+            };
+            (self.api.libvlc_media_release)(media);
+            if status != PARSED_DONE && entries.is_empty() {
+                return Err(if status == PARSED_TIMEOUT || status == 0 {
+                    "The server took too long to answer".to_string()
+                } else {
+                    "Couldn't open that folder. Check the address, and the user name and password if it needs them".to_string()
+                });
+            }
+            Ok(entries
+                .into_iter()
+                .map(|(uri, title, dir)| {
+                    // Without a title of its own, libVLC reports the location.
+                    let name = if title.is_empty() || title.contains("://") { crate::playlist::title_for(&uri) } else { title };
+                    BrowseEntry { uri, name, dir }
+                })
+                .collect())
+        }
+    }
+
+    /// Starts looking for servers on the local network: Bonjour, UPnP, SAP
+    /// and whatever else this libVLC has. Does nothing if already looking.
+    pub fn discovery_start(&self) {
+        // libvlc_media_discoverer_lan.
+        const LAN: c_int = 1;
+        let mut running = self.discoverers.lock().unwrap_or_else(|e| e.into_inner());
+        if !running.is_empty() {
+            return;
+        }
+        unsafe {
+            let mut services: *mut *mut DiscovererDescription = std::ptr::null_mut();
+            let count = (self.api.libvlc_media_discoverer_list_get)(self.inst, LAN, &mut services);
+            if services.is_null() {
+                return;
+            }
+            for i in 0..count {
+                let service = *services.add(i);
+                if service.is_null() || (*service).name.is_null() {
+                    continue;
+                }
+                let label = if (*service).longname.is_null() { (*service).name } else { (*service).longname };
+                let label = CStr::from_ptr(label).to_string_lossy().into_owned();
+                let discoverer = (self.api.libvlc_media_discoverer_new)(self.inst, (*service).name);
+                if discoverer.is_null() {
+                    continue;
+                }
+                if (self.api.libvlc_media_discoverer_start)(discoverer) == 0 {
+                    running.push((label, discoverer as usize));
+                } else {
+                    (self.api.libvlc_media_discoverer_release)(discoverer);
+                }
+            }
+            (self.api.libvlc_media_discoverer_list_release)(services, count);
+        }
+    }
+
+    pub fn discovery_stop(&self) {
+        let running = std::mem::take(&mut *self.discoverers.lock().unwrap_or_else(|e| e.into_inner()));
+        for (_, discoverer) in running {
+            unsafe {
+                (self.api.libvlc_media_discoverer_stop)(discoverer as *mut Discoverer);
+                (self.api.libvlc_media_discoverer_release)(discoverer as *mut Discoverer);
+            }
+        }
+    }
+
+    /// What the running discoveries have found so far.
+    pub fn discovered(&self) -> Vec<Found> {
+        let running = self.discoverers.lock().unwrap_or_else(|e| e.into_inner());
+        let mut found = Vec::new();
+        for (source, discoverer) in running.iter() {
+            unsafe {
+                let list = (self.api.libvlc_media_discoverer_media_list)(*discoverer as *mut Discoverer);
+                if list.is_null() {
+                    continue;
+                }
+                for (uri, title, dir) in self.list_entries(list) {
+                    let name = if title.is_empty() { crate::playlist::title_for(&uri) } else { title };
+                    if !found.iter().any(|f: &Found| f.uri == uri) {
+                        found.push(Found { uri, name, dir, source: source.clone() });
+                    }
+                }
+                (self.api.libvlc_media_list_release)(list);
+            }
+        }
+        found
     }
 }
 
