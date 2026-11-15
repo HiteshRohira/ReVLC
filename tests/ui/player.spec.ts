@@ -136,8 +136,36 @@ test("a stalled stream is announced as Buffering", async ({ page }) => {
 
 test("the title-bar menus are reachable while playing", async ({ page }, info) => {
   test.skip(isMacProject(info.project.name), "macOS uses the menu bar");
-  test.fail(true, "W6: the Windows and Linux menus only show on Home");
   await expect(page.getByRole("button", { name: "Playback", exact: true })).toBeVisible({ timeout: 2000 });
+  // They don't cover the back button or the title, and they work.
+  const box = async (l: import("@playwright/test").Locator) => (await l.boundingBox())!;
+  const back = await box(page.getByRole("button", { name: "Back to home" }));
+  const first = await box(page.getByRole("button", { name: "Media", exact: true }));
+  const last = await box(page.getByRole("button", { name: "Help", exact: true }));
+  const title = await box(page.locator(".top .title"));
+  expect(first.x).toBeGreaterThanOrEqual(back.x + back.width);
+  expect(title.x).toBeGreaterThanOrEqual(last.x + last.width);
+  await page.getByRole("button", { name: "Playback", exact: true }).click();
+  await page.getByRole("menuitem", { name: /^Play \/ Pause/ }).click();
+  await expect.poll(() => calls(page, "toggle_pause")).toHaveLength(1);
+});
+
+test("Space and Return press the button the keyboard is on, not play or pause", async ({ page }, info) => {
+  // Tab from Next reaches Mute: Space is that button's. (On a Mac, WebKit's
+  // plain Tab skips buttons.)
+  await page.getByRole("button", { name: "Next", exact: true }).focus();
+  await page.keyboard.press(isMacProject(info.project.name) && process.platform === "darwin" ? "Alt+Tab" : "Tab");
+  await expect(page.getByRole("button", { name: "Mute" })).toBeFocused();
+  await page.keyboard.press("Space");
+  await expect.poll(() => calls(page, "set_muted")).toHaveLength(1);
+  expect(await calls(page, "toggle_pause")).toHaveLength(0);
+});
+
+test("Space after clicking a button still pauses", async ({ page }) => {
+  await page.getByRole("button", { name: "Mute" }).click();
+  await page.keyboard.press("Space");
+  await expect.poll(() => calls(page, "toggle_pause")).toHaveLength(1);
+  expect(await calls(page, "set_muted")).toHaveLength(1);
 });
 
 test("a resume offer continues from where it says", async ({ page }) => {
@@ -185,7 +213,8 @@ test("every control has an accessible name", async ({ page }) => {
 test("the player fits a minimum-size window", async ({ page }) => {
   await page.setViewportSize({ width: 720, height: 450 });
   for (const name of ["Pause", "Fullscreen", "Settings", "Up next", "Subtitles", "Mute"]) {
-    const box = await page.getByRole("button", { name, exact: true }).boundingBox();
+    // In the player's own controls: the title bar has a Subtitles menu too.
+    const box = await page.locator(".player").getByRole("button", { name, exact: true }).boundingBox();
     expect(box, name).not.toBeNull();
     expect(box!.x + box!.width, `${name} right edge`).toBeLessThanOrEqual(720);
     expect(box!.y + box!.height, `${name} bottom edge`).toBeLessThanOrEqual(450);

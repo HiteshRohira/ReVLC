@@ -138,10 +138,12 @@ impl History {
         self.dirty = true;
     }
 
-    /// Where to resume `uri`, if it was left part-way through.
+    /// Where to resume `uri`, if it was left part-way through. Never for
+    /// something with no known length (live radio or TV): its position is
+    /// only how long it played, and there's nothing there to go back to.
     pub fn resume_point(&self, uri: &str) -> Option<i64> {
         let e = self.entries.iter().find(|e| e.uri == uri)?;
-        let before_end = e.length == 0 || e.position < e.length - RESUME_MARGIN;
+        let before_end = e.length > 0 && e.position < e.length - RESUME_MARGIN;
         (!e.finished && e.position > RESUME_MARGIN && before_end).then_some(e.position)
     }
 
@@ -202,6 +204,14 @@ mod tests {
         h.update("a", 120_000, 600_000);
         h.finish("a");
         assert_eq!(h.resume_point("a"), None);
+    }
+
+    #[test]
+    fn live_streams_never_resume() {
+        let mut h = history();
+        h.touch("http://radio.example/live", "Radio");
+        h.update("http://radio.example/live", 32_000, 0);
+        assert_eq!(h.resume_point("http://radio.example/live"), None);
     }
 
     #[test]

@@ -33,6 +33,10 @@
   let idleTimer: ReturnType<typeof setTimeout> | undefined;
 
   const showPlayer = $derived(theme.onboarded && player.active);
+  // Windows and Linux keep their menus while playing (not in fullscreen),
+  // in the player's top row; the title starts after them.
+  const playerMenus = $derived(!isMac && !ui.fullscreen);
+  let menusWidth = $state(0);
   // Hide the controls and cursor while video plays and the mouse is still.
   const controlsHidden = $derived(
     idle && player.playing && player.state.hasVideo && ui.openMenus === 0 && !ui.playlistOpen && !ui.effectsOpen,
@@ -166,10 +170,24 @@
     if (await appWindow.isFullscreen()) await appWindow.setFullscreen(false);
   }
 
+  // What Tab or an arrow key moved focus to, if that's where focus is.
+  // (Not :focus-visible: once any key is down, the browser counts a
+  // clicked button as keyboard-focused too.)
+  let keyboardFocus: EventTarget | null = null;
+  let moving = false;
+  const FOCUS_KEYS = new Set(["Tab", "ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", "Home", "End"]);
+  function onFocusIn(e: FocusEvent) {
+    keyboardFocus = moving ? e.target : null;
+  }
+
   function onKeyDown(e: KeyboardEvent) {
     if (!theme.onboarded || ui.dialog) return;
     const target = e.target as HTMLElement | null;
     if (target?.closest("input, select, textarea")) return;
+    // Space and Return press the button the keyboard is on (a favourite's
+    // star, say) rather than play or pause. A button that was only clicked
+    // doesn't keep them: Space after clicking Mute still pauses.
+    if ((e.key === " " || e.key === "Enter") && !e.metaKey && !e.ctrlKey && !e.altKey && target === keyboardFocus && target?.matches("button, a[href], [role=button]")) return;
     // The shortcut list scrolls with these, not the player.
     if (target?.closest(".help") && SCROLL_KEYS.has(e.key)) return;
     const menuKey = MENU_KEYS[e.key];
@@ -271,7 +289,7 @@
   });
 </script>
 
-<svelte:window onkeydown={onKeyDown} onpointermove={wake} onpointerdown={wake} onwheel={onWheel} />
+<svelte:window onkeydown={onKeyDown} onkeydowncapture={(e) => (moving = FOCUS_KEYS.has(e.key))} onpointerdowncapture={() => (moving = false)} onfocusin={onFocusIn} onpointermove={wake} onpointerdown={wake} onwheel={onWheel} />
 <svelte:document onvisibilitychange={onVisibility} />
 
 <div class="app" class:video={showPlayer && player.state.hasVideo} class:hide-cursor={controlsHidden} class:fullscreen={ui.fullscreen}>
@@ -284,7 +302,8 @@
       onclick={(e) => e.target === e.currentTarget && player.closeStrip?.()}
       ondblclick={(e) => e.target === e.currentTarget && toggleFullscreen()}
     ></div>
-    <PlayerView hidden={controlsHidden} onfullscreen={toggleFullscreen} onadd={openFiles} />
+    <PlayerView hidden={controlsHidden} onfullscreen={toggleFullscreen} onadd={openFiles} menusWidth={playerMenus ? menusWidth : 0} />
+    {#if playerMenus}<TitleBar {host} overlay hidden={controlsHidden} bind:width={menusWidth} />{/if}
   {:else}
     {#if !isMac}<TitleBar {host} />{/if}
     <Home onopen={openFiles} onopenfolder={openFolder} />

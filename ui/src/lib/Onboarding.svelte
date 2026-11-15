@@ -150,4 +150,28 @@
   .note + .note {
     margin-top: 6px;
   }
+  /* A short window (the smallest is 720×450): closer together, so the
+     last note still fits. */
+  @media (max-height: 540px) {
+    h1 {
+      font-size: 28px;
+    }
+    .lede {
+      margin: 6px 0 18px;
+    }
+    .preview {
+      height: 96px;
+      padding: 14px 18px;
+    }
+    .label {
+      padding: 10px 16px;
+    }
+    .go {
+      margin-top: 18px;
+      padding: 10px 34px;
+    }
+    .note {
+      margin-top: 10px;
+    }
+  }
 </style>

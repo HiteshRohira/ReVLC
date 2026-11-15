@@ -2655,6 +2655,16 @@ fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     if let Ok(cwd) = std::env::current_dir() {
         cli.resolve_paths(&cwd);
     }
+    // Before the engine: the menu bar (and its Settings…) is there even if
+    // the engine can't start. The UI sends the real bindings once it loads;
+    // start with the defaults.
+    let keys: HashMap<String, String> = [("open", "Cmd+O"), ("openFolder", "Shift+Cmd+O"), ("openUrl", "Cmd+N"), ("queue", "Cmd+L")]
+        .into_iter()
+        .map(|(a, k)| (a.to_string(), k.to_string()))
+        .collect();
+    if cfg!(target_os = "macos") {
+        app.set_menu(menu::build(app.handle(), &keys)?)?;
+    }
     let vlc = Vlc::load(resource_dir.as_deref(), &args, &cli.vlc_args, &settings.vlc_config(&languages));
     telemetry::start(&data_dir, settings.analytics, vlc.as_ref().map_or("unavailable", |v| v.version.as_str()));
     let vlc = match vlc {
@@ -2719,14 +2729,6 @@ fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
         core.notice("error", format!("libVLC didn't accept {}, so ReVLC started without them", core.vlc.rejected_args.join(" ")));
     }
 
-    // The UI sends the real bindings once it loads; start with the defaults.
-    let keys: HashMap<String, String> = [("open", "Cmd+O"), ("openFolder", "Shift+Cmd+O"), ("openUrl", "Cmd+N"), ("queue", "Cmd+L")]
-        .into_iter()
-        .map(|(a, k)| (a.to_string(), k.to_string()))
-        .collect();
-    if cfg!(target_os = "macos") {
-        app.set_menu(menu::build(app.handle(), &keys)?)?;
-    }
     // libVLC's player has its own title-display default; apply ours.
     core.vlc.set_title_display(settings.show_title, settings.title_position, settings.title_timeout);
     let scrub_dir = core.scrub_dir.clone();

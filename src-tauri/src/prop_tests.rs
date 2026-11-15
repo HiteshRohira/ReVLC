@@ -88,7 +88,7 @@ proptest! {
                 prop_assert_eq!(resume, None, "a finished file offers no resume");
             }
             if let Some(at) = resume {
-                prop_assert!(at > 0 && (e.entry.length == 0 || at < e.entry.length));
+                prop_assert!(at > 0 && at < e.entry.length);
             }
         }
         let _ = std::fs::remove_dir_all(&dir);

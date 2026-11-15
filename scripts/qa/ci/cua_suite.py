@@ -52,6 +52,8 @@ WIN = os.name == "nt"
 LINUX = sys.platform.startswith("linux")
 PLATFORM = "macos" if MAC else "windows" if WIN else "linux"
 TIME = re.compile(r"^\s*(?:(\d+):)?(\d+):(\d\d)\s*/")
+# The Windows and Linux title-bar menus, on Home and in the player.
+TITLE_MENUS = ("Media", "Playback", "Audio", "Video", "Subtitles", "Tools", "Help")
 
 
 class Fail(Exception):
@@ -308,10 +310,14 @@ class App:
 
     # Actions
 
-    def press(self, label, window_id=None, any_role=False, **kw):
+    def press(self, label, window_id=None, any_role=False, lowest=False, **kw):
+        """`lowest`: of several with that name, the one furthest down the
+        window (the effects panel's Video tab, not the title bar's Video menu)."""
         for attempt in (1, 2):
             els = self.find(label, window_id=window_id, button=not any_role, **kw)
             ensure(els, f'no "{label}" {"control" if any_role else "button"}')
+            if lowest:
+                els.sort(key=lambda e: (e.get("frame") or {}).get("y", 0), reverse=True)
             try:
                 return self.click_el(els[0], window_id)
             except RuntimeError as e:
@@ -366,7 +372,9 @@ class App:
         with `prefix`, such as "Playback speed 1.5×"; leaves the menu open."""
         if not self.find(contains="Playback speed"):
             self.press("Settings")
-        items = wait_for(lambda: [e for e in self.read() if (e.get("label") or "").startswith(prefix)], f'"{prefix}" in the gear menu', 5)
+        # Not the title bar's menu of the same name (Audio), which is always there.
+        items = wait_for(lambda: [e for e in self.read() if (e.get("label") or "").startswith(prefix) and e.get("label") not in TITLE_MENUS],
+                         f'"{prefix}" in the gear menu', 5)
         return items[0]["label"]
 
     def close_menus(self):
@@ -478,7 +486,7 @@ class App:
 
     def menu(self, top, item):
         """Runs a menu item the way a user does: the menu bar on macOS, the
-        title-bar menus elsewhere (which only show on Home)."""
+        title-bar menus elsewhere."""
         if MAC:
             app_menu = {"App": "ReVLC"}.get(top, top)
             cua("invoke_menu", {"pid": self.pid, "path": [app_menu, item]})
@@ -985,8 +993,7 @@ def onboarding(ctx):
         ensure(not outside, f"cut off at the bottom of a 720×450 window: {outside}")
         return "everything fits"
 
-    ctx.check("fits a 720×450 window", fits, app=app,
-              known_bug=None if LINUX else "W7: onboarding text runs below a minimum-size window")
+    ctx.check("fits a 720×450 window", fits, app=app)
     ctx.check("Get started", lambda: (app.press("Get started"), app.wait_gone("Get started"), app.wait_text("Home"))[-1] and "Home shown", app=app)
 
 
@@ -1166,12 +1173,11 @@ def menus(ctx):
     if not MAC:
         def title_menus():
             ensure(app.playing(), "not playing")
-            names = ("Media", "Playback", "Audio", "Video", "Tools", "Help")
-            found = [n for n in names if app.find(n, button=True, fresh=False)]
-            ensure(len(found) == len(names), f"menus while playing: {found or 'none'}")
-            return "all six menus reachable while playing"
+            found = [n for n in TITLE_MENUS if app.find(n, button=True)]
+            ensure(len(found) == len(TITLE_MENUS), f"menus while playing: {found or 'none'}")
+            return "every menu reachable while playing"
 
-        ctx.check("title-bar menus while playing", title_menus, known_bug="W6: the Windows and Linux menus only show on Home", app=app)
+        ctx.check("title-bar menus while playing", title_menus, app=app)
 
     if MAC:
         # The list itself is a browser test (tests/ui/player.spec.ts); this
@@ -1362,8 +1368,7 @@ def engine_failure(ctx):
             ensure("Settings…" in items, "the menu bar has no Settings… (only the default app menu)")
             return "Settings… is in the menu bar"
 
-        ctx.check("menu bar still has Settings…", menu_bar, app=app,
-                  known_bug="found by this suite: the custom menu bar is only built when the engine starts")
+        ctx.check("menu bar still has Settings…", menu_bar, app=app)
 
 
 @scenario
@@ -1517,7 +1522,7 @@ def subtitles(ctx):
 
     def tracks():
         """Opens the Subtitles menu and returns its track items."""
-        app.press("Subtitles")
+        app.press("Subtitles", lowest=True)  # the player's button, not the title bar's menu
         wait_for(lambda: app.find("Off"), "the Subtitles menu", 5)
         return [e for e in app.elements if (e.get("label") or "").startswith("Track")]
 
@@ -1612,7 +1617,7 @@ def effects(ctx):
         if ctx.no_video:
             raise Skip("this runner can't show video")
         before = frame_pair(app, "effects-before")
-        app.press("Video", any_role=True)
+        app.press("Video", any_role=True, lowest=True)
         app.click_switch("Invert colours", app.window_id)
         app.key("e")  # next frame, drawn with the filter
 
@@ -1686,13 +1691,13 @@ def effects(ctx):
     ctx.check("Equaliser switch", equaliser, app=app)
 
     def stays_on():
-        app.press("Video", any_role=True)
+        app.press("Video", any_role=True, lowest=True)
         if not app.switch_on("Invert colours"):
             app.click_switch("Invert colours", app.window_id)
         ctx.hand_off(ctx.media / "second.mp4")
         app.wait("second", timeout=15)
         if not app.find("Invert colours"):
-            app.press("Video", any_role=True)
+            app.press("Video", any_role=True, lowest=True)
         ensure(app.switch_on("Invert colours"), "Invert colours turned off for the next file")
         return "still on for the next file"
 
@@ -1822,7 +1827,7 @@ def tracks(ctx):
     ctx.check("B switches audio track", audio, app=app)
 
     def subs():
-        app.press("Subtitles")
+        app.press("Subtitles", lowest=True)  # the player's button, not the title bar's menu
         wait_for(lambda: app.find("Off"), "the Subtitles menu", 5)
         names = [e.get("label") for e in app.elements if "eng" in (e.get("label") or "").lower() or "fre" in (e.get("label") or "").lower()
                  or (e.get("label") or "").startswith("Track")]
