@@ -297,6 +297,38 @@ impl Images {
     }
 }
 
+impl Images {
+    /// An album's cover: "cover.jpg", "folder.jpg" and the like next to its songs.
+    pub fn album_cover(&mut self, path: &Path) -> Option<PathBuf> {
+        self.find(path.parent()?, &["cover", "folder", "front", "album", "albumart"].map(String::from))
+    }
+}
+
+/// A song's track number and title from its file name: "03 - Song",
+/// "03. Song", "1-03 Song" (disc 1) or just "Song".
+pub fn parse_track_name(stem: &str) -> (Option<u32>, String) {
+    let name = stem.trim();
+    let digits = name.bytes().take_while(u8::is_ascii_digit).count();
+    // A disc number first: "1-03 Song".
+    let (start, digits) = match name.as_bytes().get(digits) {
+        Some(b'-') if digits == 1 && name.as_bytes().get(2).is_some_and(u8::is_ascii_digit) => {
+            (2, name[2..].bytes().take_while(u8::is_ascii_digit).count())
+        }
+        _ => (0, digits),
+    };
+    let rest = &name[start + digits..];
+    // "03 Song" counts with two digits; "7 Rings" and "24K Magic" are titles.
+    let separated = rest.starts_with(" - ") || rest.starts_with(['.', '-', '_']) || (digits == 2 && rest.starts_with(' '));
+    if digits == 0 || digits > 3 || !separated {
+        return (None, name.to_string());
+    }
+    let title = tidy(rest);
+    if title.is_empty() {
+        return (None, name.to_string());
+    }
+    (number(&name[start..start + digits]), title)
+}
+
 pub fn modified(path: &Path) -> u64 {
     std::fs::metadata(path)
         .and_then(|m| m.modified())
@@ -439,6 +471,21 @@ mod tests {
         assert_eq!(t("/s/Suits (2011) - S01E10 - Shelf Life (1080p BluRay x265 ImE).mkv"), "Suits - S01E10 - Shelf Life");
         assert_eq!(t("/m/The.Matrix.1999.1080p.BluRay.x264.mkv"), "The Matrix (1999)");
         assert_eq!(t("/m/Big Buck Bunny.mp4"), "Big Buck Bunny.mp4");
+    }
+
+    #[test]
+    fn track_names() {
+        assert_eq!(parse_track_name("03 - Teardrop"), (Some(3), "Teardrop".into()));
+        assert_eq!(parse_track_name("03. Teardrop"), (Some(3), "Teardrop".into()));
+        assert_eq!(parse_track_name("03 Teardrop"), (Some(3), "Teardrop".into()));
+        assert_eq!(parse_track_name("1-03 Teardrop"), (Some(3), "Teardrop".into()));
+        assert_eq!(parse_track_name("112_Angel"), (Some(112), "Angel".into()));
+        // Numbers that belong to the title.
+        assert_eq!(parse_track_name("7 Rings"), (None, "7 Rings".into()));
+        assert_eq!(parse_track_name("24K Magic"), (None, "24K Magic".into()));
+        assert_eq!(parse_track_name("1979"), (None, "1979".into()));
+        assert_eq!(parse_track_name("Teardrop"), (None, "Teardrop".into()));
+        assert_eq!(parse_track_name("05"), (None, "05".into()));
     }
 
     #[test]

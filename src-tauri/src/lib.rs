@@ -10,9 +10,12 @@ mod library;
 mod machine;
 mod menu;
 mod meta;
+mod network;
 mod playlist;
 mod playlist_file;
+mod playlists;
 mod quality;
+mod radio;
 mod scrub;
 mod settings;
 mod store;
@@ -50,10 +53,13 @@ use capture::{Capture, Devices};
 use disc::{Disc, DiscKind};
 use effects::{Adjust, Effects, Equalizer, Filter, FilterSpec, Logo, Marquee, StereoMode, Transform};
 use history::{History, UiEntry};
-use library::{Library, LibraryItem};
+use library::{Library, LibraryItem, Song};
 use meta::MetaCache;
+use network::{Listing, Place, Server, Servers};
 use playlist::{Item, Playlist, Repeat, SortKey};
 use playlist_file::file_uri;
+use playlists::{Playlists, Saved};
+use radio::{Favorites, Station};
 use settings::{Resume, Settings};
 use vlc::{Chapter, MediaInfo, Navigate, State, Stats, Title, Track, Vlc, event};
 
@@ -90,6 +96,12 @@ struct Core {
     scrub_jobs: Mutex<Arc<Mutex<VecDeque<ScrubJob>>>>,
     meta: Mutex<MetaCache>,
     bookmarks: Mutex<Bookmarks>,
+    /// The playlists the user saved.
+    playlists: Mutex<Playlists>,
+    /// Saved network servers.
+    servers: Mutex<Servers>,
+    /// Favourite radio stations.
+    radio: Mutex<Favorites>,
     /// A–B loop points in ms.
     ab_loop: Mutex<(Option<i64>, Option<i64>)>,
     sleep: Mutex<SleepTimer>,
@@ -129,7 +141,7 @@ struct Core {
 struct LibraryScan {
     folders: Vec<String>,
     at: Instant,
-    items: Vec<LibraryItem>,
+    found: library::Scan,
 }
 
 /// How long a library scan is reused. Refreshes come every couple of
@@ -233,7 +245,9 @@ impl ThumbJob {
 #[derive(Clone, Serialize)]
 struct LibraryList {
     folders: Vec<String>,
+    /// The videos.
     items: Vec<LibraryItem>,
+    music: Vec<Song>,
 }
 
 /// libVLC may be missing, in which case every command reports the error.
@@ -479,14 +493,14 @@ impl Core {
     /// Lists the library. Reads folders and files, so call it off the main thread.
     fn library_list(&self) -> LibraryList {
         let folders = self.library().folders.clone();
-        let (mut items, scanned) = {
+        let (library::Scan { videos: mut items, mut music }, scanned) = {
             let mut cache = self.library_scan.lock().unwrap_or_else(|e| e.into_inner());
             match cache.as_ref().filter(|c| c.folders == folders && c.at.elapsed() < LIBRARY_SCAN_TTL) {
-                Some(c) => (c.items.clone(), false),
+                Some(c) => (c.found.clone(), false),
                 None => {
-                    let items = library::scan_folders(&folders);
-                    *cache = Some(LibraryScan { folders: folders.clone(), at: Instant::now(), items: items.clone() });
-                    (items, true)
+                    let found = library::scan_folders(&folders);
+                    *cache = Some(LibraryScan { folders: folders.clone(), at: Instant::now(), found: found.clone() });
+                    (found, true)
                 }
             }
         };
@@ -516,14 +530,60 @@ impl Core {
             }
         }
         retry.extend(self.add_metadata(&mut items, &mut jobs));
+        retry.extend(self.add_music_metadata(&mut music, &mut jobs));
         // Changed files are worth another try even if they were tried this session.
         self.thumbs.tried.lock().unwrap_or_else(|e| e.into_inner()).retain(|key| !retry.contains(key));
         // Only when every folder is there: files on an unplugged drive keep their thumbnails.
         if scanned && folders.iter().all(|f| Path::new(f).is_dir()) {
-            self.prune_library_cache(&items, &jobs);
+            self.prune_library_cache(&items, &music, &jobs);
         }
         self.queue_thumbnails(jobs, true);
-        LibraryList { folders, items }
+        LibraryList { folders, items, music }
+    }
+
+    /// Fills in song titles, artists, albums and covers, queueing jobs for
+    /// whatever hasn't been read or cached yet. Returns the job keys of
+    /// files read before that have changed since.
+    fn add_music_metadata(&self, tracks: &mut [Song], jobs: &mut Vec<ThumbJob>) -> Vec<String> {
+        let mut changed = Vec::new();
+        let cache = self.meta.lock().unwrap_or_else(|e| e.into_inner());
+        let mut images = meta::Images::default();
+        for track in tracks {
+            let path = Path::new(&track.uri);
+            let (number, title) = meta::parse_track_name(&track.name);
+            let tags = match cache.get(&track.uri) {
+                Some(m) => m.clone(),
+                None => {
+                    let job = ThumbJob { uri: track.uri.clone(), out: PathBuf::new(), kind: JobKind::Meta };
+                    if cache.is_stale(&track.uri) {
+                        changed.push(job.key());
+                    }
+                    jobs.push(job);
+                    Default::default()
+                }
+            };
+            // libVLC reports the file name as the title when there's no tag.
+            let file = path.file_name().map(|f| f.to_string_lossy().into_owned()).unwrap_or_default();
+            track.name = tags.title.filter(|t| *t != file && *t != track.name).unwrap_or(title);
+            track.track = tags.track.or(number);
+            track.disc = tags.disc;
+            track.artist = tags.artist;
+            track.album = tags.album;
+            track.album_artist = tags.album_artist;
+            track.genre = tags.genre;
+            track.year = tags.date.as_deref().and_then(|d| d.get(..4)).and_then(|y| y.parse().ok());
+            track.duration = tags.duration;
+            // The cover inside the file, or a cover file next to the songs.
+            track.art = tags.artwork.map(PathBuf::from).or_else(|| images.album_cover(path)).and_then(|src| {
+                let out = meta::art_cache_path(&self.thumbs_dir, &src);
+                if out.exists() {
+                    return Some(out.to_string_lossy().into_owned());
+                }
+                jobs.push(ThumbJob { uri: src.to_string_lossy().into_owned(), out, kind: JobKind::Art(src) });
+                None
+            });
+        }
+        changed
     }
 
     fn library_thumb_path(&self, uri: &str) -> PathBuf {
@@ -532,12 +592,13 @@ impl Core {
 
     /// Deletes cached thumbnails, artwork and metadata of files no longer
     /// in the library (or artwork that has since changed).
-    fn prune_library_cache(&self, items: &[LibraryItem], jobs: &[ThumbJob]) {
+    fn prune_library_cache(&self, items: &[LibraryItem], music: &[Song], jobs: &[ThumbJob]) {
         let mut keep: HashSet<PathBuf> = jobs.iter().map(|j| j.out.clone()).collect();
         for item in items {
             keep.insert(self.library_thumb_path(&item.uri));
             keep.extend([&item.art, &item.group_art].into_iter().flatten().map(PathBuf::from));
         }
+        keep.extend(music.iter().filter_map(|t| t.art.as_ref()).map(PathBuf::from));
         // Job keys of what's deleted, so it's made again if the file comes back.
         let mut forget: HashSet<String> = HashSet::new();
         if let Ok(entries) = std::fs::read_dir(&self.thumbs_dir) {
@@ -549,7 +610,7 @@ impl Core {
                 }
             }
         }
-        let uris: HashSet<&str> = items.iter().map(|i| i.uri.as_str()).collect();
+        let uris: HashSet<&str> = items.iter().map(|i| i.uri.as_str()).chain(music.iter().map(|t| t.uri.as_str())).collect();
         let mut meta = self.meta.lock().unwrap_or_else(|e| e.into_inner());
         forget.extend(meta.retain(&uris).into_iter().map(|uri| format!("meta:{uri}")));
         meta.save();
@@ -682,6 +743,18 @@ impl Core {
 
     fn bookmarks(&self) -> MutexGuard<'_, Bookmarks> {
         self.bookmarks.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    fn playlists(&self) -> MutexGuard<'_, Playlists> {
+        self.playlists.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    fn servers(&self) -> MutexGuard<'_, Servers> {
+        self.servers.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    fn radio(&self) -> MutexGuard<'_, Favorites> {
+        self.radio.lock().unwrap_or_else(|e| e.into_inner())
     }
 
     fn current_bookmarks(&self) -> Vec<Bookmark> {
@@ -2336,6 +2409,207 @@ async fn open_capture(player: tauri::State<'_, Player>, capture: Capture) -> Res
     off_main(player, move |core| core.add_items(vec![capture::item(&capture)], true)).await?
 }
 
+/// Paths and URLs as queue items: folders give their media, playlist files
+/// their entries. Subtitle files are left out.
+fn media_items(uris: Vec<String>) -> Result<Vec<Item>, String> {
+    let mut items = Vec::new();
+    for uri in uris.into_iter().map(playlist_file::native_path) {
+        let path = Path::new(&uri);
+        if uri.contains("://") {
+            items.push(Item::new(uri));
+        } else if path.is_dir() {
+            items.extend(library::expand(vec![uri]).into_iter().map(Item::new));
+        } else if playlist_file::is_playlist(path) {
+            items.extend(playlist_file::read(path)?);
+        } else if !library::is_subtitle(path) {
+            items.push(Item::new(uri));
+        }
+    }
+    Ok(items)
+}
+
+#[tauri::command]
+async fn playlists_list(player: tauri::State<'_, Player>) -> Result<Vec<Saved>, String> {
+    off_main(player, |core| core.playlists().lists.clone()).await
+}
+
+/// Makes a playlist, empty or holding what's in the queue.
+#[tauri::command]
+async fn playlists_create(player: tauri::State<'_, Player>, name: String, from_queue: bool) -> Result<Vec<Saved>, String> {
+    off_main(player, move |core| {
+        // Cameras and screens aren't something to come back to.
+        let items = if from_queue { core.playlist().items.iter().filter(|i| !is_capture(&i.uri)).cloned().collect() } else { Vec::new() };
+        let mut lists = core.playlists();
+        lists.create(&name, items)?;
+        Ok(lists.lists.clone())
+    })
+    .await?
+}
+
+/// Makes a playlist from an M3U, PLS or XSPF file, named after the file.
+#[tauri::command]
+async fn playlists_import(player: tauri::State<'_, Player>, path: String) -> Result<Vec<Saved>, String> {
+    off_main(player, move |core| {
+        let path = Path::new(&path);
+        let items = playlist_file::read(path)?;
+        let name = path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+        let mut lists = core.playlists();
+        lists.create_numbered(&name, items)?;
+        Ok(lists.lists.clone())
+    })
+    .await?
+}
+
+#[tauri::command]
+async fn playlists_rename(player: tauri::State<'_, Player>, id: String, name: String) -> Result<Vec<Saved>, String> {
+    off_main(player, move |core| {
+        let mut lists = core.playlists();
+        lists.rename(&id, &name)?;
+        Ok(lists.lists.clone())
+    })
+    .await?
+}
+
+#[tauri::command]
+async fn playlists_delete(player: tauri::State<'_, Player>, id: String) -> Result<Vec<Saved>, String> {
+    off_main(player, move |core| {
+        let mut lists = core.playlists();
+        lists.delete(&id)?;
+        Ok(lists.lists.clone())
+    })
+    .await?
+}
+
+/// Adds files, folders or URLs to a saved playlist.
+#[tauri::command]
+async fn playlists_add(player: tauri::State<'_, Player>, id: String, uris: Vec<String>) -> Result<Vec<Saved>, String> {
+    off_main(player, move |core| {
+        let items = media_items(uris)?;
+        let mut lists = core.playlists();
+        lists.add(&id, items)?;
+        Ok(lists.lists.clone())
+    })
+    .await?
+}
+
+#[tauri::command]
+async fn playlists_remove_item(player: tauri::State<'_, Player>, id: String, index: usize, uri: String) -> Result<Vec<Saved>, String> {
+    off_main(player, move |core| {
+        let mut lists = core.playlists();
+        lists.remove_item(&id, index, &uri)?;
+        Ok(lists.lists.clone())
+    })
+    .await?
+}
+
+/// Plays a saved playlist from its item `index`. It takes the queue's place.
+#[tauri::command]
+async fn playlists_play(player: tauri::State<'_, Player>, id: String, index: usize) -> Res {
+    off_main(player, move |core| {
+        let items = core.playlists().items(&id)?;
+        if items.is_empty() {
+            return Err("That playlist is empty".to_string());
+        }
+        let index = index.min(items.len() - 1);
+        let _transition = core.transition();
+        core.stop_locked();
+        let first = {
+            let mut queue = core.playlist();
+            queue.clear();
+            queue.add(items)
+        };
+        core.emit_playlist();
+        core.play_index_locked(first + index)
+    })
+    .await?
+}
+
+/// Where to find media on the network.
+#[derive(Clone, Serialize)]
+struct Places {
+    /// Network volumes the system has mounted.
+    mounted: Vec<Place>,
+    /// Servers the user saved.
+    servers: Vec<Server>,
+    /// Servers found on the local network so far.
+    found: Vec<vlc::Found>,
+}
+
+/// Lists network places, and starts looking for servers on the local
+/// network if that isn't running. The UI asks again every few seconds
+/// while it shows them.
+#[tauri::command]
+async fn network_places(player: tauri::State<'_, Player>) -> Result<Places, String> {
+    off_main(player, |core| {
+        core.vlc.discovery_start();
+        Places { mounted: network::mounted(), servers: core.servers().list.clone(), found: core.vlc.discovered() }
+    })
+    .await
+}
+
+/// Stops looking for servers: the UI has left the network view.
+#[tauri::command]
+async fn network_leave(player: tauri::State<'_, Player>) -> Res {
+    off_main(player, |core| core.vlc.discovery_stop()).await
+}
+
+/// Lists a folder on a mounted volume or a server.
+#[tauri::command]
+async fn network_browse(player: tauri::State<'_, Player>, location: String, user: Option<String>, password: Option<String>) -> Result<Listing, String> {
+    off_main(player, move |core| network::browse(&core.vlc, &location, user.as_deref().unwrap_or_default(), password.as_deref().unwrap_or_default())).await?
+}
+
+#[tauri::command]
+async fn network_save(player: tauri::State<'_, Player>, url: String, name: String, user: Option<String>) -> Result<Vec<Server>, String> {
+    off_main(player, move |core| {
+        let mut servers = core.servers();
+        servers.save(&url, &name, user)?;
+        Ok(servers.list.clone())
+    })
+    .await?
+}
+
+#[tauri::command]
+async fn network_forget(player: tauri::State<'_, Player>, url: String) -> Result<Vec<Server>, String> {
+    off_main(player, move |core| {
+        let mut servers = core.servers();
+        servers.remove(&url)?;
+        Ok(servers.list.clone())
+    })
+    .await?
+}
+
+/// Stations from the radio directory: by name, by genre, or the most played.
+#[tauri::command]
+async fn radio_stations(query: String, tag: String) -> Result<Vec<Station>, String> {
+    radio::stations(&query, &tag).await
+}
+
+#[tauri::command]
+async fn radio_favorites(player: tauri::State<'_, Player>) -> Result<Vec<Station>, String> {
+    off_main(player, |core| core.radio().list.clone()).await
+}
+
+#[tauri::command]
+async fn radio_favorite(player: tauri::State<'_, Player>, station: Station, on: bool) -> Result<Vec<Station>, String> {
+    off_main(player, move |core| {
+        let mut favorites = core.radio();
+        favorites.set(station, on)?;
+        Ok(favorites.list.clone())
+    })
+    .await?
+}
+
+/// Plays a station, under its name rather than its address.
+#[tauri::command]
+async fn radio_play(player: tauri::State<'_, Player>, station: Station) -> Res {
+    if !radio::playable(&station.url) {
+        return Err("That station has no address to play".into());
+    }
+    let item = Item { uri: station.url, title: station.name, options: Vec::new(), trusted: false };
+    off_main(player, move |core| core.add_items(vec![item], true)).await?
+}
+
 /// The user's preferred languages as two-letter codes, most preferred first.
 fn preferred_languages() -> Vec<String> {
     #[cfg(target_os = "macos")]
@@ -2418,6 +2692,9 @@ fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
         scrub_jobs: Mutex::default(),
         meta: Mutex::new(MetaCache::load(&cache_dir)),
         bookmarks: Mutex::new(Bookmarks::load(&data_dir)),
+        playlists: Mutex::new(Playlists::load(&data_dir)),
+        servers: Mutex::new(Servers::load(&data_dir)),
+        radio: Mutex::new(Favorites::load(&data_dir)),
         ab_loop: Mutex::default(),
         sleep: Mutex::default(),
         transition: Mutex::default(),
@@ -2714,6 +2991,23 @@ pub fn run() {
             open_disc,
             capture_devices,
             open_capture,
+            playlists_list,
+            playlists_create,
+            playlists_import,
+            playlists_rename,
+            playlists_delete,
+            playlists_add,
+            playlists_remove_item,
+            playlists_play,
+            network_places,
+            network_leave,
+            network_browse,
+            network_save,
+            network_forget,
+            radio_stations,
+            radio_favorites,
+            radio_favorite,
+            radio_play,
         ])
         .build(tauri::generate_context!())
     {
