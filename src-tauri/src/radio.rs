@@ -149,10 +149,7 @@ pub struct Favorites {
 impl Favorites {
     pub fn load(data_dir: &Path) -> Self {
         let file = data_dir.join("radio.json");
-        let list = std::fs::read(&file)
-            .ok()
-            .and_then(|b| serde_json::from_slice(&b).ok())
-            .unwrap_or_default();
+        let list = crate::store::read_list(&file);
         Self { file, list }
     }
 

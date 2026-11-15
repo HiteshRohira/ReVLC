@@ -7,6 +7,9 @@
     trail: [] as { name: string; location: string }[],
     listing: null as Listing | null,
   });
+  /** The newest request: an answer to an older one is dropped. Shared, so a
+   *  view that's gone can't put its late answer under a newer view's path. */
+  let request = 0;
 </script>
 
 <script lang="ts">
@@ -24,8 +27,6 @@
   let places = $state<Places>({ mounted: [], servers: [], found: [] });
   let loading = $state(false);
   let error = $state<string | null>(null);
-  /** The newest request: an answer to an older one is dropped. */
-  let request = 0;
 
   // The "Connect to server" box.
   let address = $state("");
@@ -51,6 +52,9 @@
 
   onMount(() => {
     loadPlaces();
+    // Left while a folder was opening or had failed: open it again, so the
+    // page isn't blank with nothing to press.
+    if (here && !at.listing) browse(at.trail);
     // Servers turn up over a few seconds, and shares get mounted and ejected.
     const timer = setInterval(() => !here && loadPlaces(), 3000);
     return () => {

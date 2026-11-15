@@ -101,7 +101,7 @@
                 <span class="num tnum">{i + 1}</span>
                 <span class="t">{cleanTitle(item.title)}</span>
               </button>
-              <button class="act" aria-label="Remove {cleanTitle(item.title)} from the playlist" data-tip="Remove" onclick={() => player.removeFromPlaylist(open.id, i)}><X size={15} /></button>
+              <button class="act" aria-label="Remove {cleanTitle(item.title)} from the playlist" data-tip="Remove" onclick={() => player.removeFromPlaylist(open.id, i, item.uri)}><X size={15} /></button>
             </li>
           {/each}
         </ol>

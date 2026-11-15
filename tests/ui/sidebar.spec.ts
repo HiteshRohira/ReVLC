@@ -33,7 +33,7 @@ test("Music sorts songs into albums and plays an album from the song picked", as
   await expect(page.getByText("Field recording")).toBeVisible();
 });
 
-test("a playlist is made from the queue, renamed, played and deleted", async ({ page }) => {
+test("a playlist is made, renamed, played and deleted", async ({ page }) => {
   await open(page, "home");
   await section(page, "Playlists").click();
   await expect(page.getByRole("list", { name: "Playlists" }).getByRole("listitem")).toHaveCount(1);

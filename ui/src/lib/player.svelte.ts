@@ -590,7 +590,7 @@ class Player {
   renamePlaylist = (id: string, name: string) => this.#playlists("playlists_rename", { id, name });
   deletePlaylist = (id: string) => this.#playlists("playlists_delete", { id });
   addToPlaylist = (id: string, uris: string[]) => this.#playlists("playlists_add", { id, uris });
-  removeFromPlaylist = (id: string, index: number) => this.#playlists("playlists_remove_item", { id, index });
+  removeFromPlaylist = (id: string, index: number, uri: string) => this.#playlists("playlists_remove_item", { id, index, uri });
   /** Plays a saved playlist from one of its items; it takes the queue's place. */
   playPlaylist = (id: string, index = 0) => this.#call("playlists_play", { id, index });
 

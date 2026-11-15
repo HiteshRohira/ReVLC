@@ -171,7 +171,7 @@ const handlers: Record<string, (args: Json) => unknown> = {
     return playlists;
   },
   playlists_remove_item: (a) => {
-    playlists = playlists.map((p) => (p.id === a.id ? { ...p, items: (p.items as Json[]).filter((_, i) => i !== a.index) } : p));
+    playlists = playlists.map((p) => (p.id === a.id ? { ...p, items: (p.items as Json[]).filter((item, i) => !(i === a.index && (item as { uri: string }).uri === a.uri)) } : p));
     return playlists;
   },
   network_places: () => ({

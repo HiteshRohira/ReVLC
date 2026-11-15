@@ -59,10 +59,7 @@ pub struct Servers {
 impl Servers {
     pub fn load(data_dir: &Path) -> Self {
         let file = data_dir.join("servers.json");
-        let list = std::fs::read(&file)
-            .ok()
-            .and_then(|b| serde_json::from_slice(&b).ok())
-            .unwrap_or_default();
+        let list = crate::store::read_list(&file);
         Self { file, list }
     }
 
@@ -173,9 +170,13 @@ pub fn unc_path(url: &str) -> Option<String> {
     let clean = strip_credentials(url);
     let rest = clean.split_once("://")?.1.trim_end_matches('/');
     let (host, path) = rest.split_once('/')?;
-    // A port isn't part of a Windows path.
-    let host = host.split(':').next().unwrap_or(host);
-    if host.is_empty() || path.is_empty() {
+    let host = match host.strip_prefix('[').and_then(|h| h.split_once(']')) {
+        // Windows paths can't hold an IPv6 address's colons; it has a name for them instead.
+        Some((address, _port)) => format!("{}.ipv6-literal.net", address.replace(':', "-").replace("%25", "s").replace('%', "s")),
+        // A port isn't part of a Windows path.
+        None => host.split(':').next().unwrap_or(host).to_string(),
+    };
+    if host.is_empty() || host.starts_with('.') || path.is_empty() {
         return None;
     }
     Some(format!("\\\\{host}\\{}", percent_decode(path).replace('/', "\\")))
@@ -196,13 +197,24 @@ fn mounts() -> Vec<Place> {
         let bytes: Vec<u8> = chars.iter().take_while(|&&c| c != 0).map(|&c| c as u8).collect();
         String::from_utf8_lossy(&bytes).into_owned()
     };
-    let mut list: *mut libc::statfs = std::ptr::null_mut();
-    // SAFETY: getmntinfo hands back a table it owns, `count` entries long.
-    let count = unsafe { libc::getmntinfo(&mut list, libc::MNT_NOWAIT) };
-    if count <= 0 || list.is_null() {
+    // getfsstat fills a table of our own. (getmntinfo's is shared by every
+    // caller in the process, and two listings at once would trample it.)
+    // SAFETY: a null table asks only for the number of mounts.
+    let count = unsafe { libc::getfsstat(std::ptr::null_mut(), 0, libc::MNT_NOWAIT) };
+    if count <= 0 {
         return Vec::new();
     }
-    let table = unsafe { std::slice::from_raw_parts(list, count as usize) };
+    // Room for a few more, in case something is mounted in between.
+    let room = count as usize + 8;
+    let mut table: Vec<libc::statfs> = Vec::with_capacity(room);
+    let bytes = (room * std::mem::size_of::<libc::statfs>()) as libc::c_int;
+    // SAFETY: the table has room for `bytes`; getfsstat says how many entries it wrote.
+    let filled = unsafe { libc::getfsstat(table.as_mut_ptr(), bytes, libc::MNT_NOWAIT) };
+    if filled <= 0 {
+        return Vec::new();
+    }
+    // SAFETY: the first `filled` entries were written, and never more than fit.
+    unsafe { table.set_len((filled as usize).min(room)) };
     table
         .iter()
         .filter(|m| NETWORK.contains(&text(&m.f_fstypename).as_str()))
@@ -355,6 +367,8 @@ mod tests {
         assert_eq!(display_name("ftp://nas.local"), "nas.local");
         assert_eq!(display_name("/Volumes/films"), "films");
         assert_eq!(unc_path("smb://me@nas:445/films/New%20ones/").as_deref(), Some("\\\\nas\\films\\New ones"));
+        assert_eq!(unc_path("smb://[2001:db8::1]:445/films").as_deref(), Some("\\\\2001-db8--1.ipv6-literal.net\\films"));
+        assert_eq!(unc_path("smb://[fe80::1%25eth0]/films").as_deref(), Some("\\\\fe80--1seth0.ipv6-literal.net\\films"));
         assert_eq!(unc_path("smb://nas"), None);
         assert_eq!(unc_path("smb://nas/"), None);
     }

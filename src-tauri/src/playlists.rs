@@ -55,10 +55,7 @@ fn now() -> u64 {
 impl Playlists {
     pub fn load(data_dir: &Path) -> Self {
         let file = data_dir.join("playlists.json");
-        let lists = std::fs::read(&file)
-            .ok()
-            .and_then(|b| serde_json::from_slice(&b).ok())
-            .unwrap_or_default();
+        let lists = crate::store::read_list(&file);
         Self { file, lists }
     }
 
@@ -141,11 +138,18 @@ impl Playlists {
         })
     }
 
-    pub fn remove_item(&mut self, id: &str, index: usize) -> Result<(), String> {
+    /// Removes the item shown at `index`, which was `uri` when it was
+    /// clicked. If the list has changed since (two quick removals), the
+    /// item is found by its address instead, so the wrong one never goes.
+    pub fn remove_item(&mut self, id: &str, index: usize, uri: &str) -> Result<(), String> {
         self.update(|lists| {
             let list = Self::find(lists, id)?;
-            if index < list.items.len() {
-                list.items.remove(index);
+            let at = match list.items.get(index) {
+                Some(item) if item.uri == uri => Some(index),
+                _ => list.items.iter().position(|item| item.uri == uri),
+            };
+            if let Some(at) = at {
+                list.items.remove(at);
                 list.updated = now();
             }
             Ok(())
@@ -174,13 +178,28 @@ mod tests {
     }
 
     #[test]
+    fn two_quick_removals_take_the_items_clicked() {
+        let dir = dir("remove");
+        let mut lists = Playlists::load(&dir);
+        let id = lists.create("Mix", vec![item("a"), item("b"), item("c")]).unwrap();
+        // Both clicks were made on the list as it first stood: a at 0, b at 1.
+        lists.remove_item(&id, 0, "a").unwrap();
+        lists.remove_item(&id, 1, "b").unwrap();
+        assert_eq!(lists.items(&id).unwrap().iter().map(|i| i.uri.as_str()).collect::<Vec<_>>(), ["c"]);
+        // One that's already gone takes nothing with it.
+        lists.remove_item(&id, 0, "a").unwrap();
+        assert_eq!(lists.items(&id).unwrap().len(), 1);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn playlists_are_kept_between_launches() {
         let dir = dir("keep");
         let mut lists = Playlists::load(&dir);
         let road = lists.create("  Road   trip ", vec![item("/m/a.mp3"), item("/m/b.mp3")]).unwrap();
         let focus = lists.create("Focus", Vec::new()).unwrap();
         lists.add(&focus, vec![item("https://radio.example/stream")]).unwrap();
-        lists.remove_item(&road, 0).unwrap();
+        lists.remove_item(&road, 0, "/m/a.mp3").unwrap();
         lists.rename(&road, "Road trip 2026").unwrap();
 
         let back = Playlists::load(&dir);

@@ -2493,10 +2493,10 @@ async fn playlists_add(player: tauri::State<'_, Player>, id: String, uris: Vec<S
 }
 
 #[tauri::command]
-async fn playlists_remove_item(player: tauri::State<'_, Player>, id: String, index: usize) -> Result<Vec<Saved>, String> {
+async fn playlists_remove_item(player: tauri::State<'_, Player>, id: String, index: usize, uri: String) -> Result<Vec<Saved>, String> {
     off_main(player, move |core| {
         let mut lists = core.playlists();
-        lists.remove_item(&id, index)?;
+        lists.remove_item(&id, index, &uri)?;
         Ok(lists.lists.clone())
     })
     .await?

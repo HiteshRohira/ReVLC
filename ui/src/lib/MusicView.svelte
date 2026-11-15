@@ -28,9 +28,14 @@
   const albums = $derived.by(() => {
     const map = new Map<string, Song[]>();
     for (const song of player.library.music) {
-      const key = song.album
-        ? `a\u0000${(song.albumArtist ?? "").toLowerCase()}\u0000${song.album.toLowerCase()}`
-        : `f\u0000${song.root}\u0000${song.folder}`;
+      // Without an album artist, two albums can share a title ("Greatest
+      // Hits"); the folder tells them apart and keeps a compilation whole.
+      const where = `${song.root}\u0000${song.folder}`;
+      const key = !song.album
+        ? `f\u0000${where}`
+        : song.albumArtist
+          ? `a\u0000${song.albumArtist.toLowerCase()}\u0000${song.album.toLowerCase()}`
+          : `t\u0000${song.album.toLowerCase()}\u0000${where}`;
       if (!map.has(key)) map.set(key, []);
       map.get(key)!.push(song);
     }
