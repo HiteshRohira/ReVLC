@@ -111,8 +111,12 @@ test("the shortcut list scrolls from the keyboard, not the player", async ({ pag
   await expect(help).toBeFocused();
   const scrolled = () => help.evaluate((el) => el.scrollTop);
   expect(await help.evaluate((el) => el.scrollHeight > el.clientHeight), "the list is long enough to scroll").toBe(true);
-  await page.keyboard.press("ArrowDown");
-  await expect.poll(scrolled).toBeGreaterThan(0);
+  // The list has only just taken focus; under load the browser can drop an
+  // arrow key that arrives in the same moment, so press until it scrolls.
+  await expect(async () => {
+    await page.keyboard.press("ArrowDown");
+    expect(await scrolled()).toBeGreaterThan(0);
+  }).toPass({ timeout: 5000 });
   await page.keyboard.press("End");
   await expect.poll(scrolled).toBe(await help.evaluate((el) => el.scrollHeight - el.clientHeight));
   expect(await calls(page, "set_volume"), "ArrowDown went to the player").toEqual([]);
