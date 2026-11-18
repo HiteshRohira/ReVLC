@@ -2648,7 +2648,7 @@ fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     let resource_dir = app.path().resource_dir().ok();
     let data_dir = app.path().app_data_dir()?;
     let languages = preferred_languages();
-    let settings = Settings::load(&data_dir);
+    let (settings, settings_damaged) = Settings::load(&data_dir);
     // Extra libVLC options for debugging, e.g. REVLC_VLC_ARGS="--verbose=2".
     let args: Vec<String> = std::env::var("REVLC_VLC_ARGS").unwrap_or_default().split_whitespace().map(String::from).collect();
     let mut cli = cli::parse(std::env::args().skip(1));
@@ -2727,6 +2727,17 @@ fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     }
     if !core.vlc.rejected_args.is_empty() {
         core.notice("error", format!("libVLC didn't accept {}, so ReVLC started without them", core.vlc.rejected_args.join(" ")));
+    }
+    // Files that couldn't be read were moved aside; say so, like the history's.
+    let kept = |d: &store::Damaged| d.aside.as_ref().map(|p| format!(" The old file is kept at {}", p.display())).unwrap_or_default();
+    if let Some(d) = &settings_damaged {
+        core.notice("error", format!("Your settings couldn't be read, so they're back to the defaults, with usage statistics off.{}", kept(d)));
+    }
+    if let Some(d) = core.bookmarks().damaged.take() {
+        core.notice("error", format!("Your bookmarks couldn't be read, so they start empty.{}", kept(&d)));
+    }
+    if let Some(d) = core.library().damaged.take() {
+        core.notice("error", format!("Your library folders couldn't be read, so the library starts empty.{}", kept(&d)));
     }
 
     // libVLC's player has its own title-display default; apply ours.

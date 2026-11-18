@@ -10,7 +10,7 @@ done.
 
 | Plan | Title | Priority | Effort | Depends on | Status |
 |------|-------|----------|--------|------------|--------|
-| [001](001-keep-damaged-settings-aside.md) | A damaged settings, bookmarks or library file is kept aside and reported, never silently reset | P1 | S | — | TODO |
+| [001](001-keep-damaged-settings-aside.md) | A damaged settings, bookmarks or library file is kept aside and reported, never silently reset | P1 | S | — | DONE |
 | [002](002-report-partial-open-failures.md) | One unreadable playlist no longer cancels an open, and open errors on a cold launch are shown | P2 | S | — | TODO |
 | [003](003-move-past-unplayable-items.md) | The queue moves past an item that can't play, and never reopens one in a loop | P1 | M | — | TODO |
 | [004](004-pin-release-actions.md) | The workflows that build shipped files use actions pinned to commit SHAs | P3 | S | — | TODO |

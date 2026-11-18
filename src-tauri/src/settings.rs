@@ -160,12 +160,24 @@ impl Default for Settings {
 }
 
 impl Settings {
-    pub fn load(data_dir: &Path) -> Self {
-        std::fs::read(file(data_dir))
-            .ok()
-            .and_then(|b| serde_json::from_slice(&b).ok())
-            .map(Self::from_json)
-            .unwrap_or_default()
+    /// The saved settings, and what happened to the file if it couldn't be
+    /// read. Then the settings are the defaults, except that analytics is
+    /// off: whether the user had turned it off can't be known. They're saved
+    /// at once, so the next launch doesn't turn it back on.
+    pub fn load(data_dir: &Path) -> (Self, Option<crate::store::Damaged>) {
+        let path = file(data_dir);
+        let damaged = match crate::store::read_json::<serde_json::Value>(&path) {
+            Ok(None) => return (Self::default(), None),
+            Ok(Some(json @ serde_json::Value::Object(_))) => return (Self::from_json(json), None),
+            // JSON, but not a settings object.
+            Ok(Some(_)) => crate::store::set_aside(&path),
+            Err(damaged) => damaged,
+        };
+        let settings = Self { analytics: false, ..Self::default() };
+        if let Err(e) = settings.save(data_dir) {
+            eprintln!("revlc: {e}");
+        }
+        (settings, Some(damaged))
     }
 
     /// A field that can't be read takes its default on its own, so one bad

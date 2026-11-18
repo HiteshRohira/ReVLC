@@ -1,12 +1,55 @@
 //! Saving the app's JSON files.
 
-use std::path::Path;
+use std::io::Write;
+use std::path::{Path, PathBuf};
 
-use serde::Serialize;
+use serde::{Serialize, de::DeserializeOwned};
+
+/// A saved file that couldn't be read as what it should hold.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Damaged {
+    /// Where the file was moved, so the next save doesn't overwrite it.
+    /// `None` if it couldn't be moved.
+    pub aside: Option<PathBuf>,
+}
+
+/// Moves an unreadable file out of the way, to `<name>-damaged-<unix seconds>.json`
+/// next to it.
+pub fn set_aside(path: &Path) -> Damaged {
+    let stem = path.file_stem().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
+    let aside = path.with_file_name(format!("{stem}-damaged-{now}.json"));
+    Damaged { aside: std::fs::rename(path, &aside).is_ok().then_some(aside) }
+}
+
+/// Reads a JSON file. `Ok(None)` when there's no file (or it can't be
+/// opened). A file that is there but doesn't hold a `T` is moved aside
+/// rather than left to be overwritten, and reported as [`Damaged`].
+pub fn read_json<T: DeserializeOwned>(path: &Path) -> Result<Option<T>, Damaged> {
+    let Ok(bytes) = std::fs::read(path) else { return Ok(None) };
+    match serde_json::from_slice(&bytes) {
+        Ok(value) => Ok(Some(value)),
+        Err(e) => {
+            eprintln!("revlc: {} is damaged: {e}", path.display());
+            Err(set_aside(path))
+        }
+    }
+}
 
 /// Writes `value` as JSON to `path`. Goes through a temporary file, so a
 /// failed or interrupted write leaves the previous contents intact.
 pub fn write_json(path: &Path, value: &impl Serialize, pretty: bool) -> Result<(), String> {
+    write(path, value, pretty, false)
+}
+
+/// [`write_json`], flushed to the disk before it replaces the old file, so
+/// a power cut can't leave an empty file. For files saved rarely.
+pub fn write_json_durable(path: &Path, value: &impl Serialize, pretty: bool) -> Result<(), String> {
+    write(path, value, pretty, true)
+}
+
+/// Writes through a temporary file; `flush` makes it reach the disk before the rename.
+fn write(path: &Path, value: &impl Serialize, pretty: bool, flush: bool) -> Result<(), String> {
     let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
     let fail = |e: &dyn std::fmt::Display| format!("Could not save {name}: {e}");
     let json = if pretty { serde_json::to_vec_pretty(value) } else { serde_json::to_vec(value) }.map_err(|e| fail(&e))?;
@@ -14,7 +57,13 @@ pub fn write_json(path: &Path, value: &impl Serialize, pretty: bool) -> Result<(
         std::fs::create_dir_all(dir).map_err(|e| fail(&e))?;
     }
     let tmp = path.with_file_name(format!("{name}.tmp"));
-    std::fs::write(&tmp, json).map_err(|e| fail(&e))?;
+    if flush {
+        let mut file = std::fs::File::create(&tmp).map_err(|e| fail(&e))?;
+        file.write_all(&json).map_err(|e| fail(&e))?;
+        file.sync_all().map_err(|e| fail(&e))?;
+    } else {
+        std::fs::write(&tmp, json).map_err(|e| fail(&e))?;
+    }
     std::fs::rename(&tmp, path).map_err(|e| {
         let _ = std::fs::remove_file(&tmp);
         fail(&e)
@@ -60,6 +109,32 @@ mod tests {
         assert_eq!(std::fs::read(dir.join(&kept[0])).unwrap(), b"[1, 2");
         write_json(&file, &vec![3], false).unwrap();
         assert_eq!(read_list::<i32>(&file), [3]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn reads_what_was_written() {
+        let dir = std::env::temp_dir().join(format!("revlc-store-read-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let file = dir.join("x.json");
+        write_json_durable(&file, &vec![1, 2, 3], false).unwrap();
+        assert_eq!(read_json::<Vec<i32>>(&file), Ok(Some(vec![1, 2, 3])));
+        assert!(!dir.join("x.json.tmp").exists());
+        assert_eq!(read_json::<Vec<i32>>(&dir.join("missing.json")), Ok(None));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_damaged_file_is_moved_aside() {
+        let dir = std::env::temp_dir().join(format!("revlc-store-aside-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("x.json");
+        std::fs::write(&file, b"[1, 2").unwrap();
+        let Err(Damaged { aside: Some(aside) }) = read_json::<Vec<i32>>(&file) else { panic!("not reported as damaged and moved aside") };
+        assert_eq!(std::fs::read(&aside).unwrap(), b"[1, 2");
+        assert!(!file.exists());
+        assert!(aside.file_name().unwrap().to_string_lossy().starts_with("x-damaged-"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
