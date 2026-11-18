@@ -991,29 +991,17 @@ impl Core {
     /// [`Core::add`], giving each new item the libVLC `options` (from the
     /// command line, like ":start-time=30").
     fn add_with_options(&self, uris: Vec<String>, play: bool, options: &[String]) -> Result<(), String> {
-        let mut items = Vec::new();
-        let mut subtitles = Vec::new();
-        for uri in uris.into_iter().map(playlist_file::native_path) {
-            let path = Path::new(&uri);
-            if uri.contains("://") {
-                items.push(Item::new(uri));
-            } else if path.is_dir() {
-                // A disc's folder plays as a disc, not as a folder of files.
-                match disc::kind_of(path) {
-                    Some(kind) => items.extend(disc::items(kind, &uri, true)?),
-                    None => {
-                        if let Err(e) = self.library().add(&uri) {
-                            self.notice("error", e);
-                        }
-                        items.extend(library::expand(vec![uri]).into_iter().map(Item::new));
-                    }
-                }
-            } else if playlist_file::is_playlist(path) {
-                items.extend(playlist_file::read(path)?);
-            } else if library::is_subtitle(path) {
-                subtitles.push(uri);
-            } else {
-                items.push(Item::new(uri));
+        let Opened { mut items, subtitles, folders, failed } = opened(uris);
+        // Nothing at all could be opened: that's the caller's error to show.
+        if items.is_empty() && subtitles.is_empty() && !failed.is_empty() {
+            return Err(failed.join("; "));
+        }
+        for e in failed {
+            self.notice("error", e);
+        }
+        for folder in folders {
+            if let Err(e) = self.library().add(&folder) {
+                self.notice("error", e);
             }
         }
         for item in &mut items {
@@ -1119,6 +1107,51 @@ impl Core {
             None => Err("end of playlist".into()),
         }
     }
+}
+
+/// What a list of paths and URLs holds.
+#[derive(Default)]
+struct Opened {
+    items: Vec<Item>,
+    subtitles: Vec<String>,
+    /// Plain folders, which also join the library.
+    folders: Vec<String>,
+    /// Why some of them couldn't be opened; the rest still are.
+    failed: Vec<String>,
+}
+
+/// Sorts paths and URLs into what to play: folders give their media,
+/// playlist files their entries, and a disc's folder plays as a disc.
+fn opened(uris: Vec<String>) -> Opened {
+    let mut found = Opened::default();
+    for uri in uris.into_iter().map(playlist_file::native_path) {
+        let path = Path::new(&uri);
+        if uri.contains("://") {
+            found.items.push(Item::new(uri));
+        } else if path.is_dir() {
+            // A disc's folder plays as a disc, not as a folder of files.
+            match disc::kind_of(path) {
+                Some(kind) => match disc::items(kind, &uri, true) {
+                    Ok(items) => found.items.extend(items),
+                    Err(e) => found.failed.push(e),
+                },
+                None => {
+                    found.items.extend(library::expand(vec![uri.clone()]).into_iter().map(Item::new));
+                    found.folders.push(uri);
+                }
+            }
+        } else if playlist_file::is_playlist(path) {
+            match playlist_file::read(path) {
+                Ok(items) => found.items.extend(items),
+                Err(e) => found.failed.push(e),
+            }
+        } else if library::is_subtitle(path) {
+            found.subtitles.push(uri);
+        } else {
+            found.items.push(Item::new(uri));
+        }
+    }
+    found
 }
 
 /// Generates library thumbnails one at a time. Video frames wait while
@@ -2761,9 +2794,13 @@ fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     thread::Builder::new().name("vlc-events".into()).spawn(move || pump_events(pump, rx))?;
 
     // Files passed on the command line, then any Finder opened before now.
-    let _ = core.add_with_options(cli.files, true, &cli.media_options);
+    if let Err(e) = core.add_with_options(cli.files, true, &cli.media_options) {
+        core.notice("error", e);
+    }
     let early = std::mem::take(&mut *EARLY_OPENS.lock().unwrap_or_else(|e| e.into_inner()));
-    let _ = core.add(early, true);
+    if let Err(e) = core.add(early, true) {
+        core.notice("error", e);
+    }
 
     let window = app.get_webview_window("main").ok_or("main window missing")?;
     #[cfg(windows)]
@@ -3115,6 +3152,24 @@ mod tests {
                 assert_eq!(window["create"], false, "{file}: window {}", window["label"]);
             }
         }
+    }
+
+    #[test]
+    fn one_unreadable_playlist_leaves_the_rest_to_open() {
+        let dir = std::env::temp_dir().join(format!("revlc-opened-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = |name: &str| dir.join(name).to_string_lossy().into_owned();
+        std::fs::write(dir.join("good.m3u"), "one.mkv\ntwo.mkv\n").unwrap();
+        // gone.m3u isn't there, so it can't be read.
+        let found = opened(vec![path("good.m3u"), path("gone.m3u"), path("film.mkv"), path("film.srt"), "https://example.com/live.m3u8".into()]);
+        let uris: Vec<&str> = found.items.iter().map(|i| i.uri.as_str()).collect();
+        assert_eq!(uris, [path("one.mkv"), path("two.mkv"), path("film.mkv"), "https://example.com/live.m3u8".to_string()]);
+        assert_eq!(found.subtitles, [path("film.srt")]);
+        assert!(found.folders.is_empty());
+        assert_eq!(found.failed.len(), 1);
+        assert!(found.failed[0].contains("gone.m3u"), "{}", found.failed[0]);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
