@@ -1213,6 +1213,11 @@ fn pump_events(core: Arc<Core>, rx: Receiver<vlc::Event>) {
     // The last media that got past its start. Some broken files end
     // without an error, having played nothing.
     let mut played = None;
+    // The media whose end or error has been dealt with, so one that sends
+    // both, in the same batch of events or apart, is dealt with once.
+    let mut over = None;
+    // How many items in a row were over without playing anything.
+    let mut failed = 0usize;
     while let Ok(first) = rx.recv() {
         // Let bursts of events (e.g. opening a file) arrive, then handle them together.
         thread::sleep(Duration::from_millis(20));
@@ -1248,31 +1253,35 @@ fn pump_events(core: Arc<Core>, rx: Receiver<vlc::Event>) {
             if let Err(e) = core.expand_current(subitems) {
                 core.notice("error", e);
             }
-        } else if current(event::END_REACHED) {
-            if played == Some(generation) {
+        } else if (current(event::END_REACHED) || current(event::ERROR)) && over != Some(generation) {
+            over = Some(generation);
+            let did_play = played == Some(generation);
+            if did_play && !current(event::ERROR) {
                 if let Some(uri) = core.current_uri() {
                     core.history().finish(&uri);
                     core.save_history();
                 }
             } else {
+                // An error part-way keeps its place in the history, to resume from.
                 core.notice("error", format!("Could not play {}", core.current_title()));
             }
+            failed = if did_play { 0 } else { failed + 1 };
             let stop_after_each = core.settings().stop_after_each;
             let sleep_now = std::mem::take(&mut core.sleep().after_item);
+            // Not what just failed again, and not round and round a queue where nothing plays.
+            let next = core.playlist().next_after(failed);
             // Like VLC's --play-and-exit: quit once there's nothing left to play.
-            if core.play_and_exit && core.playlist().next_index(true).is_none() {
+            if core.play_and_exit && next.is_none() {
                 core.app.exit(0);
             }
             if sleep_now {
                 core.notice("info", "Sleep timer: stopped after this item");
             } else if !stop_after_each
-                && let Err(e) = core.advance_locked(true)
+                && let Some(index) = next
+                && let Err(e) = core.play_index_locked(index)
             {
                 core.notice("error", e);
             }
-        }
-        if current(event::ERROR) {
-            core.notice("error", format!("Could not play {}", core.current_title()));
         }
         // The resume point belongs to what's open now: only its own start
         // may use it, and before anything else can be opened.
