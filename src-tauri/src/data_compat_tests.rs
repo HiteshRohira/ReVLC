@@ -36,7 +36,8 @@ fn copy(version: &str) -> PathBuf {
 #[test]
 fn every_released_settings_file_keeps_its_values() {
     for v in VERSIONS {
-        let s = Settings::load(&copy(v));
+        let (s, damaged) = Settings::load(&copy(v));
+        assert!(damaged.is_none(), "{v}: settings.json set aside as damaged");
         assert_eq!(s.resume, Resume::Never, "{v}: resume");
         assert_eq!(s.font, "Georgia", "{v}: font");
         assert_eq!(s.font_size, 12, "{v}: font size");
@@ -68,9 +69,11 @@ fn every_released_history_library_and_bookmarks_file_loads() {
         assert_eq!(history.list().len(), 2, "{v}: history entries");
         assert_eq!(history.resume_point(FILM), Some(1_234_000), "{v}: resume point");
         // As paths: Windows writes them with its own separators.
+        assert!(Library::load(&dir).damaged.is_none(), "{v}: library.json set aside as damaged");
         let folders: Vec<PathBuf> = Library::load(&dir).folders.iter().map(PathBuf::from).collect();
         assert_eq!(folders, [Path::new("/Users/someone/Movies"), Path::new("/Volumes/Media/TV")], "{v}: library folders");
         if data(v).join("bookmarks.json").exists() {
+            assert!(Bookmarks::load(&dir).damaged.is_none(), "{v}: bookmarks.json set aside as damaged");
             let names: Vec<String> = Bookmarks::load(&dir).list(FILM).into_iter().map(|b| b.name).collect();
             assert_eq!(names, ["Opening", "Bookmark 2"], "{v}: bookmarks");
         }
@@ -86,12 +89,49 @@ fn the_analytics_id_survives_an_update() {
 }
 
 #[test]
+fn an_unreadable_settings_file_is_kept_aside_with_analytics_off() {
+    // Cut short, an empty file, and JSON that isn't a settings object.
+    for bad in ["{\"analytics\": false,", "", "[]"] {
+        let dir = copy("0.2.10");
+        let file = dir.join("settings.json");
+        std::fs::write(&file, bad).unwrap();
+        let (s, damaged) = Settings::load(&dir);
+        let aside = damaged.expect("reported as damaged").aside.expect("moved aside");
+        assert_eq!(std::fs::read_to_string(&aside).unwrap(), bad, "the old file is kept as it was");
+        assert!(!s.analytics, "{bad:?}: analytics came back on");
+        assert_eq!(Settings { analytics: true, ..s }, Settings::default(), "{bad:?}: everything else is the default");
+        // Saved at once: the next launch reads it, and analytics stays off.
+        let (again, damaged) = Settings::load(&dir);
+        assert!(damaged.is_none(), "{bad:?}: damaged again on the next launch");
+        assert!(!again.analytics, "{bad:?}: analytics came back on at the next launch");
+    }
+}
+
+#[test]
+fn an_unreadable_settings_file_stays_if_the_defaults_cant_be_saved() {
+    let dir = copy("0.2.10");
+    let file = dir.join("settings.json");
+    std::fs::write(&file, "{\"analytics\": false,").unwrap();
+    // A folder where the temporary file goes makes the save fail.
+    std::fs::create_dir_all(dir.join("settings.json.tmp").join("x")).unwrap();
+    let (s, damaged) = Settings::load(&dir);
+    assert!(!s.analytics, "analytics came back on");
+    assert_eq!(damaged.expect("reported as damaged").aside, None, "said to be kept elsewhere, but it's back in place");
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), "{\"analytics\": false,", "the damaged file wasn't put back");
+    // So the next launch finds it damaged again rather than missing.
+    let (again, damaged) = Settings::load(&dir);
+    assert!(damaged.is_some(), "the next launch took it for a fresh install");
+    assert!(!again.analytics, "analytics came back on at the next launch");
+}
+
+#[test]
 fn one_unreadable_setting_keeps_the_others() {
     let dir = copy("0.2.10");
     let file = dir.join("settings.json");
     let text = std::fs::read_to_string(&file).unwrap().replace("\"fontSize\": 12", "\"fontSize\": \"large\"");
     std::fs::write(&file, text).unwrap();
-    let s = Settings::load(&dir);
+    let (s, damaged) = Settings::load(&dir);
+    assert!(damaged.is_none(), "one bad value isn't a damaged file");
     assert!(!s.analytics, "analytics turned back on");
     assert_eq!(s.resume, Resume::Never, "resume reset");
     assert_eq!(s.network_caching, 5000, "network caching reset");

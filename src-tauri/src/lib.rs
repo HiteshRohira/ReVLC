@@ -991,30 +991,19 @@ impl Core {
     /// [`Core::add`], giving each new item the libVLC `options` (from the
     /// command line, like ":start-time=30").
     fn add_with_options(&self, uris: Vec<String>, play: bool, options: &[String]) -> Result<(), String> {
-        let mut items = Vec::new();
-        let mut subtitles = Vec::new();
-        for uri in uris.into_iter().map(playlist_file::native_path) {
-            let path = Path::new(&uri);
-            if uri.contains("://") {
-                items.push(Item::new(uri));
-            } else if path.is_dir() {
-                // A disc's folder plays as a disc, not as a folder of files.
-                match disc::kind_of(path) {
-                    Some(kind) => items.extend(disc::items(kind, &uri, true)?),
-                    None => {
-                        if let Err(e) = self.library().add(&uri) {
-                            self.notice("error", e);
-                        }
-                        items.extend(library::expand(vec![uri]).into_iter().map(Item::new));
-                    }
-                }
-            } else if playlist_file::is_playlist(path) {
-                items.extend(playlist_file::read(path)?);
-            } else if library::is_subtitle(path) {
-                subtitles.push(uri);
-            } else {
-                items.push(Item::new(uri));
+        let Opened { mut items, subtitles, folders, failed } = opened(uris);
+        // A folder joins the library even if nothing in it, or in the rest, can play.
+        for folder in folders {
+            if let Err(e) = self.library().add(&folder) {
+                self.notice("error", e);
             }
+        }
+        // Nothing at all could be opened: that's the caller's error to show.
+        if items.is_empty() && subtitles.is_empty() && !failed.is_empty() {
+            return Err(failed.join("; "));
+        }
+        for e in failed {
+            self.notice("error", e);
         }
         for item in &mut items {
             item.options.extend(options.iter().cloned());
@@ -1121,6 +1110,51 @@ impl Core {
     }
 }
 
+/// What a list of paths and URLs holds.
+#[derive(Default)]
+struct Opened {
+    items: Vec<Item>,
+    subtitles: Vec<String>,
+    /// Plain folders, which also join the library.
+    folders: Vec<String>,
+    /// Why some of them couldn't be opened; the rest still are.
+    failed: Vec<String>,
+}
+
+/// Sorts paths and URLs into what to play: folders give their media,
+/// playlist files their entries, and a disc's folder plays as a disc.
+fn opened(uris: Vec<String>) -> Opened {
+    let mut found = Opened::default();
+    for uri in uris.into_iter().map(playlist_file::native_path) {
+        let path = Path::new(&uri);
+        if uri.contains("://") {
+            found.items.push(Item::new(uri));
+        } else if path.is_dir() {
+            // A disc's folder plays as a disc, not as a folder of files.
+            match disc::kind_of(path) {
+                Some(kind) => match disc::items(kind, &uri, true) {
+                    Ok(items) => found.items.extend(items),
+                    Err(e) => found.failed.push(e),
+                },
+                None => {
+                    found.items.extend(library::expand(vec![uri.clone()]).into_iter().map(Item::new));
+                    found.folders.push(uri);
+                }
+            }
+        } else if playlist_file::is_playlist(path) {
+            match playlist_file::read(path) {
+                Ok(items) => found.items.extend(items),
+                Err(e) => found.failed.push(e),
+            }
+        } else if library::is_subtitle(path) {
+            found.subtitles.push(uri);
+        } else {
+            found.items.push(Item::new(uri));
+        }
+    }
+    found
+}
+
 /// Generates library thumbnails one at a time. Video frames wait while
 /// video plays so decoding never competes with playback; metadata and
 /// artwork go ahead of them meanwhile.
@@ -1180,6 +1214,14 @@ fn pump_events(core: Arc<Core>, rx: Receiver<vlc::Event>) {
     // The last media that got past its start. Some broken files end
     // without an error, having played nothing.
     let mut played = None;
+    // The media whose end or error has been dealt with, so one that sends
+    // both, in the same batch of events or apart, is dealt with once.
+    let mut over = None;
+    // The queue items that were over in a row without playing anything.
+    let mut failed: Vec<usize> = Vec::new();
+    // The media the queue moved on to by itself. Failures only add up while
+    // it does: whatever the user starts next begins a fresh count.
+    let mut chained = None;
     while let Ok(first) = rx.recv() {
         // Let bursts of events (e.g. opening a file) arrive, then handle them together.
         thread::sleep(Duration::from_millis(20));
@@ -1197,7 +1239,8 @@ fn pump_events(core: Arc<Core>, rx: Receiver<vlc::Event>) {
 
         // Web pages and remote playlists end by expanding into what they hold:
         // one stream plays in place, several replace the entry in the queue.
-        let subitems = if current(event::END_REACHED) { core.vlc.subitems() } else { Vec::new() };
+        // Not once its error has been dealt with: what happens to it is decided once.
+        let subitems = if current(event::END_REACHED) && over != Some(generation) { core.vlc.subitems() } else { Vec::new() };
         // Before the queue moves on, so a finished item counts as finished.
         if subitems.is_empty() {
             core.quality().handle(&batch, &core.vlc);
@@ -1206,44 +1249,61 @@ fn pump_events(core: Arc<Core>, rx: Receiver<vlc::Event>) {
             core.quality().handle(&events, &core.vlc);
         }
         if subitems.len() == 1 && core.vlc.play_subitem() {
+            if chained == Some(generation) {
+                chained = Some(core.vlc.generation());
+            }
             core.quality().followed(core.vlc.generation());
             if let Some(uri) = core.current_uri() {
                 core.set_resume(&uri);
             }
         } else if subitems.len() > 1 {
             core.quality().forget();
-            if let Err(e) = core.expand_current(subitems) {
-                core.notice("error", e);
+            match core.expand_current(subitems) {
+                Ok(()) if chained == Some(generation) => chained = Some(core.vlc.generation()),
+                Ok(()) => {}
+                Err(e) => core.notice("error", e),
             }
-        } else if current(event::END_REACHED) {
-            if played == Some(generation) {
+        } else if (current(event::END_REACHED) || current(event::ERROR)) && over != Some(generation) {
+            over = Some(generation);
+            let did_play = played == Some(generation);
+            if did_play && !current(event::ERROR) {
                 if let Some(uri) = core.current_uri() {
                     core.history().finish(&uri);
                     core.save_history();
                 }
             } else {
+                // An error part-way keeps its place in the history, to resume from.
                 core.notice("error", format!("Could not play {}", core.current_title()));
+            }
+            if did_play || chained != Some(generation) {
+                failed.clear();
+            }
+            if !did_play && let Some(index) = core.playlist().current {
+                failed.push(index);
             }
             let stop_after_each = core.settings().stop_after_each;
             let sleep_now = std::mem::take(&mut core.sleep().after_item);
+            // Not what just failed again, and not round and round a queue where nothing plays.
+            let next = core.playlist().next_after(&failed);
             // Like VLC's --play-and-exit: quit once there's nothing left to play.
-            if core.play_and_exit && core.playlist().next_index(true).is_none() {
+            if core.play_and_exit && next.is_none() {
                 core.app.exit(0);
             }
             if sleep_now {
                 core.notice("info", "Sleep timer: stopped after this item");
-            } else if !stop_after_each
-                && let Err(e) = core.advance_locked(true)
-            {
-                core.notice("error", e);
+            } else if !stop_after_each && let Some(index) = next {
+                match core.play_index_locked(index) {
+                    Ok(()) => chained = Some(core.vlc.generation()),
+                    Err(e) => core.notice("error", e),
+                }
             }
         }
-        if current(event::ERROR) {
-            core.notice("error", format!("Could not play {}", core.current_title()));
-        }
+        // Something else was opened above: the rest of this batch belongs to
+        // what was open before, so it mustn't touch the new media's resume point.
+        let moved_on = core.vlc.generation() != generation;
         // The resume point belongs to what's open now: only its own start
         // may use it, and before anything else can be opened.
-        if current(event::PLAYING) {
+        if current(event::PLAYING) && !moved_on {
             match core.resume.lock().unwrap_or_else(|e| e.into_inner()).take() {
                 Some(PendingSeek::Seek { ms, announce }) => {
                     core.vlc.set_time(ms);
@@ -1284,7 +1344,7 @@ fn pump_events(core: Arc<Core>, rx: Receiver<vlc::Event>) {
                 }
             }
         }
-        if has(event::TIME_CHANGED) && last_progress.elapsed() >= PROGRESS_INTERVAL {
+        if has(event::TIME_CHANGED) && !moved_on && last_progress.elapsed() >= PROGRESS_INTERVAL {
             last_progress = Instant::now();
             if let Some(uri) = core.current_uri() {
                 core.history().update(&uri, core.vlc.time(), core.vlc.length());
@@ -2648,7 +2708,7 @@ fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     let resource_dir = app.path().resource_dir().ok();
     let data_dir = app.path().app_data_dir()?;
     let languages = preferred_languages();
-    let settings = Settings::load(&data_dir);
+    let (settings, settings_damaged) = Settings::load(&data_dir);
     // Extra libVLC options for debugging, e.g. REVLC_VLC_ARGS="--verbose=2".
     let args: Vec<String> = std::env::var("REVLC_VLC_ARGS").unwrap_or_default().split_whitespace().map(String::from).collect();
     let mut cli = cli::parse(std::env::args().skip(1));
@@ -2728,6 +2788,17 @@ fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     if !core.vlc.rejected_args.is_empty() {
         core.notice("error", format!("libVLC didn't accept {}, so ReVLC started without them", core.vlc.rejected_args.join(" ")));
     }
+    // Files that couldn't be read were moved aside; say so, like the history's.
+    let kept = |d: &store::Damaged| d.aside.as_ref().map(|p| format!(" The old file is kept at {}", p.display())).unwrap_or_default();
+    if let Some(d) = &settings_damaged {
+        core.notice("error", format!("Your settings couldn't be read, so they're back to the defaults, with usage statistics off.{}", kept(d)));
+    }
+    if let Some(d) = core.bookmarks().damaged.take() {
+        core.notice("error", format!("Your bookmarks couldn't be read, so they start empty.{}", kept(&d)));
+    }
+    if let Some(d) = core.library().damaged.take() {
+        core.notice("error", format!("Your library folders couldn't be read, so the library starts empty.{}", kept(&d)));
+    }
 
     // libVLC's player has its own title-display default; apply ours.
     core.vlc.set_title_display(settings.show_title, settings.title_position, settings.title_timeout);
@@ -2750,9 +2821,13 @@ fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     thread::Builder::new().name("vlc-events".into()).spawn(move || pump_events(pump, rx))?;
 
     // Files passed on the command line, then any Finder opened before now.
-    let _ = core.add_with_options(cli.files, true, &cli.media_options);
+    if let Err(e) = core.add_with_options(cli.files, true, &cli.media_options) {
+        core.notice("error", e);
+    }
     let early = std::mem::take(&mut *EARLY_OPENS.lock().unwrap_or_else(|e| e.into_inner()));
-    let _ = core.add(early, true);
+    if let Err(e) = core.add(early, true) {
+        core.notice("error", e);
+    }
 
     let window = app.get_webview_window("main").ok_or("main window missing")?;
     #[cfg(windows)]
@@ -3104,6 +3179,24 @@ mod tests {
                 assert_eq!(window["create"], false, "{file}: window {}", window["label"]);
             }
         }
+    }
+
+    #[test]
+    fn one_unreadable_playlist_leaves_the_rest_to_open() {
+        let dir = std::env::temp_dir().join(format!("revlc-opened-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = |name: &str| dir.join(name).to_string_lossy().into_owned();
+        std::fs::write(dir.join("good.m3u"), "one.mkv\ntwo.mkv\n").unwrap();
+        // gone.m3u isn't there, so it can't be read.
+        let found = opened(vec![path("good.m3u"), path("gone.m3u"), path("film.mkv"), path("film.srt"), "https://example.com/live.m3u8".into()]);
+        let uris: Vec<&str> = found.items.iter().map(|i| i.uri.as_str()).collect();
+        assert_eq!(uris, [path("one.mkv"), path("two.mkv"), path("film.mkv"), "https://example.com/live.m3u8".to_string()]);
+        assert_eq!(found.subtitles, [path("film.srt")]);
+        assert!(found.folders.is_empty());
+        assert_eq!(found.failed.len(), 1);
+        assert!(found.failed[0].contains("gone.m3u"), "{}", found.failed[0]);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

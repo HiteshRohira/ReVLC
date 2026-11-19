@@ -166,26 +166,28 @@ pub struct LibraryItem {
 pub struct Library {
     file: PathBuf,
     pub folders: Vec<String>,
+    /// What happened to an unreadable library file, to tell the user.
+    pub damaged: Option<crate::store::Damaged>,
 }
 
 impl Library {
     pub fn load(data_dir: &Path) -> Self {
         let file = data_dir.join("library.json");
-        let saved: Vec<String> = std::fs::read(&file)
-            .ok()
-            .and_then(|b| serde_json::from_slice(&b).ok())
-            .unwrap_or_default();
+        let (saved, damaged): (Vec<String>, _) = match crate::store::read_json(&file) {
+            Ok(saved) => (saved.unwrap_or_default(), None),
+            Err(damaged) => (Vec::new(), Some(damaged)),
+        };
         let mut folders: Vec<String> = Vec::new();
         for folder in saved.iter().map(|f| normalize(f)) {
             if !folders.contains(&folder) {
                 folders.push(folder);
             }
         }
-        Self { file, folders }
+        Self { file, folders, damaged }
     }
 
     fn save(&self) -> Result<(), String> {
-        crate::store::write_json(&self.file, &self.folders, false)
+        crate::store::write_json_durable(&self.file, &self.folders, false)
     }
 
     pub fn add(&mut self, folder: &str) -> Result<(), String> {
@@ -363,15 +365,33 @@ mod tests {
     #[test]
     fn failed_saves_change_nothing() {
         let dir = std::env::temp_dir().join(format!("revlc-library-save-{}", std::process::id()));
+        let mut library = Library::load(&dir);
         // A folder where library.json should go makes every save fail.
         std::fs::create_dir_all(dir.join("library.json").join("x")).unwrap();
-        let mut library = Library::load(&dir);
         assert!(library.add("/Movies").is_err());
         assert!(library.folders.is_empty());
         // Once saving works again, the same add saves.
         std::fs::remove_dir_all(dir.join("library.json")).unwrap();
         library.add("/Movies").unwrap();
         assert_eq!(Library::load(&dir).folders, [normalize("/Movies")]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_damaged_file_is_kept_aside() {
+        let dir = std::env::temp_dir().join(format!("revlc-library-damaged-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("library.json"), b"[\"/Movies\",").unwrap();
+        let mut library = Library::load(&dir);
+        assert!(library.folders.is_empty());
+        let aside = library.damaged.clone().and_then(|d| d.aside).expect("moved aside");
+        assert_eq!(std::fs::read(&aside).unwrap(), b"[\"/Movies\",");
+        library.add("/Movies").unwrap();
+        let again = Library::load(&dir);
+        assert_eq!(again.folders, [normalize("/Movies")]);
+        assert_eq!(again.damaged, None);
+        assert!(aside.exists(), "the save overwrote the damaged file");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
