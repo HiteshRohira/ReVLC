@@ -108,6 +108,23 @@ fn an_unreadable_settings_file_is_kept_aside_with_analytics_off() {
 }
 
 #[test]
+fn an_unreadable_settings_file_stays_if_the_defaults_cant_be_saved() {
+    let dir = copy("0.2.10");
+    let file = dir.join("settings.json");
+    std::fs::write(&file, "{\"analytics\": false,").unwrap();
+    // A folder where the temporary file goes makes the save fail.
+    std::fs::create_dir_all(dir.join("settings.json.tmp").join("x")).unwrap();
+    let (s, damaged) = Settings::load(&dir);
+    assert!(!s.analytics, "analytics came back on");
+    assert_eq!(damaged.expect("reported as damaged").aside, None, "said to be kept elsewhere, but it's back in place");
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), "{\"analytics\": false,", "the damaged file wasn't put back");
+    // So the next launch finds it damaged again rather than missing.
+    let (again, damaged) = Settings::load(&dir);
+    assert!(damaged.is_some(), "the next launch took it for a fresh install");
+    assert!(!again.analytics, "analytics came back on at the next launch");
+}
+
+#[test]
 fn one_unreadable_setting_keeps_the_others() {
     let dir = copy("0.2.10");
     let file = dir.join("settings.json");

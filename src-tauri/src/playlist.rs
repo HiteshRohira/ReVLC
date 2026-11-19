@@ -174,13 +174,21 @@ impl Playlist {
     }
 
     /// The item to play after the current one was over by itself. `failed`
-    /// is how many items in a row, this one included, were over without
-    /// playing anything (0 when it played). An item that failed isn't
-    /// repeated, and once as many have failed in a row as the queue holds,
-    /// the queue stops rather than going round for ever.
-    pub fn next_after(&self, failed: usize) -> Option<usize> {
-        if failed > 0 && (failed >= self.items.len() || self.repeat == Repeat::One) {
+    /// holds the items that were over in a row without playing anything,
+    /// this one included (empty when it played). An item that failed isn't
+    /// repeated, and once every item has failed in a row the queue stops
+    /// rather than going round for ever.
+    pub fn next_after(&self, failed: &[usize]) -> Option<usize> {
+        if failed.is_empty() {
+            return self.next_index(true);
+        }
+        let left: Vec<usize> = (0..self.items.len()).filter(|i| !failed.contains(i)).collect();
+        if left.is_empty() || self.repeat == Repeat::One {
             return None;
+        }
+        // Shuffle picks among what hasn't failed yet, so every item gets its turn.
+        if self.shuffle {
+            return Some(left[random_index(left.len())]);
         }
         self.next_index(true)
     }
@@ -250,11 +258,11 @@ mod tests {
     fn what_played_goes_on_as_before() {
         let mut p = list(3);
         p.current = Some(2);
-        assert_eq!(p.next_after(0), None);
+        assert_eq!(p.next_after(&[]), None);
         p.repeat = Repeat::All;
-        assert_eq!(p.next_after(0), Some(0));
+        assert_eq!(p.next_after(&[]), Some(0));
         p.repeat = Repeat::One;
-        assert_eq!(p.next_after(0), Some(2));
+        assert_eq!(p.next_after(&[]), Some(2));
     }
 
     #[test]
@@ -262,24 +270,39 @@ mod tests {
         let mut p = list(3);
         p.current = Some(0);
         // The next item gets its turn.
-        assert_eq!(p.next_after(1), Some(1));
+        assert_eq!(p.next_after(&[0]), Some(1));
         p.repeat = Repeat::One;
-        assert_eq!(p.next_after(1), None);
+        assert_eq!(p.next_after(&[0]), None);
         // Round and round a queue where nothing plays: stop after one lap.
         p.repeat = Repeat::All;
         p.current = Some(2);
-        assert_eq!(p.next_after(2), Some(0));
-        assert_eq!(p.next_after(3), None);
-        // Shuffle picks at random, so it's the count that ends it.
+        assert_eq!(p.next_after(&[1, 2]), Some(0));
+        assert_eq!(p.next_after(&[1, 2, 0]), None);
+        // Shuffle picks among what hasn't failed, and stops once nothing is left.
         p.shuffle = true;
-        assert!(p.next_after(1).is_some_and(|i| i != 2));
-        assert_eq!(p.next_after(3), None);
+        assert!(p.next_after(&[2]).is_some_and(|i| i != 2));
+        assert_eq!(p.next_after(&[1, 2, 0]), None);
         // One item on repeat, or none at all.
         let mut one = list(1);
         one.current = Some(0);
         one.repeat = Repeat::All;
-        assert_eq!(one.next_after(1), None);
-        assert_eq!(Playlist::default().next_after(1), None);
+        assert_eq!(one.next_after(&[0]), None);
+        assert_eq!(Playlist::default().next_after(&[0]), None);
+    }
+
+    #[test]
+    fn shuffle_gives_every_item_a_turn_after_failures() {
+        // Two have failed: shuffle mustn't go back to one of them while the third is untried.
+        let mut p = list(3);
+        p.repeat = Repeat::All;
+        p.shuffle = true;
+        p.current = Some(1);
+        for _ in 0..50 {
+            assert_eq!(p.next_after(&[0, 1]), Some(2));
+        }
+        // As with next_index, shuffle goes on under Repeat Off too.
+        p.repeat = Repeat::Off;
+        assert_eq!(p.next_after(&[0, 1]), Some(2));
     }
 
     #[test]

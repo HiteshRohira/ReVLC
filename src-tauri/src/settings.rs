@@ -166,7 +166,7 @@ impl Settings {
     /// at once, so the next launch doesn't turn it back on.
     pub fn load(data_dir: &Path) -> (Self, Option<crate::store::Damaged>) {
         let path = file(data_dir);
-        let damaged = match crate::store::read_json::<serde_json::Value>(&path) {
+        let mut damaged = match crate::store::read_json::<serde_json::Value>(&path) {
             Ok(None) => return (Self::default(), None),
             Ok(Some(json @ serde_json::Value::Object(_))) => return (Self::from_json(json), None),
             // JSON, but not a settings object.
@@ -176,6 +176,13 @@ impl Settings {
         let settings = Self { analytics: false, ..Self::default() };
         if let Err(e) = settings.save(data_dir) {
             eprintln!("revlc: {e}");
+            // With no file at all, the next launch would start as a fresh
+            // install, analytics on. The damaged one keeps it off.
+            if let Some(aside) = damaged.aside.take()
+                && std::fs::rename(&aside, &path).is_err()
+            {
+                damaged.aside = Some(aside);
+            }
         }
         (settings, Some(damaged))
     }

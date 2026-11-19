@@ -14,19 +14,31 @@ pub struct Damaged {
 }
 
 /// Moves an unreadable file out of the way, to `<name>-damaged-<unix seconds>.json`
-/// next to it.
+/// next to it (with a number after it if one from the same second is there).
 pub fn set_aside(path: &Path) -> Damaged {
     let stem = path.file_stem().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
     let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
-    let aside = path.with_file_name(format!("{stem}-damaged-{now}.json"));
+    let mut aside = path.with_file_name(format!("{stem}-damaged-{now}.json"));
+    let mut n = 1;
+    while aside.exists() {
+        n += 1;
+        aside = path.with_file_name(format!("{stem}-damaged-{now}-{n}.json"));
+    }
     Damaged { aside: std::fs::rename(path, &aside).is_ok().then_some(aside) }
 }
 
-/// Reads a JSON file. `Ok(None)` when there's no file (or it can't be
-/// opened). A file that is there but doesn't hold a `T` is moved aside
-/// rather than left to be overwritten, and reported as [`Damaged`].
+/// Reads a JSON file. `Ok(None)` when there's no file. A file that is
+/// there but can't be read, or doesn't hold a `T`, is moved aside rather
+/// than left to be overwritten, and reported as [`Damaged`].
 pub fn read_json<T: DeserializeOwned>(path: &Path) -> Result<Option<T>, Damaged> {
-    let Ok(bytes) = std::fs::read(path) else { return Ok(None) };
+    let bytes = match std::fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => {
+            eprintln!("revlc: {} can't be read: {e}", path.display());
+            return Err(set_aside(path));
+        }
+    };
     match serde_json::from_slice(&bytes) {
         Ok(value) => Ok(Some(value)),
         Err(e) => {
@@ -135,6 +147,34 @@ mod tests {
         assert_eq!(std::fs::read(&aside).unwrap(), b"[1, 2");
         assert!(!file.exists());
         assert!(aside.file_name().unwrap().to_string_lossy().starts_with("x-damaged-"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_file_that_cant_be_read_is_moved_aside() {
+        let dir = std::env::temp_dir().join(format!("revlc-store-unreadable-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        // A folder where the file should be: there, but it can't be read.
+        std::fs::create_dir_all(dir.join("x.json")).unwrap();
+        let Err(Damaged { aside: Some(aside) }) = read_json::<Vec<i32>>(&dir.join("x.json")) else { panic!("not reported as damaged and moved aside") };
+        assert!(aside.is_dir());
+        assert!(!dir.join("x.json").exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn damage_twice_in_a_second_keeps_both() {
+        let dir = std::env::temp_dir().join(format!("revlc-store-twice-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("x.json");
+        std::fs::write(&file, b"first").unwrap();
+        let Err(Damaged { aside: Some(first) }) = read_json::<Vec<i32>>(&file) else { panic!("first not moved aside") };
+        std::fs::write(&file, b"second").unwrap();
+        let Err(Damaged { aside: Some(second) }) = read_json::<Vec<i32>>(&file) else { panic!("second not moved aside") };
+        assert_ne!(first, second);
+        assert_eq!(std::fs::read(&first).unwrap(), b"first");
+        assert_eq!(std::fs::read(&second).unwrap(), b"second");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

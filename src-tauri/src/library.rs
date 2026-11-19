@@ -365,9 +365,9 @@ mod tests {
     #[test]
     fn failed_saves_change_nothing() {
         let dir = std::env::temp_dir().join(format!("revlc-library-save-{}", std::process::id()));
+        let mut library = Library::load(&dir);
         // A folder where library.json should go makes every save fail.
         std::fs::create_dir_all(dir.join("library.json").join("x")).unwrap();
-        let mut library = Library::load(&dir);
         assert!(library.add("/Movies").is_err());
         assert!(library.folders.is_empty());
         // Once saving works again, the same add saves.

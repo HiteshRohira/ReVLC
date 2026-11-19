@@ -992,17 +992,18 @@ impl Core {
     /// command line, like ":start-time=30").
     fn add_with_options(&self, uris: Vec<String>, play: bool, options: &[String]) -> Result<(), String> {
         let Opened { mut items, subtitles, folders, failed } = opened(uris);
+        // A folder joins the library even if nothing in it, or in the rest, can play.
+        for folder in folders {
+            if let Err(e) = self.library().add(&folder) {
+                self.notice("error", e);
+            }
+        }
         // Nothing at all could be opened: that's the caller's error to show.
         if items.is_empty() && subtitles.is_empty() && !failed.is_empty() {
             return Err(failed.join("; "));
         }
         for e in failed {
             self.notice("error", e);
-        }
-        for folder in folders {
-            if let Err(e) = self.library().add(&folder) {
-                self.notice("error", e);
-            }
         }
         for item in &mut items {
             item.options.extend(options.iter().cloned());
@@ -1216,8 +1217,11 @@ fn pump_events(core: Arc<Core>, rx: Receiver<vlc::Event>) {
     // The media whose end or error has been dealt with, so one that sends
     // both, in the same batch of events or apart, is dealt with once.
     let mut over = None;
-    // How many items in a row were over without playing anything.
-    let mut failed = 0usize;
+    // The queue items that were over in a row without playing anything.
+    let mut failed: Vec<usize> = Vec::new();
+    // The media the queue moved on to by itself. Failures only add up while
+    // it does: whatever the user starts next begins a fresh count.
+    let mut chained = None;
     while let Ok(first) = rx.recv() {
         // Let bursts of events (e.g. opening a file) arrive, then handle them together.
         thread::sleep(Duration::from_millis(20));
@@ -1235,7 +1239,8 @@ fn pump_events(core: Arc<Core>, rx: Receiver<vlc::Event>) {
 
         // Web pages and remote playlists end by expanding into what they hold:
         // one stream plays in place, several replace the entry in the queue.
-        let subitems = if current(event::END_REACHED) { core.vlc.subitems() } else { Vec::new() };
+        // Not once its error has been dealt with: what happens to it is decided once.
+        let subitems = if current(event::END_REACHED) && over != Some(generation) { core.vlc.subitems() } else { Vec::new() };
         // Before the queue moves on, so a finished item counts as finished.
         if subitems.is_empty() {
             core.quality().handle(&batch, &core.vlc);
@@ -1244,14 +1249,19 @@ fn pump_events(core: Arc<Core>, rx: Receiver<vlc::Event>) {
             core.quality().handle(&events, &core.vlc);
         }
         if subitems.len() == 1 && core.vlc.play_subitem() {
+            if chained == Some(generation) {
+                chained = Some(core.vlc.generation());
+            }
             core.quality().followed(core.vlc.generation());
             if let Some(uri) = core.current_uri() {
                 core.set_resume(&uri);
             }
         } else if subitems.len() > 1 {
             core.quality().forget();
-            if let Err(e) = core.expand_current(subitems) {
-                core.notice("error", e);
+            match core.expand_current(subitems) {
+                Ok(()) if chained == Some(generation) => chained = Some(core.vlc.generation()),
+                Ok(()) => {}
+                Err(e) => core.notice("error", e),
             }
         } else if (current(event::END_REACHED) || current(event::ERROR)) && over != Some(generation) {
             over = Some(generation);
@@ -1265,27 +1275,35 @@ fn pump_events(core: Arc<Core>, rx: Receiver<vlc::Event>) {
                 // An error part-way keeps its place in the history, to resume from.
                 core.notice("error", format!("Could not play {}", core.current_title()));
             }
-            failed = if did_play { 0 } else { failed + 1 };
+            if did_play || chained != Some(generation) {
+                failed.clear();
+            }
+            if !did_play && let Some(index) = core.playlist().current {
+                failed.push(index);
+            }
             let stop_after_each = core.settings().stop_after_each;
             let sleep_now = std::mem::take(&mut core.sleep().after_item);
             // Not what just failed again, and not round and round a queue where nothing plays.
-            let next = core.playlist().next_after(failed);
+            let next = core.playlist().next_after(&failed);
             // Like VLC's --play-and-exit: quit once there's nothing left to play.
             if core.play_and_exit && next.is_none() {
                 core.app.exit(0);
             }
             if sleep_now {
                 core.notice("info", "Sleep timer: stopped after this item");
-            } else if !stop_after_each
-                && let Some(index) = next
-                && let Err(e) = core.play_index_locked(index)
-            {
-                core.notice("error", e);
+            } else if !stop_after_each && let Some(index) = next {
+                match core.play_index_locked(index) {
+                    Ok(()) => chained = Some(core.vlc.generation()),
+                    Err(e) => core.notice("error", e),
+                }
             }
         }
+        // Something else was opened above: the rest of this batch belongs to
+        // what was open before, so it mustn't touch the new media's resume point.
+        let moved_on = core.vlc.generation() != generation;
         // The resume point belongs to what's open now: only its own start
         // may use it, and before anything else can be opened.
-        if current(event::PLAYING) {
+        if current(event::PLAYING) && !moved_on {
             match core.resume.lock().unwrap_or_else(|e| e.into_inner()).take() {
                 Some(PendingSeek::Seek { ms, announce }) => {
                     core.vlc.set_time(ms);
@@ -1326,7 +1344,7 @@ fn pump_events(core: Arc<Core>, rx: Receiver<vlc::Event>) {
                 }
             }
         }
-        if has(event::TIME_CHANGED) && last_progress.elapsed() >= PROGRESS_INTERVAL {
+        if has(event::TIME_CHANGED) && !moved_on && last_progress.elapsed() >= PROGRESS_INTERVAL {
             last_progress = Instant::now();
             if let Some(uri) = core.current_uri() {
                 core.history().update(&uri, core.vlc.time(), core.vlc.length());
