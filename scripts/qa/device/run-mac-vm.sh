@@ -69,7 +69,7 @@ vssh 'rm -rf ~/qa && mkdir -p ~/qa/scripts'
 vssh 'cat > ~/qa/ReVLC.dmg' < "$dmg"
 tar -C "$ROOT" -czf - scripts/qa | vssh 'tar -C ~/qa -xzf -'
 vssh 'set -e; m=$(mktemp -d); hdiutil attach -nobrowse -readonly -mountpoint "$m" ~/qa/ReVLC.dmg >/dev/null;
-      rm -rf /Applications/ReVLC.app; cp -R "$m/ReVLC.app" /Applications/; hdiutil detach "$m" -quiet;
+      rm -rf /Applications/ReVLC.app; cp -a "$m/ReVLC.app" /Applications/; hdiutil detach "$m" -quiet;
       defaults read /Applications/ReVLC.app/Contents/Info.plist CFBundleShortVersionString' | tee "$run/version.txt"
 
 # Cua's daemon, in the logged-in session, with the grants made by hand.

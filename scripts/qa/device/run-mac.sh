@@ -51,11 +51,11 @@ if [[ -n "$dmg" ]]; then
   mount="$(mktemp -d)"
   hdiutil attach -nobrowse -readonly -mountpoint "$mount" "$dmg" >/dev/null
   trap 'hdiutil detach "$mount" -quiet || true' EXIT
-  cp -R "$mount/ReVLC.app" "$run/ReVLC.app"
+  cp -a "$mount/ReVLC.app" "$run/ReVLC.app"
   hdiutil detach "$mount" -quiet
   trap - EXIT
 else
-  cp -R "$app" "$run/ReVLC.app"
+  cp -a "$app" "$run/ReVLC.app"
 fi
 # Launched directly by the suite, so Gatekeeper's first-launch check doesn't
 # apply; that one stays a manual release check.
