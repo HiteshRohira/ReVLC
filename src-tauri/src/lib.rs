@@ -1330,6 +1330,8 @@ fn pump_events(core: Arc<Session>, rx: Receiver<vlc::Event>) {
     // The media the queue moved on to by itself. Failures only add up while
     // it does: whatever the user starts next begins a fresh count.
     let mut chained = None;
+    // The media whose reported title has been looked at.
+    let mut titled = None;
     while let Ok(first) = rx.recv() {
         // Let bursts of events (e.g. opening a file) arrive, then handle them together.
         thread::sleep(Duration::from_millis(20));
@@ -1462,9 +1464,15 @@ fn pump_events(core: Arc<Session>, rx: Receiver<vlc::Event>) {
         if [event::PLAYING, event::LENGTH_CHANGED, event::MEDIA_CHANGED, event::TITLE_CHANGED].iter().any(|&e| has(e)) {
             core.emit_chapters();
         }
-        if has(event::PLAYING)
-            && let Some(title) = core.vlc.media_title()
-        {
+        // The title libVLC reports for what's open, once it has one. It can
+        // come after the start of playback, and when depends on timing, so
+        // it's looked for until found: otherwise two windows playing the same
+        // file could end up with different titles.
+        let wants_title = has(event::PLAYING)
+            || ([event::LENGTH_CHANGED, event::MEDIA_CHANGED, event::TITLE_CHANGED, event::TIME_CHANGED].iter().any(|&e| has(e))
+                && titled != Some(generation));
+        if wants_title && let Some(title) = core.vlc.media_title() {
+            titled = Some(generation);
             let mut playlist = core.playlist();
             let changed = match playlist.current.and_then(|i| playlist.items.get_mut(i)) {
                 Some(item) if item.title != title => {
