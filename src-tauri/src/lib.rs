@@ -1400,6 +1400,26 @@ fn set_menu_shortcuts(app: AppHandle, keys: HashMap<String, String>) -> Res {
     app.set_menu(menu).map(|_| ()).map_err(|e| e.to_string())
 }
 
+/// Starts a separate ReVLC process, so another video can play alongside
+/// this one (each process has its own libVLC player). From an installed
+/// bundle this is `open -n <ReVLC.app>`; a dev build has no bundle, so it
+/// re-runs the executable directly.
+#[cfg(target_os = "macos")]
+fn new_window() {
+    let Ok(exe) = std::env::current_exe() else {
+        eprintln!("revlc: could not locate the running executable");
+        return;
+    };
+    let bundle = exe.ancestors().find(|p| p.extension().is_some_and(|e| e == "app"));
+    let result = match bundle {
+        Some(app) => std::process::Command::new("open").arg("-n").arg(app).spawn(),
+        None => std::process::Command::new(&exe).spawn(),
+    };
+    if let Err(e) = result {
+        eprintln!("revlc: could not open a new window: {e}");
+    }
+}
+
 /// Runs a menu item that isn't a player action, for the macOS menu bar and
 /// the menus the UI draws on Windows. False if `id` isn't one of them.
 fn run_app_item(app: &AppHandle, id: &str) -> bool {
@@ -1412,6 +1432,8 @@ fn run_app_item(app: &AppHandle, id: &str) -> bool {
             let opener = if cfg!(windows) { "explorer" } else { "open" };
             let _ = std::process::Command::new(opener).arg("https://github.com/HiteshRohira/ReVLC").spawn();
         }
+        #[cfg(target_os = "macos")]
+        "newWindow" => new_window(),
         "quit" => app.exit(0),
         _ => return false,
     }
