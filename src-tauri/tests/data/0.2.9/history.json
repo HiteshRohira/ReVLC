@@ -1,0 +1,18 @@
+[
+  {
+    "uri": "file:///Users/someone/Movies/film.mkv",
+    "title": "Film",
+    "position": 1234000,
+    "length": 5400000,
+    "updated": 1790000000,
+    "finished": false
+  },
+  {
+    "uri": "https://example.com/live.m3u8?token=abc",
+    "title": "Stream",
+    "position": 0,
+    "length": 0,
+    "updated": 1790000100,
+    "finished": true
+  }
+]

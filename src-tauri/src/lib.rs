@@ -4,18 +4,31 @@ mod cli;
 mod disc;
 mod effects;
 mod history;
+mod keyframes;
 mod library;
 #[cfg_attr(not(any(target_os = "macos", windows)), allow(dead_code))]
 mod machine;
 mod menu;
 mod meta;
+mod network;
 mod playlist;
 mod playlist_file;
+mod playlists;
 mod quality;
 mod roster;
+mod radio;
+mod scrub;
 mod settings;
 mod store;
 mod telemetry;
+#[cfg(test)]
+mod data_compat_tests;
+#[cfg(test)]
+mod prop_tests;
+#[cfg(test)]
+mod test_media;
+#[cfg(target_os = "linux")]
+mod surface_linux;
 #[cfg(target_os = "macos")]
 mod surface_macos;
 #[cfg(windows)]
@@ -41,10 +54,13 @@ use capture::{Capture, Devices};
 use disc::{Disc, DiscKind};
 use effects::{Adjust, Effects, Equalizer, Filter, FilterSpec, Logo, Marquee, StereoMode, Transform};
 use history::{History, UiEntry};
-use library::{Library, LibraryItem};
+use library::{Library, LibraryItem, Song};
 use meta::MetaCache;
+use network::{Listing, Place, Server, Servers};
 use playlist::{Item, Playlist, Repeat, SortKey};
 use playlist_file::file_uri;
+use playlists::{Playlists, Saved};
+use radio::{Favorites, Station};
 use settings::{Resume, Settings};
 use roster::Roster;
 use vlc::{Chapter, Engine, MediaInfo, Navigate, State, Stats, Title, Track, Vlc, event};
@@ -65,6 +81,8 @@ struct Shared {
     thumbs: Thumbnails,
     /// Where cached thumbnails and artwork go.
     thumbs_dir: PathBuf,
+    /// Where seek bar preview frames go.
+    scrub_dir: PathBuf,
     meta: Mutex<MetaCache>,
     bookmarks: Mutex<Bookmarks>,
     /// The last library scan, reused for a little while.
@@ -77,6 +95,12 @@ struct Shared {
     settings_change: Mutex<()>,
     /// The player windows and their sessions.
     registry: Mutex<Registry>,
+    /// The playlists the user saved.
+    playlists: Mutex<Playlists>,
+    /// Saved network servers.
+    servers: Mutex<Servers>,
+    /// Favourite radio stations.
+    radio: Mutex<Favorites>,
 }
 
 /// The open player windows, and the session each one plays with.
@@ -102,6 +126,12 @@ struct Session {
     resume: Mutex<Option<PendingSeek>>,
     /// Distinguishes the user's snapshots from thumbnail captures.
     user_snapshot: AtomicBool,
+    /// Bumped whenever previews are asked for again, which ends the previous run.
+    scrub_run: AtomicU64,
+    /// The current run's preview frames still to make, which the pointer
+    /// reorders. Each run has its own queue, so a worker from an ended run
+    /// can never take (and make, from the wrong video) a later run's work.
+    scrub_jobs: Mutex<Arc<Mutex<VecDeque<ScrubJob>>>>,
     /// A–B loop points in ms.
     ab_loop: Mutex<(Option<i64>, Option<i64>)>,
     sleep: Mutex<SleepTimer>,
@@ -140,7 +170,7 @@ impl std::ops::Deref for Session {
 struct LibraryScan {
     folders: Vec<String>,
     at: Instant,
-    items: Vec<LibraryItem>,
+    found: library::Scan,
 }
 
 /// How long a library scan is reused. Refreshes come every couple of
@@ -244,7 +274,9 @@ impl ThumbJob {
 #[derive(Clone, Serialize)]
 struct LibraryList {
     folders: Vec<String>,
+    /// The videos.
     items: Vec<LibraryItem>,
+    music: Vec<Song>,
 }
 
 /// The app-wide state, in Tauri's managed state. libVLC may be missing, in
@@ -721,6 +753,7 @@ impl Session {
     }
 
     fn stop_locked(&self) {
+        self.scrub_cancel();
         self.save_progress(true);
         self.quality().close("stopped");
         self.vlc.stop();
@@ -737,30 +770,19 @@ impl Session {
     /// [`Session::add`], giving each new item the libVLC `options` (from the
     /// command line, like ":start-time=30").
     fn add_with_options(&self, uris: Vec<String>, play: bool, options: &[String]) -> Result<(), String> {
-        let mut items = Vec::new();
-        let mut subtitles = Vec::new();
-        for uri in uris.into_iter().map(playlist_file::native_path) {
-            let path = Path::new(&uri);
-            if uri.contains("://") {
-                items.push(Item::new(uri));
-            } else if path.is_dir() {
-                // A disc's folder plays as a disc, not as a folder of files.
-                match disc::kind_of(path) {
-                    Some(kind) => items.extend(disc::items(kind, &uri, true)?),
-                    None => {
-                        if let Err(e) = self.library().add(&uri) {
-                            self.notice("error", e);
-                        }
-                        items.extend(library::expand(vec![uri]).into_iter().map(Item::new));
-                    }
-                }
-            } else if playlist_file::is_playlist(path) {
-                items.extend(playlist_file::read(path)?);
-            } else if library::is_subtitle(path) {
-                subtitles.push(uri);
-            } else {
-                items.push(Item::new(uri));
+        let Opened { mut items, subtitles, folders, failed } = opened(uris);
+        // A folder joins the library even if nothing in it, or in the rest, can play.
+        for folder in folders {
+            if let Err(e) = self.library().add(&folder) {
+                self.notice("error", e);
             }
+        }
+        // Nothing at all could be opened: that's the caller's error to show.
+        if items.is_empty() && subtitles.is_empty() && !failed.is_empty() {
+            return Err(failed.join("; "));
+        }
+        for e in failed {
+            self.notice("error", e);
         }
         for item in &mut items {
             item.options.extend(options.iter().cloned());
@@ -868,6 +890,18 @@ impl Session {
 }
 
 impl Shared {
+    fn playlists(&self) -> MutexGuard<'_, Playlists> {
+        self.playlists.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    fn servers(&self) -> MutexGuard<'_, Servers> {
+        self.servers.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    fn radio(&self) -> MutexGuard<'_, Favorites> {
+        self.radio.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
     fn registry(&self) -> MutexGuard<'_, Registry> {
         self.registry.lock().unwrap_or_else(|e| e.into_inner())
     }
@@ -922,6 +956,9 @@ impl Shared {
         settings.save(&self.data_dir)?;
         let changed = self.apply_vlc_settings(&settings, Some(&previous));
         let sessions = self.sessions();
+        if previous.seekbar_preview && !settings.seekbar_preview {
+            sessions.iter().for_each(|s| s.scrub_cancel());
+        }
         for session in &sessions {
             session.apply_player_settings(&settings, &changed);
             if settings.audio_device != previous.audio_device {
@@ -971,14 +1008,14 @@ impl Shared {
     /// Lists the library. Reads folders and files, so call it off the main thread.
     fn library_list(&self) -> LibraryList {
         let folders = self.library().folders.clone();
-        let (mut items, scanned) = {
+        let (library::Scan { videos: mut items, mut music }, scanned) = {
             let mut cache = self.library_scan.lock().unwrap_or_else(|e| e.into_inner());
             match cache.as_ref().filter(|c| c.folders == folders && c.at.elapsed() < LIBRARY_SCAN_TTL) {
-                Some(c) => (c.items.clone(), false),
+                Some(c) => (c.found.clone(), false),
                 None => {
-                    let items = library::scan_folders(&folders);
-                    *cache = Some(LibraryScan { folders: folders.clone(), at: Instant::now(), items: items.clone() });
-                    (items, true)
+                    let found = library::scan_folders(&folders);
+                    *cache = Some(LibraryScan { folders: folders.clone(), at: Instant::now(), found: found.clone() });
+                    (found, true)
                 }
             }
         };
@@ -1008,14 +1045,60 @@ impl Shared {
             }
         }
         retry.extend(self.add_metadata(&mut items, &mut jobs));
+        retry.extend(self.add_music_metadata(&mut music, &mut jobs));
         // Changed files are worth another try even if they were tried this session.
         self.thumbs.tried.lock().unwrap_or_else(|e| e.into_inner()).retain(|key| !retry.contains(key));
         // Only when every folder is there: files on an unplugged drive keep their thumbnails.
         if scanned && folders.iter().all(|f| Path::new(f).is_dir()) {
-            self.prune_library_cache(&items, &jobs);
+            self.prune_library_cache(&items, &music, &jobs);
         }
         self.queue_thumbnails(jobs, true);
-        LibraryList { folders, items }
+        LibraryList { folders, items, music }
+    }
+
+    /// Fills in song titles, artists, albums and covers, queueing jobs for
+    /// whatever hasn't been read or cached yet. Returns the job keys of
+    /// files read before that have changed since.
+    fn add_music_metadata(&self, tracks: &mut [Song], jobs: &mut Vec<ThumbJob>) -> Vec<String> {
+        let mut changed = Vec::new();
+        let cache = self.meta.lock().unwrap_or_else(|e| e.into_inner());
+        let mut images = meta::Images::default();
+        for track in tracks {
+            let path = Path::new(&track.uri);
+            let (number, title) = meta::parse_track_name(&track.name);
+            let tags = match cache.get(&track.uri) {
+                Some(m) => m.clone(),
+                None => {
+                    let job = ThumbJob { uri: track.uri.clone(), out: PathBuf::new(), kind: JobKind::Meta };
+                    if cache.is_stale(&track.uri) {
+                        changed.push(job.key());
+                    }
+                    jobs.push(job);
+                    Default::default()
+                }
+            };
+            // libVLC reports the file name as the title when there's no tag.
+            let file = path.file_name().map(|f| f.to_string_lossy().into_owned()).unwrap_or_default();
+            track.name = tags.title.filter(|t| *t != file && *t != track.name).unwrap_or(title);
+            track.track = tags.track.or(number);
+            track.disc = tags.disc;
+            track.artist = tags.artist;
+            track.album = tags.album;
+            track.album_artist = tags.album_artist;
+            track.genre = tags.genre;
+            track.year = tags.date.as_deref().and_then(|d| d.get(..4)).and_then(|y| y.parse().ok());
+            track.duration = tags.duration;
+            // The cover inside the file, or a cover file next to the songs.
+            track.art = tags.artwork.map(PathBuf::from).or_else(|| images.album_cover(path)).and_then(|src| {
+                let out = meta::art_cache_path(&self.thumbs_dir, &src);
+                if out.exists() {
+                    return Some(out.to_string_lossy().into_owned());
+                }
+                jobs.push(ThumbJob { uri: src.to_string_lossy().into_owned(), out, kind: JobKind::Art(src) });
+                None
+            });
+        }
+        changed
     }
 
     fn library_thumb_path(&self, uri: &str) -> PathBuf {
@@ -1024,12 +1107,13 @@ impl Shared {
 
     /// Deletes cached thumbnails, artwork and metadata of files no longer
     /// in the library (or artwork that has since changed).
-    fn prune_library_cache(&self, items: &[LibraryItem], jobs: &[ThumbJob]) {
+    fn prune_library_cache(&self, items: &[LibraryItem], music: &[Song], jobs: &[ThumbJob]) {
         let mut keep: HashSet<PathBuf> = jobs.iter().map(|j| j.out.clone()).collect();
         for item in items {
             keep.insert(self.library_thumb_path(&item.uri));
             keep.extend([&item.art, &item.group_art].into_iter().flatten().map(PathBuf::from));
         }
+        keep.extend(music.iter().filter_map(|t| t.art.as_ref()).map(PathBuf::from));
         // Job keys of what's deleted, so it's made again if the file comes back.
         let mut forget: HashSet<String> = HashSet::new();
         if let Ok(entries) = std::fs::read_dir(&self.thumbs_dir) {
@@ -1041,7 +1125,7 @@ impl Shared {
                 }
             }
         }
-        let uris: HashSet<&str> = items.iter().map(|i| i.uri.as_str()).collect();
+        let uris: HashSet<&str> = items.iter().map(|i| i.uri.as_str()).chain(music.iter().map(|t| t.uri.as_str())).collect();
         let mut meta = self.meta.lock().unwrap_or_else(|e| e.into_inner());
         forget.extend(meta.retain(&uris).into_iter().map(|uri| format!("meta:{uri}")));
         meta.save();
@@ -1129,6 +1213,51 @@ impl Shared {
     }
 }
 
+/// What a list of paths and URLs holds.
+#[derive(Default)]
+struct Opened {
+    items: Vec<Item>,
+    subtitles: Vec<String>,
+    /// Plain folders, which also join the library.
+    folders: Vec<String>,
+    /// Why some of them couldn't be opened; the rest still are.
+    failed: Vec<String>,
+}
+
+/// Sorts paths and URLs into what to play: folders give their media,
+/// playlist files their entries, and a disc's folder plays as a disc.
+fn opened(uris: Vec<String>) -> Opened {
+    let mut found = Opened::default();
+    for uri in uris.into_iter().map(playlist_file::native_path) {
+        let path = Path::new(&uri);
+        if uri.contains("://") {
+            found.items.push(Item::new(uri));
+        } else if path.is_dir() {
+            // A disc's folder plays as a disc, not as a folder of files.
+            match disc::kind_of(path) {
+                Some(kind) => match disc::items(kind, &uri, true) {
+                    Ok(items) => found.items.extend(items),
+                    Err(e) => found.failed.push(e),
+                },
+                None => {
+                    found.items.extend(library::expand(vec![uri.clone()]).into_iter().map(Item::new));
+                    found.folders.push(uri);
+                }
+            }
+        } else if playlist_file::is_playlist(path) {
+            match playlist_file::read(path) {
+                Ok(items) => found.items.extend(items),
+                Err(e) => found.failed.push(e),
+            }
+        } else if library::is_subtitle(path) {
+            found.subtitles.push(uri);
+        } else {
+            found.items.push(Item::new(uri));
+        }
+    }
+    found
+}
+
 /// Generates library thumbnails one at a time. Video frames wait while
 /// video plays so decoding never competes with playback; metadata and
 /// artwork go ahead of them meanwhile.
@@ -1188,6 +1317,14 @@ fn pump_events(core: Arc<Session>, rx: Receiver<vlc::Event>) {
     // The last media that got past its start. Some broken files end
     // without an error, having played nothing.
     let mut played = None;
+    // The media whose end or error has been dealt with, so one that sends
+    // both, in the same batch of events or apart, is dealt with once.
+    let mut over = None;
+    // The queue items that were over in a row without playing anything.
+    let mut failed: Vec<usize> = Vec::new();
+    // The media the queue moved on to by itself. Failures only add up while
+    // it does: whatever the user starts next begins a fresh count.
+    let mut chained = None;
     while let Ok(first) = rx.recv() {
         // Let bursts of events (e.g. opening a file) arrive, then handle them together.
         thread::sleep(Duration::from_millis(20));
@@ -1205,7 +1342,8 @@ fn pump_events(core: Arc<Session>, rx: Receiver<vlc::Event>) {
 
         // Web pages and remote playlists end by expanding into what they hold:
         // one stream plays in place, several replace the entry in the queue.
-        let subitems = if current(event::END_REACHED) { core.vlc.subitems() } else { Vec::new() };
+        // Not once its error has been dealt with: what happens to it is decided once.
+        let subitems = if current(event::END_REACHED) && over != Some(generation) { core.vlc.subitems() } else { Vec::new() };
         // Before the queue moves on, so a finished item counts as finished.
         if subitems.is_empty() {
             core.quality().handle(&batch, &core.vlc);
@@ -1214,44 +1352,61 @@ fn pump_events(core: Arc<Session>, rx: Receiver<vlc::Event>) {
             core.quality().handle(&events, &core.vlc);
         }
         if subitems.len() == 1 && core.vlc.play_subitem() {
+            if chained == Some(generation) {
+                chained = Some(core.vlc.generation());
+            }
             core.quality().followed(core.vlc.generation());
             if let Some(uri) = core.current_uri() {
                 core.set_resume(&uri);
             }
         } else if subitems.len() > 1 {
             core.quality().forget();
-            if let Err(e) = core.expand_current(subitems) {
-                core.notice("error", e);
+            match core.expand_current(subitems) {
+                Ok(()) if chained == Some(generation) => chained = Some(core.vlc.generation()),
+                Ok(()) => {}
+                Err(e) => core.notice("error", e),
             }
-        } else if current(event::END_REACHED) {
-            if played == Some(generation) {
+        } else if (current(event::END_REACHED) || current(event::ERROR)) && over != Some(generation) {
+            over = Some(generation);
+            let did_play = played == Some(generation);
+            if did_play && !current(event::ERROR) {
                 if let Some(uri) = core.current_uri() {
                     core.history().finish(&uri);
                     core.save_history();
                 }
             } else {
+                // An error part-way keeps its place in the history, to resume from.
                 core.notice("error", format!("Could not play {}", core.current_title()));
+            }
+            if did_play || chained != Some(generation) {
+                failed.clear();
+            }
+            if !did_play && let Some(index) = core.playlist().current {
+                failed.push(index);
             }
             let stop_after_each = core.settings().stop_after_each;
             let sleep_now = std::mem::take(&mut core.sleep().after_item);
+            // Not what just failed again, and not round and round a queue where nothing plays.
+            let next = core.playlist().next_after(&failed);
             // Like VLC's --play-and-exit: quit once there's nothing left to play.
-            if core.play_and_exit && core.playlist().next_index(true).is_none() {
+            if core.play_and_exit && next.is_none() {
                 core.app.exit(0);
             }
             if sleep_now {
                 core.notice("info", "Sleep timer: stopped after this item");
-            } else if !stop_after_each
-                && let Err(e) = core.advance_locked(true)
-            {
-                core.notice("error", e);
+            } else if !stop_after_each && let Some(index) = next {
+                match core.play_index_locked(index) {
+                    Ok(()) => chained = Some(core.vlc.generation()),
+                    Err(e) => core.notice("error", e),
+                }
             }
         }
-        if current(event::ERROR) {
-            core.notice("error", format!("Could not play {}", core.current_title()));
-        }
+        // Something else was opened above: the rest of this batch belongs to
+        // what was open before, so it mustn't touch the new media's resume point.
+        let moved_on = core.vlc.generation() != generation;
         // The resume point belongs to what's open now: only its own start
         // may use it, and before anything else can be opened.
-        if current(event::PLAYING) {
+        if current(event::PLAYING) && !moved_on {
             match core.resume.lock().unwrap_or_else(|e| e.into_inner()).take() {
                 Some(PendingSeek::Seek { ms, announce }) => {
                     core.vlc.set_time(ms);
@@ -1292,7 +1447,7 @@ fn pump_events(core: Arc<Session>, rx: Receiver<vlc::Event>) {
                 }
             }
         }
-        if has(event::TIME_CHANGED) && last_progress.elapsed() >= PROGRESS_INTERVAL {
+        if has(event::TIME_CHANGED) && !moved_on && last_progress.elapsed() >= PROGRESS_INTERVAL {
             last_progress = Instant::now();
             if let Some(uri) = core.current_uri() {
                 core.history().update(&uri, core.vlc.time(), core.vlc.length());
@@ -1384,6 +1539,271 @@ async fn snapshot(player: Player) -> Result<Snapshot, String> {
         early: core.early().take().unwrap_or_default(),
     })
     .await
+}
+
+/// Seek bar preview frames of what's playing: one every `step` ms through
+/// the whole video, frame `k` being the file `{prefix}{k}.jpg`.
+#[derive(Clone, Serialize)]
+struct ScrubInfo {
+    /// Tells this run's events from an earlier one's.
+    run: u64,
+    prefix: String,
+    step: i64,
+    /// The frames that exist already.
+    ready: Vec<i64>,
+}
+
+/// The preview frames of one run: frame `k` of `count`, `step` ms apart, is
+/// the file `{prefix}{k}.jpg`.
+#[derive(Clone)]
+struct ScrubGrid {
+    run: u64,
+    uri: Arc<String>,
+    length: i64,
+    /// The selected video track, by position among the video tracks.
+    track: usize,
+    /// Whether libVLC may make frames: only when the file has one video
+    /// stream. Its thumbnail player decodes the file's default stream, which
+    /// needn't be the first or the selected one, and can't be told otherwise.
+    libvlc: bool,
+    step: i64,
+    count: i64,
+    prefix: Arc<String>,
+    /// The frames still to make with libVLC.
+    queue: Arc<Mutex<VecDeque<ScrubJob>>>,
+}
+
+impl ScrubGrid {
+    fn path(&self, k: i64) -> PathBuf {
+        PathBuf::from(format!("{}{k}.jpg", self.prefix))
+    }
+}
+
+/// What previews are made from: the current video's URI and length, the
+/// selected video track by position among its video streams (the way FFmpeg's
+/// `0:V:n` counts them; libVLC's track ids aren't stream numbers), how many
+/// video streams it has, and the file's size and modification time, which
+/// change when it's replaced by another file, maybe of the same length, so
+/// its old previews aren't reused.
+struct ScrubSource {
+    uri: String,
+    length: i64,
+    track: usize,
+    streams: usize,
+    signature: (u64, u128),
+}
+
+/// A frame to make: where it goes, how far in, and its number.
+struct ScrubJob {
+    out: PathBuf,
+    at: i64,
+    k: i64,
+    /// Exact whatever the plan: a redo of a frame that repeated its neighbour.
+    exact: bool,
+}
+
+impl Session {
+    /// What previews are made from, if they can be. See [`ScrubSource`].
+    fn scrub_source(&self) -> Option<ScrubSource> {
+        let uri = self.current_uri()?;
+        let length = self.vlc.length();
+        // Only real files can be read by the second player.
+        let ok = self.settings().seekbar_preview && !uri.contains("://") && length > 0 && self.vlc.has_video() && self.vlc.seekable();
+        if !ok {
+            return None;
+        }
+        let meta = std::fs::metadata(&uri).ok()?;
+        let modified = meta.modified().ok().and_then(|t| t.duration_since(UNIX_EPOCH).ok()).map_or(0, |d| d.as_nanos());
+        let current = self.vlc.video_track();
+        let tracks: Vec<i32> = self.vlc.video_tracks().iter().map(|t| t.id).filter(|&id| id >= 0).collect();
+        let track = tracks.iter().position(|&id| id == current).unwrap_or(0);
+        Some(ScrubSource { uri, length, track, streams: tracks.len(), signature: (meta.len(), modified) })
+    }
+
+    /// Ends the current preview run: its FFmpeg processes stop at their next
+    /// frame and its libVLC workers after the frame they're on. For turning
+    /// previews off, stopping, and another video or track.
+    fn scrub_cancel(&self) {
+        self.scrub_run.fetch_add(1, Ordering::SeqCst);
+        self.scrub_jobs.lock().unwrap_or_else(|e| e.into_inner()).lock().unwrap_or_else(|e| e.into_inner()).clear();
+    }
+
+    /// Starts making every preview frame of the current video that isn't
+    /// cached yet, telling the UI after each. With FFmpeg, one keyframe pass
+    /// covers most of them quickly and libVLC does the rest; without it,
+    /// libVLC does them all, coarse to fine. A new call ends the previous run.
+    fn scrub_prepare(self: &Arc<Self>) -> Option<ScrubInfo> {
+        self.scrub_cancel();
+        let run = self.scrub_run.load(Ordering::SeqCst);
+        let ScrubSource { uri, length, track, streams, signature } = self.scrub_source()?;
+        let step = scrub::step(length);
+        let count = (length - 1) / step + 1;
+        let prefix = scrub::prefix(&self.scrub_dir, &uri, length, signature, track, step);
+        let queue = Arc::default();
+        *self.scrub_jobs.lock().unwrap_or_else(|e| e.into_inner()) = Arc::clone(&queue);
+        let libvlc = streams <= 1;
+        let grid = ScrubGrid { run, uri: Arc::new(uri), length, track, libvlc, step, count, prefix: Arc::new(prefix.clone()), queue };
+        let ready: Vec<i64> = (0..count).filter(|&k| grid.path(k).exists()).collect();
+        let have: HashSet<i64> = ready.iter().copied().collect();
+        let _ = std::fs::create_dir_all(&self.scrub_dir);
+        if have.len() < count as usize {
+            match keyframes::ffmpeg() {
+                Some(ffmpeg) => {
+                    let core = self.clone();
+                    let _ = thread::Builder::new().name("scrub-pass".into()).spawn(move || core.scrub_pass(grid, &ffmpeg, have));
+                }
+                None if libvlc => self.scrub_fill(grid, &have),
+                // libVLC may make frames of another stream than the selected
+                // one: none at all beats frames of the wrong stream.
+                None => return None,
+            }
+        }
+        Some(ScrubInfo { run, prefix, step, ready })
+    }
+
+    /// Tells the UI preview frame `k` is made; false if the run has ended.
+    fn scrub_made(&self, grid: &ScrubGrid, k: i64) -> bool {
+        if self.scrub_run.load(Ordering::SeqCst) != grid.run {
+            return false;
+        }
+        self.emit("player://scrub", serde_json::json!({ "run": grid.run, "k": k }));
+        true
+    }
+
+    /// Fills the grid from FFmpeg's keyframes, each in the slot nearest its
+    /// time, in parallel stretches of the video: on a GPU, four (more didn't
+    /// help on VA-API); on the CPU, half the cores, at two threads each. Slots
+    /// no keyframe landed in are left to libVLC.
+    fn scrub_pass(self: Arc<Self>, grid: ScrubGrid, ffmpeg: &Path, have: HashSet<i64>) {
+        let accel = keyframes::accel(ffmpeg, &grid.uri, grid.track, scrub::WIDTH);
+        let parts = if accel.gpu() { 4 } else { thread::available_parallelism().map_or(2, |n| n.get() / 2).max(1) as i64 };
+        let span = grid.length / parts + 1;
+        let made = Arc::new(Mutex::new(have));
+        let passes: Vec<_> = (0..parts)
+            .map(|part| {
+                let (core, grid, made, accel, ffmpeg) = (self.clone(), grid.clone(), made.clone(), accel.clone(), ffmpeg.to_path_buf());
+                thread::spawn(move || {
+                    keyframes::pass(&ffmpeg, &grid.uri, grid.track, &accel, part * span, span, scrub::WIDTH, |at, jpeg| {
+                        let k = ((at + grid.step / 2) / grid.step).clamp(0, grid.count - 1);
+                        if !made.lock().unwrap_or_else(|e| e.into_inner()).insert(k) {
+                            return core.scrub_run.load(Ordering::SeqCst) == grid.run;
+                        }
+                        let out = grid.path(k);
+                        let tmp = out.with_extension(format!("part{k}"));
+                        if std::fs::write(&tmp, &jpeg).and_then(|_| std::fs::rename(&tmp, &out)).is_err() {
+                            let _ = std::fs::remove_file(&tmp);
+                            made.lock().unwrap_or_else(|e| e.into_inner()).remove(&k);
+                            return true;
+                        }
+                        core.scrub_made(&grid, k)
+                    })
+                })
+            })
+            .collect();
+        for pass in passes {
+            if let Ok(Err(e)) = pass.join() {
+                eprintln!("revlc: keyframe pass failed: {e}");
+            }
+        }
+        // libVLC fills the slots no keyframe landed in, for a file with one
+        // video stream; with more, those slots stay empty.
+        if self.scrub_run.load(Ordering::SeqCst) == grid.run && grid.libvlc {
+            let made = made.lock().unwrap_or_else(|e| e.into_inner()).clone();
+            self.scrub_fill(grid, &made);
+        }
+    }
+
+    /// Makes the frames not in `have` with libVLC, coarse to fine, on a few
+    /// low-priority threads.
+    fn scrub_fill(self: &Arc<Self>, grid: ScrubGrid, have: &HashSet<i64>) {
+        const WORKERS: usize = 6;
+        *grid.queue.lock().unwrap_or_else(|e| e.into_inner()) = scrub::order(grid.count as usize)
+            .into_iter()
+            .map(|k| k as i64)
+            .filter(|k| !have.contains(k))
+            .map(|k| ScrubJob { out: grid.path(k), at: scrub::time_at(grid.length, grid.step, k), k, exact: false })
+            .collect();
+        let plan = Arc::new(scrub::Plan::new());
+        for _ in 0..WORKERS {
+            let (core, grid, plan) = (self.clone(), grid.clone(), plan.clone());
+            let _ = thread::Builder::new().name("scrub".into()).spawn(move || {
+                background_priority();
+                loop {
+                    if core.scrub_run.load(Ordering::SeqCst) != grid.run {
+                        return;
+                    }
+                    let Some(job) = grid.queue.lock().unwrap_or_else(|e| e.into_inner()).pop_front() else { return };
+                    // Decode into a temporary file, so a half-written frame is never shown.
+                    let tmp = job.out.with_extension(format!("part{}", job.k));
+                    let exact = job.exact || !plan.keyframes();
+                    let began = Instant::now();
+                    match core.vlc.thumbnail_at(&grid.uri, &tmp, job.at, scrub::WIDTH, exact) {
+                        Ok(()) if std::fs::rename(&tmp, &job.out).is_ok() => {
+                            if exact && !job.exact {
+                                plan.exact_took(began.elapsed());
+                            }
+                            // A keyframe frame the same as a neighbour's landed on the
+                            // same keyframe: the later of the two is made again, exactly.
+                            if !exact {
+                                let redo = [(job.k - 1, job.k), (job.k + 1, job.k + 1)]
+                                    .into_iter()
+                                    .find(|&(other, _)| other >= 0 && scrub::same_picture(&job.out, &grid.path(other)))
+                                    .map(|(_, later)| later);
+                                if let Some(k) = redo {
+                                    let job = ScrubJob { out: grid.path(k), at: scrub::time_at(grid.length, grid.step, k), k, exact: true };
+                                    grid.queue.lock().unwrap_or_else(|e| e.into_inner()).push_back(job);
+                                }
+                            }
+                            if !core.scrub_made(&grid, job.k) {
+                                return;
+                            }
+                        }
+                        _ => {
+                            let _ = std::fs::remove_file(&tmp);
+                        }
+                    }
+                }
+            });
+        }
+    }
+
+    /// Moves the frames `from..=to` still to make to the front of the queue,
+    /// the middle first: they're what the user is looking at.
+    fn scrub_focus(&self, from: i64, to: i64) {
+        let mid = (from + to) / 2;
+        let queue = Arc::clone(&self.scrub_jobs.lock().unwrap_or_else(|e| e.into_inner()));
+        let mut queue = queue.lock().unwrap_or_else(|e| e.into_inner());
+        let (mut wanted, rest): (Vec<ScrubJob>, Vec<ScrubJob>) = queue.drain(..).partition(|j| (from..=to).contains(&j.k));
+        wanted.sort_by_key(|j| (j.k - mid).abs());
+        queue.extend(wanted);
+        queue.extend(rest);
+    }
+}
+
+#[tauri::command]
+async fn scrub_prepare(player: Player) -> Result<Option<ScrubInfo>, String> {
+    let core = player.core()?.clone();
+    tauri::async_runtime::spawn_blocking(move || core.scrub_prepare()).await.map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn scrub_cancel(player: Player) -> Res {
+    player.core()?.scrub_cancel();
+    Ok(())
+}
+
+#[tauri::command]
+fn scrub_focus(player: Player, from: i64, to: i64) -> Res {
+    player.core()?.scrub_focus(from, to);
+    Ok(())
+}
+
+/// Lowers the calling thread's priority, so preview frames give way to
+/// playback. libVLC's threads for the frame's player inherit it.
+fn background_priority() {
+    #[cfg(target_os = "linux")]
+    // SAFETY: gettid has no preconditions.
+    keyframes::lower_priority(unsafe { libc::syscall(libc::SYS_gettid) } as u32);
 }
 
 // Commands that change what plays run off the main thread: they wait for
@@ -1517,7 +1937,7 @@ fn run_app_item(app: &AppHandle, id: &str) -> bool {
             tauri::async_runtime::spawn(async move { updater::check(&app, true).await });
         }
         "github" => {
-            let opener = if cfg!(windows) { "explorer" } else { "open" };
+            let opener = if cfg!(windows) { "explorer" } else if cfg!(target_os = "macos") { "open" } else { "xdg-open" };
             let _ = std::process::Command::new(opener).arg("https://github.com/HiteshRohira/ReVLC").spawn();
         }
         // Only macOS has more than one player window.
@@ -1610,7 +2030,15 @@ fn font_families() -> Vec<String> {
     {
         system_windows::font_families()
     }
-    #[cfg(not(any(target_os = "macos", windows)))]
+    #[cfg(target_os = "linux")]
+    {
+        use gtk::prelude::*;
+        let context = gtk::Label::new(None).pango_context();
+        let mut fonts: Vec<String> = context.list_families().iter().map(|f| f.name().to_string()).collect();
+        fonts.sort_by_key(|f| f.to_lowercase());
+        fonts
+    }
+    #[cfg(not(any(target_os = "macos", windows, target_os = "linux")))]
     Vec::new()
 }
 
@@ -2163,6 +2591,207 @@ async fn open_capture(player: Player, capture: Capture) -> Res {
     off_main(player, move |core| core.add_items(vec![capture::item(&capture)], true)).await?
 }
 
+/// Paths and URLs as queue items: folders give their media, playlist files
+/// their entries. Subtitle files are left out.
+fn media_items(uris: Vec<String>) -> Result<Vec<Item>, String> {
+    let mut items = Vec::new();
+    for uri in uris.into_iter().map(playlist_file::native_path) {
+        let path = Path::new(&uri);
+        if uri.contains("://") {
+            items.push(Item::new(uri));
+        } else if path.is_dir() {
+            items.extend(library::expand(vec![uri]).into_iter().map(Item::new));
+        } else if playlist_file::is_playlist(path) {
+            items.extend(playlist_file::read(path)?);
+        } else if !library::is_subtitle(path) {
+            items.push(Item::new(uri));
+        }
+    }
+    Ok(items)
+}
+
+#[tauri::command]
+async fn playlists_list(player: Player) -> Result<Vec<Saved>, String> {
+    off_main(player, |core| core.playlists().lists.clone()).await
+}
+
+/// Makes a playlist, empty or holding what's in the queue.
+#[tauri::command]
+async fn playlists_create(player: Player, name: String, from_queue: bool) -> Result<Vec<Saved>, String> {
+    off_main(player, move |core| {
+        // Cameras and screens aren't something to come back to.
+        let items = if from_queue { core.playlist().items.iter().filter(|i| !is_capture(&i.uri)).cloned().collect() } else { Vec::new() };
+        let mut lists = core.playlists();
+        lists.create(&name, items)?;
+        Ok(lists.lists.clone())
+    })
+    .await?
+}
+
+/// Makes a playlist from an M3U, PLS or XSPF file, named after the file.
+#[tauri::command]
+async fn playlists_import(player: Player, path: String) -> Result<Vec<Saved>, String> {
+    off_main(player, move |core| {
+        let path = Path::new(&path);
+        let items = playlist_file::read(path)?;
+        let name = path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+        let mut lists = core.playlists();
+        lists.create_numbered(&name, items)?;
+        Ok(lists.lists.clone())
+    })
+    .await?
+}
+
+#[tauri::command]
+async fn playlists_rename(player: Player, id: String, name: String) -> Result<Vec<Saved>, String> {
+    off_main(player, move |core| {
+        let mut lists = core.playlists();
+        lists.rename(&id, &name)?;
+        Ok(lists.lists.clone())
+    })
+    .await?
+}
+
+#[tauri::command]
+async fn playlists_delete(player: Player, id: String) -> Result<Vec<Saved>, String> {
+    off_main(player, move |core| {
+        let mut lists = core.playlists();
+        lists.delete(&id)?;
+        Ok(lists.lists.clone())
+    })
+    .await?
+}
+
+/// Adds files, folders or URLs to a saved playlist.
+#[tauri::command]
+async fn playlists_add(player: Player, id: String, uris: Vec<String>) -> Result<Vec<Saved>, String> {
+    off_main(player, move |core| {
+        let items = media_items(uris)?;
+        let mut lists = core.playlists();
+        lists.add(&id, items)?;
+        Ok(lists.lists.clone())
+    })
+    .await?
+}
+
+#[tauri::command]
+async fn playlists_remove_item(player: Player, id: String, index: usize, uri: String) -> Result<Vec<Saved>, String> {
+    off_main(player, move |core| {
+        let mut lists = core.playlists();
+        lists.remove_item(&id, index, &uri)?;
+        Ok(lists.lists.clone())
+    })
+    .await?
+}
+
+/// Plays a saved playlist from its item `index`. It takes the queue's place.
+#[tauri::command]
+async fn playlists_play(player: Player, id: String, index: usize) -> Res {
+    off_main(player, move |core| {
+        let items = core.playlists().items(&id)?;
+        if items.is_empty() {
+            return Err("That playlist is empty".to_string());
+        }
+        let index = index.min(items.len() - 1);
+        let _transition = core.transition();
+        core.stop_locked();
+        let first = {
+            let mut queue = core.playlist();
+            queue.clear();
+            queue.add(items)
+        };
+        core.emit_playlist();
+        core.play_index_locked(first + index)
+    })
+    .await?
+}
+
+/// Where to find media on the network.
+#[derive(Clone, Serialize)]
+struct Places {
+    /// Network volumes the system has mounted.
+    mounted: Vec<Place>,
+    /// Servers the user saved.
+    servers: Vec<Server>,
+    /// Servers found on the local network so far.
+    found: Vec<vlc::Found>,
+}
+
+/// Lists network places, and starts looking for servers on the local
+/// network if that isn't running. The UI asks again every few seconds
+/// while it shows them.
+#[tauri::command]
+async fn network_places(player: Player) -> Result<Places, String> {
+    off_main(player, |core| {
+        core.vlc.discovery_start();
+        Places { mounted: network::mounted(), servers: core.servers().list.clone(), found: core.vlc.discovered() }
+    })
+    .await
+}
+
+/// Stops looking for servers: the UI has left the network view.
+#[tauri::command]
+async fn network_leave(player: Player) -> Res {
+    off_main(player, |core| core.vlc.discovery_stop()).await
+}
+
+/// Lists a folder on a mounted volume or a server.
+#[tauri::command]
+async fn network_browse(player: Player, location: String, user: Option<String>, password: Option<String>) -> Result<Listing, String> {
+    off_main(player, move |core| network::browse(&core.vlc, &location, user.as_deref().unwrap_or_default(), password.as_deref().unwrap_or_default())).await?
+}
+
+#[tauri::command]
+async fn network_save(player: Player, url: String, name: String, user: Option<String>) -> Result<Vec<Server>, String> {
+    off_main(player, move |core| {
+        let mut servers = core.servers();
+        servers.save(&url, &name, user)?;
+        Ok(servers.list.clone())
+    })
+    .await?
+}
+
+#[tauri::command]
+async fn network_forget(player: Player, url: String) -> Result<Vec<Server>, String> {
+    off_main(player, move |core| {
+        let mut servers = core.servers();
+        servers.remove(&url)?;
+        Ok(servers.list.clone())
+    })
+    .await?
+}
+
+/// Stations from the radio directory: by name, by genre, or the most played.
+#[tauri::command]
+async fn radio_stations(query: String, tag: String) -> Result<Vec<Station>, String> {
+    radio::stations(&query, &tag).await
+}
+
+#[tauri::command]
+async fn radio_favorites(player: Player) -> Result<Vec<Station>, String> {
+    off_main(player, |core| core.radio().list.clone()).await
+}
+
+#[tauri::command]
+async fn radio_favorite(player: Player, station: Station, on: bool) -> Result<Vec<Station>, String> {
+    off_main(player, move |core| {
+        let mut favorites = core.radio();
+        favorites.set(station, on)?;
+        Ok(favorites.list.clone())
+    })
+    .await?
+}
+
+/// Plays a station, under its name rather than its address.
+#[tauri::command]
+async fn radio_play(player: Player, station: Station) -> Res {
+    if !radio::playable(&station.url) {
+        return Err("That station has no address to play".into());
+    }
+    let item = Item { uri: station.url, title: station.name, options: Vec::new(), trusted: false };
+    off_main(player, move |core| core.add_items(vec![item], true)).await?
+}
+
 /// The user's preferred languages as two-letter codes, most preferred first.
 fn preferred_languages() -> Vec<String> {
     #[cfg(target_os = "macos")]
@@ -2180,7 +2809,18 @@ fn preferred_languages() -> Vec<String> {
     {
         system_windows::preferred_languages()
     }
-    #[cfg(not(any(target_os = "macos", windows)))]
+    #[cfg(target_os = "linux")]
+    {
+        let mut langs = Vec::new();
+        for lang in gtk::glib::language_names() {
+            let code = lang.split(['-', '_', '.', '@']).next().unwrap_or_default().to_lowercase();
+            if !code.is_empty() && code != "c" && !langs.contains(&code) {
+                langs.push(code);
+            }
+        }
+        langs
+    }
+    #[cfg(not(any(target_os = "macos", windows, target_os = "linux")))]
     Vec::new()
 }
 
@@ -2240,6 +2880,8 @@ fn open_player_as(shared: &Arc<Shared>, label: &str, launch: Launch) -> Result<A
         pending: Mutex::default(),
         resume: Mutex::default(),
         user_snapshot: AtomicBool::new(false),
+        scrub_run: AtomicU64::new(0),
+        scrub_jobs: Mutex::default(),
         ab_loop: Mutex::default(),
         sleep: Mutex::default(),
         transition: Mutex::default(),
@@ -2263,7 +2905,7 @@ fn open_player_as(shared: &Arc<Shared>, label: &str, launch: Launch) -> Result<A
     let window = match app.get_webview_window(label) {
         Some(window) => window,
         None => {
-            let mut config = app.config().app.windows.first().cloned().ok_or("no window configuration")?;
+            let mut config = app.config().app.windows.iter().find(|w| w.label == "main").cloned().ok_or("main window missing from tauri.conf")?;
             config.label = label.to_string();
             WebviewWindowBuilder::from_config(app, &config).and_then(|b| b.build()).map_err(|e| e.to_string())?
         }
@@ -2310,7 +2952,18 @@ fn attach_surface(session: &Arc<Session>, window: &tauri::WebviewWindow) -> taur
                 Err(e) => eprintln!("revlc: could not create the video window: {e}"),
             }
         }
-        #[cfg(not(any(target_os = "macos", windows)))]
+        #[cfg(target_os = "linux")]
+        {
+            let frames = Arc::new(Mutex::new(None));
+            match surface_linux::attach(&webview.inner(), frames.clone()) {
+                Ok(()) => attach.vlc.set_gtk_surface(frames),
+                Err(e) => {
+                    eprintln!("revlc: could not create the video surface: {e}");
+                    return;
+                }
+            }
+        }
+        #[cfg(not(any(target_os = "macos", windows, target_os = "linux")))]
         let _ = webview;
         // Off the main thread, like the commands that open media.
         thread::spawn(move || attach.mark_ready());
@@ -2348,16 +3001,27 @@ fn close_window_gracefully(window: tauri::Window) {
 }
 
 fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
+    main_window(app)?;
     updater::start(app.handle());
     let resource_dir = app.path().resource_dir().ok();
     let data_dir = app.path().app_data_dir()?;
     let languages = preferred_languages();
-    let settings = Settings::load(&data_dir);
+    let (settings, settings_damaged) = Settings::load(&data_dir);
     // Extra libVLC options for debugging, e.g. REVLC_VLC_ARGS="--verbose=2".
     let args: Vec<String> = std::env::var("REVLC_VLC_ARGS").unwrap_or_default().split_whitespace().map(String::from).collect();
     let mut cli = cli::parse(std::env::args().skip(1));
     if let Ok(cwd) = std::env::current_dir() {
         cli.resolve_paths(&cwd);
+    }
+    // Before the engine: the menu bar (and its Settings…) is there even if
+    // the engine can't start. The UI sends the real bindings once it loads;
+    // start with the defaults.
+    let keys: HashMap<String, String> = [("open", "Cmd+O"), ("openFolder", "Shift+Cmd+O"), ("openUrl", "Cmd+N"), ("queue", "Cmd+L")]
+        .into_iter()
+        .map(|(a, k)| (a.to_string(), k.to_string()))
+        .collect();
+    if cfg!(target_os = "macos") {
+        app.set_menu(menu::build(app.handle(), &keys)?)?;
     }
     let engine = Engine::load(resource_dir.as_deref(), &args, &cli.vlc_args, &settings.vlc_config(&languages));
     telemetry::start(&data_dir, settings.analytics, engine.as_ref().map_or("unavailable", |v| v.version.as_str()));
@@ -2383,8 +3047,12 @@ fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
         library: Mutex::new(Library::load(&data_dir)),
         thumbs: Thumbnails::default(),
         thumbs_dir: cache_dir.join("thumbs"),
+        scrub_dir: cache_dir.join("scrub"),
         meta: Mutex::new(MetaCache::load(&cache_dir)),
         bookmarks: Mutex::new(Bookmarks::load(&data_dir)),
+        playlists: Mutex::new(Playlists::load(&data_dir)),
+        servers: Mutex::new(Servers::load(&data_dir)),
+        radio: Mutex::new(Favorites::load(&data_dir)),
         library_scan: Mutex::default(),
         history_saves,
         history_write: Mutex::default(),
@@ -2393,14 +3061,8 @@ fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
         data_dir,
     });
 
-    // The UI sends the real bindings once it loads; start with the defaults.
-    let keys: HashMap<String, String> = [("open", "Cmd+O"), ("openFolder", "Shift+Cmd+O"), ("openUrl", "Cmd+N"), ("queue", "Cmd+L")]
-        .into_iter()
-        .map(|(a, k)| (a.to_string(), k.to_string()))
-        .collect();
-    if cfg!(target_os = "macos") {
-        app.set_menu(menu::build(app.handle(), &keys)?)?;
-    }
+    let scrub_dir = shared.scrub_dir.clone();
+    thread::spawn(move || scrub::prune(&scrub_dir));
     let thumbs = shared.clone();
     thread::Builder::new().name("thumbnails".into()).spawn(move || make_thumbnails(thumbs))?;
     let saver = shared.clone();
@@ -2428,18 +3090,86 @@ fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     if !shared.engine.rejected_args.is_empty() {
         session.notice("error", format!("libVLC didn't accept {}, so ReVLC started without them", shared.engine.rejected_args.join(" ")));
     }
+    // Files that couldn't be read were moved aside; say so, like the history's.
+    let kept = |d: &store::Damaged| d.aside.as_ref().map(|p| format!(" The old file is kept at {}", p.display())).unwrap_or_default();
+    if let Some(d) = &settings_damaged {
+        session.notice("error", format!("Your settings couldn't be read, so they're back to the defaults, with usage statistics off.{}", kept(d)));
+    }
+    if let Some(d) = shared.bookmarks().damaged.take() {
+        session.notice("error", format!("Your bookmarks couldn't be read, so they start empty.{}", kept(&d)));
+    }
+    if let Some(d) = shared.library().damaged.take() {
+        session.notice("error", format!("Your library folders couldn't be read, so the library starts empty.{}", kept(&d)));
+    }
     let early = std::mem::take(&mut *EARLY_OPENS.lock().unwrap_or_else(|e| e.into_inner()));
-    let _ = session.add(early, true);
+    if let Err(e) = session.add(early, true) {
+        session.notice("error", e);
+    }
     Ok(())
+}
+
+/// Builds the player window from its tauri.conf entry (marked not to be made
+/// there, in each platform's file too: those replace the list). Started again right after a copy was closed or killed, Windows can
+/// still have that copy's WebView2 helpers holding the profile folder for a
+/// few seconds, and making the web view fails with "the requested resource is
+/// in use"; that failure is waited out.
+fn main_window(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
+    let config = app.config().app.windows.iter().find(|w| w.label == "main").ok_or("main window missing from tauri.conf")?.clone();
+    retry_while_busy(Duration::from_secs(10), Duration::from_millis(250), || WebviewWindowBuilder::from_config(app.handle(), &config)?.build())?;
+    Ok(())
+}
+
+/// Runs `attempt` until it succeeds, fails some other way, or `limit` passes
+/// with it still failing because the web view's profile is busy.
+fn retry_while_busy<T, E: std::fmt::Display>(limit: Duration, pause: Duration, mut attempt: impl FnMut() -> Result<T, E>) -> Result<T, E> {
+    let start = Instant::now();
+    loop {
+        match attempt() {
+            Err(e) if webview_busy(&e.to_string()) && start.elapsed() < limit => {
+                eprintln!("revlc: web view busy, trying again: {e}");
+                thread::sleep(pause);
+            }
+            done => return done,
+        }
+    }
+}
+
+/// Whether a web view error is WebView2's ERROR_BUSY (0x800700AA): another
+/// process is still using the profile folder.
+fn webview_busy(error: &str) -> bool {
+    let error = error.to_ascii_lowercase();
+    error.contains("0x800700aa") || error.contains("resource is in use")
+}
+
+/// Tells the user ReVLC can't start, in a dialog on Windows (where there's no
+/// terminal to read), and exits.
+fn fail_to_start(error: &dyn std::fmt::Display) -> ! {
+    let error = error.to_string();
+    let mut message = format!("ReVLC couldn't start.\n\n{error}");
+    if webview_busy(&error) {
+        message.push_str("\n\nA copy of ReVLC that was just closed may still be shutting down. Wait a moment, then open ReVLC again.");
+    }
+    eprintln!("revlc: {message}");
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::UI::WindowsAndMessaging::{MB_ICONERROR, MB_OK, MessageBoxW};
+        let wide = |s: &str| s.encode_utf16().chain(Some(0)).collect::<Vec<u16>>();
+        let (text, caption) = (wide(&message), wide("ReVLC"));
+        // SAFETY: both strings are NUL-terminated and outlive the call.
+        unsafe { MessageBoxW(std::ptr::null_mut(), text.as_ptr(), caption.as_ptr(), MB_OK | MB_ICONERROR) };
+    }
+    std::process::exit(1)
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    #[cfg(target_os = "linux")]
+    surface_linux::init();
     let builder = tauri::Builder::default();
     // Windows starts a new process for each file opened from Explorer; it
-    // hands its files to the running copy and exits. Windows has a single
-    // player window; more than one is macOS-only for now.
-    #[cfg(windows)]
+    // hands its files to the running copy and exits. Only macOS has more than
+    // one player window; elsewhere the files join the one there is.
+    #[cfg(any(windows, target_os = "linux"))]
     let builder = builder.plugin(tauri_plugin_single_instance::init(|app, args, cwd| {
         // libVLC has started, so only the files and their start times count.
         let mut cli = cli::parse(args.into_iter().skip(1));
@@ -2453,10 +3183,17 @@ pub fn run() {
             session.add_from_main(cli.files, cli.media_options);
         }
     }));
-    let app = builder
+    let app = match builder
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
-        .setup(setup)
+        // Tauri panics on a setup error, which with panic = "abort" closes
+        // the app without a word.
+        .setup(|app| {
+            if let Err(e) = setup(app) {
+                fail_to_start(&e);
+            }
+            Ok(())
+        })
         .on_window_event(|window, event| {
             let Some(shared) = shared_of(window.app_handle()) else { return };
             // Settings isn't a player window.
@@ -2499,6 +3236,9 @@ pub fn run() {
             updater::update_install,
             updater::update_restart,
             snapshot,
+            scrub_prepare,
+            scrub_focus,
+            scrub_cancel,
             open,
             play_index,
             toggle_pause,
@@ -2568,9 +3308,29 @@ pub fn run() {
             open_disc,
             capture_devices,
             open_capture,
+            playlists_list,
+            playlists_create,
+            playlists_import,
+            playlists_rename,
+            playlists_delete,
+            playlists_add,
+            playlists_remove_item,
+            playlists_play,
+            network_places,
+            network_leave,
+            network_browse,
+            network_save,
+            network_forget,
+            radio_stations,
+            radio_favorites,
+            radio_favorite,
+            radio_play,
         ])
         .build(tauri::generate_context!())
-        .expect("error while building revlc");
+    {
+        Ok(app) => app,
+        Err(e) => fail_to_start(&e),
+    };
 
     app.run(|handle, event| {
         // The Quit menu item ends the app without asking: only Exit comes.
@@ -2615,5 +3375,73 @@ mod tests {
         assert!(!in_history("rtsp://user:secret@cam.local/stream"));
         assert!(!in_history("dshow://"));
         assert!(!in_history("avcapture://"));
+    }
+
+    // As WebView2 reports a profile folder another process still holds.
+    const BUSY: &str = "failed to create webview: WebView2 error: WindowsError(Error { code: HRESULT(0x800700AA), message: \"The requested resource is in use.\" })";
+
+    #[test]
+    fn busy_web_view_is_waited_out() {
+        let mut tries = 0;
+        let got = retry_while_busy(Duration::from_secs(5), Duration::ZERO, || {
+            tries += 1;
+            if tries < 3 { Err(BUSY) } else { Ok("window") }
+        });
+        assert_eq!((got, tries), (Ok("window"), 3));
+    }
+
+    #[test]
+    fn other_failures_and_lasting_busy_give_up() {
+        let mut tries = 0;
+        let got: Result<(), _> = retry_while_busy(Duration::from_secs(5), Duration::ZERO, || {
+            tries += 1;
+            Err("failed to create webview: WebView2 runtime not found")
+        });
+        assert!(got.is_err());
+        assert_eq!(tries, 1);
+        let got: Result<(), _> = retry_while_busy(Duration::from_millis(30), Duration::from_millis(5), || Err(BUSY));
+        assert_eq!(got, Err(BUSY));
+    }
+
+    #[test]
+    fn every_config_leaves_the_main_window_to_setup() {
+        // A platform file's window list replaces the main one, so each needs
+        // "create": false, or Tauri makes the window and setup's fails.
+        for (file, json) in [
+            ("tauri.conf.json", include_str!("../tauri.conf.json")),
+            ("tauri.linux.conf.json", include_str!("../tauri.linux.conf.json")),
+            ("tauri.windows.conf.json", include_str!("../tauri.windows.conf.json")),
+            ("tauri.macos.conf.json", include_str!("../tauri.macos.conf.json")),
+        ] {
+            let config: serde_json::Value = serde_json::from_str(json).unwrap();
+            for window in config["app"]["windows"].as_array().into_iter().flatten() {
+                assert_eq!(window["create"], false, "{file}: window {}", window["label"]);
+            }
+        }
+    }
+
+    #[test]
+    fn one_unreadable_playlist_leaves_the_rest_to_open() {
+        let dir = std::env::temp_dir().join(format!("revlc-opened-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = |name: &str| dir.join(name).to_string_lossy().into_owned();
+        std::fs::write(dir.join("good.m3u"), "one.mkv\ntwo.mkv\n").unwrap();
+        // gone.m3u isn't there, so it can't be read.
+        let found = opened(vec![path("good.m3u"), path("gone.m3u"), path("film.mkv"), path("film.srt"), "https://example.com/live.m3u8".into()]);
+        let uris: Vec<&str> = found.items.iter().map(|i| i.uri.as_str()).collect();
+        assert_eq!(uris, [path("one.mkv"), path("two.mkv"), path("film.mkv"), "https://example.com/live.m3u8".to_string()]);
+        assert_eq!(found.subtitles, [path("film.srt")]);
+        assert!(found.folders.is_empty());
+        assert_eq!(found.failed.len(), 1);
+        assert!(found.failed[0].contains("gone.m3u"), "{}", found.failed[0]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn busy_is_told_apart() {
+        assert!(webview_busy(BUSY));
+        assert!(webview_busy("error encountered during setup hook: HRESULT(0x800700aa)"));
+        assert!(!webview_busy("failed to create webview: HRESULT(0x80070002)"));
     }
 }

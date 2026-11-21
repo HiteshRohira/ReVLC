@@ -1,0 +1,12 @@
+{
+  "file:///Users/someone/Movies/film.mkv": [
+    {
+      "time": 60000,
+      "name": "Opening"
+    },
+    {
+      "time": 3000000,
+      "name": "Bookmark 2"
+    }
+  ]
+}

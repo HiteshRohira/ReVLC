@@ -3,11 +3,15 @@
   import { Clapperboard, Disc3, Film, FolderOpen, FolderPlus, HardDrive, House, Link, ListMusic, Music2, Play, Radio, Settings, Webcam, X } from "@lucide/svelte";
   import { player, resumable, formatTime, thumbUrl, cleanTitle, type HistoryEntry, type LibraryItem } from "./player.svelte";
   import { ui } from "./ui.svelte";
+  import MusicView from "./MusicView.svelte";
+  import NetworkView from "./NetworkView.svelte";
+  import PlaylistsView from "./PlaylistsView.svelte";
+  import RadioView from "./RadioView.svelte";
   import UpdateButton from "./UpdateButton.svelte";
 
   let { onopen, onopenfolder }: { onopen: () => void; onopenfolder: () => void } = $props();
 
-  let view = $state<"home" | "videos">("home");
+  const view = $derived(ui.homeView);
 
   const continueWatching = $derived(player.history.filter(resumable).slice(0, 4));
   const recent = $derived(player.history.filter((e) => !resumable(e)).slice(0, 8));
@@ -57,16 +61,6 @@
       };
     });
   });
-
-  // Planned sections from the parity checklist; shown so the roadmap is visible.
-  const SOON = [
-    { label: "Music", icon: Music2 },
-    { label: "Playlists", icon: ListMusic },
-  ];
-  const SOON_BROWSE = [
-    { label: "Network shares", icon: HardDrive },
-    { label: "Internet radio", icon: Radio },
-  ];
 
   const base = (path: string) => path.split(/[\\/]/).filter(Boolean).pop() ?? path;
   const left = (e: HistoryEntry) => `${Math.max(1, Math.round((e.length - e.position) / 60000))} min left`;
@@ -129,14 +123,24 @@
 <div class="home">
   <aside data-tauri-drag-region>
     <nav>
-      <button class="nv" class:on={view === "home"} onclick={() => (view = "home")}><House size={17} />Home</button>
-      <button class="nv" class:on={view === "videos"} onclick={() => (view = "videos")}>
+      <button class="nv" class:on={view === "home"} aria-current={view === "home" ? "page" : undefined} onclick={() => (ui.homeView = "home")}><House size={17} />Home</button>
+      <button class="nv" class:on={view === "videos"} aria-current={view === "videos" ? "page" : undefined} onclick={() => (ui.homeView = "videos")}>
         <Film size={17} />Videos{#if player.library.items.length}<em>{player.library.items.length}</em>{/if}
       </button>
-      {#each SOON as s}<div class="nv soon"><s.icon size={17} />{s.label}<span>Soon</span></div>{/each}
+      <button class="nv" class:on={view === "music"} aria-current={view === "music" ? "page" : undefined} onclick={() => (ui.homeView = "music")}>
+        <Music2 size={17} />Music{#if player.library.music.length}<em>{player.library.music.length}</em>{/if}
+      </button>
+      <button class="nv" class:on={view === "playlists"} aria-current={view === "playlists" ? "page" : undefined} onclick={() => (ui.homeView = "playlists")}>
+        <ListMusic size={17} />Playlists
+      </button>
       <h6>Browse</h6>
       <button class="nv" onclick={() => (ui.dialog = "disc")}><Disc3 size={17} />Discs…</button>
-      {#each SOON_BROWSE as s}<div class="nv soon"><s.icon size={17} />{s.label}<span>Soon</span></div>{/each}
+      <button class="nv" class:on={view === "network"} aria-current={view === "network" ? "page" : undefined} onclick={() => (ui.homeView = "network")}>
+        <HardDrive size={17} />Network shares
+      </button>
+      <button class="nv" class:on={view === "radio"} aria-current={view === "radio" ? "page" : undefined} onclick={() => (ui.homeView = "radio")}>
+        <Radio size={17} />Internet radio
+      </button>
       <h6>Streams</h6>
       <button class="nv" onclick={() => (ui.dialog = "url")}><Link size={17} />Open URL…</button>
       <button class="nv" onclick={() => (ui.dialog = "capture")}><Webcam size={17} />Capture device…</button>
@@ -148,6 +152,7 @@
   </aside>
 
   <main>
+    {#if player.engineError || view === "home" || view === "videos"}
     <div class="top" data-tauri-drag-region>
       <h1 data-tauri-drag-region>{view === "home" ? "Home" : "Videos"}</h1>
       <span class="sp" data-tauri-drag-region></span>
@@ -211,6 +216,11 @@
           {/each}
         {/each}
       </div>
+    {/if}
+    {:else if view === "music"}<MusicView {onopenfolder} />
+    {:else if view === "playlists"}<PlaylistsView />
+    {:else if view === "network"}<NetworkView />
+    {:else}<RadioView />
     {/if}
   </main>
 </div>
@@ -285,19 +295,6 @@
     font-style: normal;
     font-size: 12px;
     color: var(--muted);
-  }
-  .nv.soon,
-  .nv.soon :global(svg) {
-    color: var(--faint);
-  }
-  .nv span {
-    margin-left: auto;
-    font-size: 10.5px;
-    font-weight: 600;
-    padding: 1px 6px;
-    border-radius: 5px;
-    background: var(--hover);
-    color: var(--faint);
   }
   main {
     position: relative;

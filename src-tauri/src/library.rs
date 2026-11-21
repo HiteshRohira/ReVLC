@@ -166,26 +166,28 @@ pub struct LibraryItem {
 pub struct Library {
     file: PathBuf,
     pub folders: Vec<String>,
+    /// What happened to an unreadable library file, to tell the user.
+    pub damaged: Option<crate::store::Damaged>,
 }
 
 impl Library {
     pub fn load(data_dir: &Path) -> Self {
         let file = data_dir.join("library.json");
-        let saved: Vec<String> = std::fs::read(&file)
-            .ok()
-            .and_then(|b| serde_json::from_slice(&b).ok())
-            .unwrap_or_default();
+        let (saved, damaged): (Vec<String>, _) = match crate::store::read_json(&file) {
+            Ok(saved) => (saved.unwrap_or_default(), None),
+            Err(damaged) => (Vec::new(), Some(damaged)),
+        };
         let mut folders: Vec<String> = Vec::new();
         for folder in saved.iter().map(|f| normalize(f)) {
             if !folders.contains(&folder) {
                 folders.push(folder);
             }
         }
-        Self { file, folders }
+        Self { file, folders, damaged }
     }
 
     fn save(&self) -> Result<(), String> {
-        crate::store::write_json(&self.file, &self.folders, false)
+        crate::store::write_json_durable(&self.file, &self.folders, false)
     }
 
     pub fn add(&mut self, folder: &str) -> Result<(), String> {
@@ -221,44 +223,96 @@ fn normalize(folder: &str) -> String {
     if trimmed.is_empty() || trimmed.ends_with(':') { folder } else { trimmed.to_string() }
 }
 
-/// Videos in the library `folders`. A file inside two of them (one inside
-/// the other) belongs to the innermost one.
-pub fn scan_folders(folders: &[String]) -> Vec<LibraryItem> {
-    folders
-        .iter()
-        .flat_map(|root| {
-            let root_path = Path::new(root);
-            let inner: Vec<&Path> = folders.iter().map(Path::new).filter(|f| *f != root_path && f.starts_with(root_path)).collect();
-            scan(root_path, is_video)
-                .into_iter()
-                .filter(move |path| !inner.iter().any(|f| path.starts_with(f)))
-                .map(move |path| {
-                    let uri = path.to_string_lossy().into_owned();
-                    let folder = path
-                        .parent()
-                        .and_then(|p| p.strip_prefix(root_path).ok())
-                        .map(|p| p.to_string_lossy().into_owned())
-                        .unwrap_or_default();
-                    let title = path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
-                    LibraryItem {
-                        name: title.clone(),
-                        title,
-                        root: root.clone(),
-                        folder,
-                        modified: crate::meta::modified(&path),
-                        thumb: None,
-                        uri,
-                        year: None,
-                        show: None,
-                        season: None,
-                        episode: None,
-                        duration: 0,
-                        art: None,
-                        group_art: None,
-                    }
-                })
-        })
-        .collect()
+/// A music file in the library.
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Song {
+    pub uri: String,
+    /// The song's title: its tag, or its file name without a track number.
+    pub name: String,
+    /// The library folder this file was found in.
+    pub root: String,
+    /// The file's folder, relative to `root` ("" when directly inside it).
+    pub folder: String,
+    /// Modification time, Unix seconds.
+    pub modified: u64,
+    pub artist: Option<String>,
+    pub album: Option<String>,
+    pub album_artist: Option<String>,
+    pub genre: Option<String>,
+    pub track: Option<u32>,
+    pub disc: Option<u32>,
+    pub year: Option<u32>,
+    /// Milliseconds, 0 until the file has been read.
+    pub duration: i64,
+    /// The album cover (a cached copy).
+    pub art: Option<String>,
+}
+
+/// What's in the library folders.
+#[derive(Clone, Default)]
+pub struct Scan {
+    pub videos: Vec<LibraryItem>,
+    pub music: Vec<Song>,
+}
+
+/// The videos and music in the library `folders`. A file inside two of
+/// them (one inside the other) belongs to the innermost one.
+pub fn scan_folders(folders: &[String]) -> Scan {
+    let mut found = Scan::default();
+    for root in folders {
+        let root_path = Path::new(root);
+        let inner: Vec<&Path> = folders.iter().map(Path::new).filter(|f| *f != root_path && f.starts_with(root_path)).collect();
+        for path in scan(root_path, is_media) {
+            if inner.iter().any(|f| path.starts_with(f)) {
+                continue;
+            }
+            let uri = path.to_string_lossy().into_owned();
+            let folder = path
+                .parent()
+                .and_then(|p| p.strip_prefix(root_path).ok())
+                .map(|p| p.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            let title = path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+            let modified = crate::meta::modified(&path);
+            if is_video(&path) {
+                found.videos.push(LibraryItem {
+                    name: title.clone(),
+                    title,
+                    root: root.clone(),
+                    folder,
+                    modified,
+                    thumb: None,
+                    uri,
+                    year: None,
+                    show: None,
+                    season: None,
+                    episode: None,
+                    duration: 0,
+                    art: None,
+                    group_art: None,
+                });
+            } else {
+                found.music.push(Song {
+                    uri,
+                    name: title,
+                    root: root.clone(),
+                    folder,
+                    modified,
+                    artist: None,
+                    album: None,
+                    album_artist: None,
+                    genre: None,
+                    track: None,
+                    disc: None,
+                    year: None,
+                    duration: 0,
+                    art: None,
+                });
+            }
+        }
+    }
+    found
 }
 
 #[cfg(test)]
@@ -284,9 +338,13 @@ mod tests {
         std::fs::write(dir.join("Broken.mkv"), b"").unwrap();
         let root = dir.to_string_lossy().into_owned();
         let show = dir.join("Show").to_string_lossy().into_owned();
-        let items = scan_folders(&[root.clone(), show.clone()]);
-        let found: Vec<_> = items.iter().map(|i| (i.title.as_str(), i.root.as_str())).collect();
+        // Music is listed apart from the videos.
+        std::fs::write(dir.join("Show").join("Theme.flac"), b"x").unwrap();
+        let scan = scan_folders(&[root.clone(), show.clone()]);
+        let found: Vec<_> = scan.videos.iter().map(|i| (i.title.as_str(), i.root.as_str())).collect();
         assert_eq!(found, [("Movie", root.as_str()), ("Episode 1", show.as_str())]);
+        let music: Vec<_> = scan.music.iter().map(|t| (t.name.as_str(), t.root.as_str())).collect();
+        assert_eq!(music, [("Theme", show.as_str())]);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -307,15 +365,33 @@ mod tests {
     #[test]
     fn failed_saves_change_nothing() {
         let dir = std::env::temp_dir().join(format!("revlc-library-save-{}", std::process::id()));
+        let mut library = Library::load(&dir);
         // A folder where library.json should go makes every save fail.
         std::fs::create_dir_all(dir.join("library.json").join("x")).unwrap();
-        let mut library = Library::load(&dir);
         assert!(library.add("/Movies").is_err());
         assert!(library.folders.is_empty());
         // Once saving works again, the same add saves.
         std::fs::remove_dir_all(dir.join("library.json")).unwrap();
         library.add("/Movies").unwrap();
         assert_eq!(Library::load(&dir).folders, [normalize("/Movies")]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_damaged_file_is_kept_aside() {
+        let dir = std::env::temp_dir().join(format!("revlc-library-damaged-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("library.json"), b"[\"/Movies\",").unwrap();
+        let mut library = Library::load(&dir);
+        assert!(library.folders.is_empty());
+        let aside = library.damaged.clone().and_then(|d| d.aside).expect("moved aside");
+        assert_eq!(std::fs::read(&aside).unwrap(), b"[\"/Movies\",");
+        library.add("/Movies").unwrap();
+        let again = Library::load(&dir);
+        assert_eq!(again.folders, [normalize("/Movies")]);
+        assert_eq!(again.damaged, None);
+        assert!(aside.exists(), "the save overwrote the damaged file");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

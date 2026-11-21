@@ -16,20 +16,22 @@ pub struct Bookmark {
 pub struct Bookmarks {
     file: PathBuf,
     map: BTreeMap<String, Vec<Bookmark>>,
+    /// What happened to an unreadable bookmarks file, to tell the user.
+    pub damaged: Option<crate::store::Damaged>,
 }
 
 impl Bookmarks {
     pub fn load(data_dir: &Path) -> Self {
         let file = data_dir.join("bookmarks.json");
-        let map = std::fs::read(&file)
-            .ok()
-            .and_then(|b| serde_json::from_slice(&b).ok())
-            .unwrap_or_default();
-        Self { file, map }
+        let (map, damaged) = match crate::store::read_json(&file) {
+            Ok(map) => (map.unwrap_or_default(), None),
+            Err(damaged) => (BTreeMap::new(), Some(damaged)),
+        };
+        Self { file, map, damaged }
     }
 
     fn save(&self) -> Result<(), String> {
-        crate::store::write_json(&self.file, &self.map, false)
+        crate::store::write_json_durable(&self.file, &self.map, false)
     }
 
     pub fn list(&self, uri: &str) -> Vec<Bookmark> {
@@ -80,5 +82,23 @@ mod tests {
         b.rename("a", 10_000, "Opening").unwrap();
         b.remove("a", 60_400).unwrap();
         assert_eq!(Bookmarks::load(&dir).list("a"), [Bookmark { time: 10_000, name: "Opening".into() }]);
+    }
+
+    #[test]
+    fn a_damaged_file_is_kept_aside() {
+        let dir = std::env::temp_dir().join(format!("revlc-bookmarks-damaged-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("bookmarks.json"), b"{\"a\": [").unwrap();
+        let mut b = Bookmarks::load(&dir);
+        assert!(b.list("a").is_empty());
+        let aside = b.damaged.clone().and_then(|d| d.aside).expect("moved aside");
+        assert_eq!(std::fs::read(&aside).unwrap(), b"{\"a\": [");
+        b.add("a", 1000, None).unwrap();
+        let again = Bookmarks::load(&dir);
+        assert_eq!(again.list("a").len(), 1);
+        assert_eq!(again.damaged, None);
+        assert!(aside.exists(), "the save overwrote the damaged file");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

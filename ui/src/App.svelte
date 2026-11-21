@@ -33,6 +33,10 @@
   let idleTimer: ReturnType<typeof setTimeout> | undefined;
 
   const showPlayer = $derived(theme.onboarded && player.active);
+  // Windows and Linux keep their menus while playing (not in fullscreen),
+  // in the player's top row; the title starts after them.
+  const playerMenus = $derived(!isMac && !ui.fullscreen);
+  let menusWidth = $state(0);
   // Hide the controls and cursor while video plays and the mouse is still.
   const controlsHidden = $derived(
     idle && player.playing && player.state.hasVideo && ui.openMenus === 0 && !ui.playlistOpen && !ui.effectsOpen,
@@ -42,9 +46,25 @@
     if (controlsHidden) invoke("hide_cursor");
   });
 
+  // Tauri runs each setTitle on its own task, so two quick calls can reach
+  // the window in either order. One at a time, and the newest wins.
+  let wantedTitle = "";
+  let sendingTitle = false;
+  async function showTitle(title: string) {
+    wantedTitle = title;
+    if (sendingTitle) return;
+    sendingTitle = true;
+    let sent: string | undefined;
+    while (sent !== wantedTitle) {
+      sent = wantedTitle;
+      await appWindow.setTitle(sent).catch(() => {});
+    }
+    sendingTitle = false;
+  }
+
   $effect(() => {
     const title = player.current?.title;
-    appWindow.setTitle(showPlayer && title ? `${cleanTitle(title)} — ReVLC` : "ReVLC");
+    showTitle(showPlayer && title ? `${cleanTitle(title)} — ReVLC` : "ReVLC");
   });
 
   // Media opened before onboarding finishes (e.g. a first launch from
@@ -150,10 +170,26 @@
     if (await appWindow.isFullscreen()) await appWindow.setFullscreen(false);
   }
 
+  // What Tab or an arrow key moved focus to, if that's where focus is.
+  // (Not :focus-visible: once any key is down, the browser counts a
+  // clicked button as keyboard-focused too.)
+  let keyboardFocus: EventTarget | null = null;
+  let moving = false;
+  const FOCUS_KEYS = new Set(["Tab", "ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", "Home", "End"]);
+  function onFocusIn(e: FocusEvent) {
+    keyboardFocus = moving ? e.target : null;
+  }
+
   function onKeyDown(e: KeyboardEvent) {
     if (!theme.onboarded || ui.dialog) return;
     const target = e.target as HTMLElement | null;
     if (target?.closest("input, select, textarea")) return;
+    // Space and Return press the button the keyboard is on (a favourite's
+    // star, say) rather than play or pause. A button that was only clicked
+    // doesn't keep them: Space after clicking Mute still pauses.
+    if ((e.key === " " || e.key === "Enter") && !e.metaKey && !e.ctrlKey && !e.altKey && target === keyboardFocus && target?.matches("button, a[href], [role=button]")) return;
+    // The shortcut list scrolls with these, not the player.
+    if (target?.closest(".help") && SCROLL_KEYS.has(e.key)) return;
     const menuKey = MENU_KEYS[e.key];
     const primary = isMac ? e.metaKey : e.ctrlKey;
     if (player.inMenu && menuKey && !primary && !e.shiftKey) {
@@ -180,6 +216,16 @@
     }
     e.preventDefault();
     wake();
+  }
+
+  const SCROLL_KEYS = new Set(["ArrowUp", "ArrowDown", "PageUp", "PageDown", "Home", "End"]);
+
+  // The shortcut list takes focus while it's open, so it scrolls from the
+  // keyboard, and gives it back after.
+  function focusHelp(el: HTMLElement) {
+    const before = document.activeElement as HTMLElement | null;
+    el.focus();
+    return () => before?.focus();
   }
 
   const MENU_KEYS: Record<string, "up" | "down" | "left" | "right" | "activate"> = {
@@ -243,15 +289,21 @@
   });
 </script>
 
-<svelte:window onkeydown={onKeyDown} onpointermove={wake} onpointerdown={wake} onwheel={onWheel} />
+<svelte:window onkeydown={onKeyDown} onkeydowncapture={(e) => (moving = FOCUS_KEYS.has(e.key))} onpointerdowncapture={() => (moving = false)} onfocusin={onFocusIn} onpointermove={wake} onpointerdown={wake} onwheel={onWheel} />
 <svelte:document onvisibilitychange={onVisibility} />
 
 <div class="app" class:video={showPlayer && player.state.hasVideo} class:hide-cursor={controlsHidden} class:fullscreen={ui.fullscreen}>
   {#if !theme.onboarded}
     <Onboarding />
   {:else if showPlayer}
-    <div class="stage" role="presentation" ondblclick={(e) => e.target === e.currentTarget && toggleFullscreen()}></div>
-    <PlayerView hidden={controlsHidden} onfullscreen={toggleFullscreen} onadd={openFiles} />
+    <div
+      class="stage"
+      role="presentation"
+      onclick={(e) => e.target === e.currentTarget && player.closeStrip?.()}
+      ondblclick={(e) => e.target === e.currentTarget && toggleFullscreen()}
+    ></div>
+    <PlayerView hidden={controlsHidden} onfullscreen={toggleFullscreen} onadd={openFiles} menusWidth={playerMenus ? menusWidth : 0} />
+    {#if playerMenus}<TitleBar {host} overlay hidden={controlsHidden} bind:width={menusWidth} />{/if}
   {:else}
     {#if !isMac}<TitleBar {host} />{/if}
     <Home onopen={openFiles} onopenfolder={openFolder} />
@@ -297,7 +349,7 @@
 
   {#if ui.helpOpen}
     <div class="backdrop" role="presentation" onpointerdown={() => (ui.helpOpen = false)}>
-      <div class="help" role="dialog" aria-label="Keyboard shortcuts">
+      <div class="help" role="dialog" aria-label="Keyboard shortcuts" tabindex="0" {@attach focusHelp}>
         <h2>Keyboard shortcuts</h2>
         <dl>
           {#each ACTIONS.filter((a) => bindings[a.id]) as a (a.id)}<dt>{formatBinding(bindings[a.id])}</dt><dd>{a.label}</dd>{/each}
@@ -432,6 +484,7 @@
     border: 1px solid var(--border);
     max-height: 80vh;
     overflow-y: auto;
+    outline: none;
   }
   .help h2 {
     margin: 0 0 14px;

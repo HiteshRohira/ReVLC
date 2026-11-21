@@ -1,15 +1,15 @@
 {
-  "version": "0.2.9",
-  "notes": "Video track selection, zoom and stereo mode. Effects and filters: equaliser with presets, compressor, spatialiser, stereo widener, normalisation, pitch, colour adjustments, rotate and flip, sharpen and other video filters, logo and text overlays. Media information with codec details and live statistics. Teletext. Mouse wheel volume or seeking. VLC-style command-line options.",
-  "pub_date": "2026-10-23T18:24:44Z",
+  "version": "0.2.11",
+  "notes": "Music, Playlists, Network shares and Internet radio in the sidebar. Windows and Linux keep their menus while playing. Space and Return press the button the keyboard is on. Live radio is no longer offered a place to continue from. The welcome screen fits the smallest window. macOS keeps Settings in the menu bar when the engine can't start.",
+  "pub_date": "2026-11-15T15:44:56Z",
   "platforms": {
     "darwin-aarch64": {
-      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSVlR1Wml6L0lBejVrSW5scHVnZS9QVDFodDdqdnE0bnc0UVBZRzJJRzJBWTVkNkQrbFczT2wyODJqR0JJZ2JnUHdQczF0SVBTZzdUa1AzUS9PRXIvWHJyV1JsQ2RqcEFJPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkyNzc5NzI1CWZpbGU6UmVWTEMuYXBwLnRhci5negl2ZXJzaW9uOjAuMi45CkxRTXFpaDB2REJqNVpSa0VWZU5CNFdVaXo0c0VMdmpqZzJFNEVHejFZYXhXR1RSNDVpcXNoZVlVMjg0YjhJTXdsZkNyakdpYjV6Z25SbEZkVENtZUF3PT0K",
-      "url": "https://github.com/HiteshRohira/ReVLC/releases/download/v0.2.9-alpha/ReVLC-0.2.9-alpha-arm64.app.tar.gz"
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSVlR1Wml6L0lBejYyRVlRZmV1Y0Z2azZ3cFBVY2Q1Rktvd3JrUnlLS29DSnB5eTRTVmlnYlh2MTROYnlobmlTdGNaWnR3M1d4TmNwamU1U2traHVucithc2VTRlZ2ZHdjPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzk0NzU3MjUzCWZpbGU6UmVWTEMuYXBwLnRhci5negl2ZXJzaW9uOjAuMi4xMQpnQ0VXNXJhMjVNWGFEREpIVzNjcTlxa3BhN0Z2RXZOUEJLMTlVMjB0d2VBcDFIQUZNNEx6OFVqNDBlZm9rQk1KQU9FNUFiL09WZHhRWU8rSks3Z2FDQT09Cg==",
+      "url": "https://github.com/HiteshRohira/ReVLC/releases/download/v0.2.11-alpha/ReVLC-0.2.11-alpha-arm64.app.tar.gz"
     },
     "windows-x86_64": {
-      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSVlR1Wml6L0lBejY1b05EbkFiYnhSWGVSS1lBY0N3K2Z0bWh0cFBsUVlwb1ZPMjBnUHBNK0ZHS0pOM3hGWEl5eG5BNFZsNVh6YmRMZzVPWDdKd3pFcnR4WFY3czRIakF3PQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkyNzc5ODYwCWZpbGU6UmVWTENfMC4yLjlfeDY0LXNldHVwLmV4ZQl2ZXJzaW9uOjAuMi45CjhCZ28vSTlDYTJFOWRSd2QrbUlYV1BmMWtjQ0ZWL0psTXRlM3pSa1czcWN3V2pGS3VVcGg2bVMwc2hZTVlyYnpGMlU1bUU3Wk1nRXVwcDF4WHFtRUF3PT0K",
-      "url": "https://github.com/HiteshRohira/ReVLC/releases/download/v0.2.9-alpha/ReVLC-0.2.9-alpha-x64-setup.exe"
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSVlR1Wml6L0lBejdyMmVlbE4rUTZHRnVzeWZGRGx5U0RObFJ1WXIrU2F1OVZ2REFRaVdBN01VMDJDQjJZbzNXak9BeUhreG43RGJEYVN2NjZpTVdkTmtTWU5NSmZZU1EwPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzk0NzU3NDQyCWZpbGU6UmVWTENfMC4yLjExX3g2NC1zZXR1cC5leGUJdmVyc2lvbjowLjIuMTEKUm8zeWxMVmRYV3hCWk1FdTJ1RkZnZUJzM1RYaG9PODg3VnJiamgyVWRmUXVKeDdLeTFkODdkNnlQSFhQK211cXplZkpmWUxHTWNZajEyaGtaN2ErQlE9PQo=",
+      "url": "https://github.com/HiteshRohira/ReVLC/releases/download/v0.2.11-alpha/ReVLC-0.2.11-alpha-x64-setup.exe"
     }
   }
 }

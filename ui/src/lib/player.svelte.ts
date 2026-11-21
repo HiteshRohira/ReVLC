@@ -235,9 +235,84 @@ export interface LibraryItem {
   groupArt: string | null;
 }
 
+/** A music file in the library. */
+export interface Song {
+  uri: string;
+  /** The song's title: its tag, or its file name without a track number. */
+  name: string;
+  root: string;
+  folder: string;
+  modified: number;
+  artist: string | null;
+  album: string | null;
+  albumArtist: string | null;
+  genre: string | null;
+  track: number | null;
+  disc: number | null;
+  year: number | null;
+  duration: number;
+  /** The album cover (a cached copy). */
+  art: string | null;
+}
+
 export interface Library {
   folders: string[];
+  /** The videos. */
   items: LibraryItem[];
+  music: Song[];
+}
+
+/** A playlist the user saved (not the queue of what's playing). */
+export interface SavedPlaylist {
+  id: string;
+  name: string;
+  items: Item[];
+  /** When it last changed, Unix seconds. */
+  updated: number;
+}
+
+/** A folder or a media file on a server or a mounted share. */
+export interface BrowseEntry {
+  uri: string;
+  name: string;
+  dir: boolean;
+}
+
+export interface Listing {
+  /** A local path, or a URL without a password. */
+  location: string;
+  name: string;
+  /** A folder on this computer (a mounted share), which can join the library. */
+  local: boolean;
+  entries: BrowseEntry[];
+}
+
+/** A server the user saved. Passwords are never saved. */
+export interface Server {
+  url: string;
+  name: string;
+  user: string | null;
+}
+
+export interface Places {
+  /** Network volumes the system has mounted. */
+  mounted: { name: string; path: string }[];
+  servers: Server[];
+  /** Servers and streams found on the local network so far. */
+  found: { uri: string; name: string; dir: boolean; source: string }[];
+}
+
+/** A radio station from the directory. */
+export interface Station {
+  id: string;
+  name: string;
+  url: string;
+  /** Two-letter country code, or "". */
+  country: string;
+  tags: string[];
+  codec: string;
+  /** kbit/s, 0 when unknown. */
+  bitrate: number;
 }
 
 export interface Item {
@@ -347,9 +422,24 @@ class Player {
   titles = $state<Title[]>([]);
   bookmarks = $state<Bookmark[]>([]);
   history = $state<HistoryEntry[]>([]);
-  library = $state<Library>({ folders: [], items: [] });
+  library = $state<Library>({ folders: [], items: [], music: [] });
+  /** The playlists the user saved. */
+  playlists = $state<SavedPlaylist[]>([]);
+  /** Favourite radio stations. */
+  stations = $state<Station[]>([]);
   /** Bumped when a thumbnail file changes, to bust the web view's image cache. */
   thumbVersion = $state(0);
+  /**
+   * Seek bar preview frames of what's playing, one every `step` ms: frame `k`
+   * is the file `{prefix}{k}.jpg`, once `ready` has it.
+   */
+  scrub = $state<{ run: number; prefix: string; step: number; ready: Set<number> } | null>(null);
+  /** Bumped when a preview frame is made again, so the web view reloads it. */
+  scrubVersion = $state(0);
+  /** The preview frame shown over the video while the user scrubs, like YouTube. */
+  scrubShown = $state<string | null>(null);
+  /** Closes the seek bar's zoomed strip and plays from its chosen spot, while it's open. */
+  closeStrip: (() => void) | null = null;
   engine = $state("");
   engineError = $state<string | null>(null);
   notices = $state<Notice[]>([]);
@@ -383,6 +473,13 @@ class Player {
       listen<Chapter[]>("player://chapters", (e) => (this.chapters = e.payload)),
       listen<Title[]>("player://titles", (e) => (this.titles = e.payload)),
       listen<Bookmark[]>("player://bookmarks", (e) => (this.bookmarks = e.payload)),
+      listen<{ run: number; k: number }>("player://scrub", (e) => {
+        const s = this.scrub;
+        if (!s || s.run !== e.payload.run) return;
+        // A frame made again (it repeated its neighbour) keeps its file name.
+        if (s.ready.has(e.payload.k)) this.scrubVersion++;
+        else this.scrub = { ...s, ready: new Set(s.ready).add(e.payload.k) };
+      }),
       listen<Effects>("player://effects", (e) => (this.effects = e.payload)),
       listen<string>("library://thumb", () => {
         this.thumbVersion++;
@@ -412,14 +509,108 @@ class Player {
     await Promise.all([this.loadHistory(), this.loadLibrary()]);
   }
 
+  /** Starts making seek bar preview frames for what's playing (none when off or not a local video). */
+  async prepareScrub() {
+    this.scrub = null;
+    try {
+      const info = await invoke<{ run: number; prefix: string; step: number; ready: number[] } | null>("scrub_prepare");
+      this.scrub = info && { ...info, ready: new Set(info.ready) };
+    } catch {
+      // No previews; the seek bar works without them.
+    }
+  }
+
+  /** Stops making preview frames and forgets them, until the next prepareScrub. */
+  cancelScrub() {
+    this.scrub = null;
+    invoke("scrub_cancel").catch(() => {});
+  }
+
+  /** Has preview frames `from..=to` made next. */
+  focusScrub(from: number, to: number) {
+    invoke("scrub_focus", { from, to }).catch(() => {});
+  }
+
+  /**
+   * The preview frame for `ms` into a video `length` ms long: the one there,
+   * or the nearest made so far within about 1/120 of the video. One from
+   * further away would show the wrong scene. Frames are made coarse to fine,
+   * so this soon finds one.
+   */
+  nearestScrubFrame(ms: number, length: number) {
+    const s = this.scrub;
+    if (!s) return null;
+    const at = Math.round(ms / s.step);
+    const reach = Math.max(1, Math.round(length / 120 / s.step));
+    for (let d = 0; d <= reach; d++) {
+      for (const k of [at - d, at + d]) {
+        const f = this.scrubFrame(k);
+        if (f) return f;
+      }
+    }
+    return null;
+  }
+
+  /** The file of preview frame `k`, if it's been made. */
+  scrubFrame(k: number) {
+    const s = this.scrub;
+    return s?.ready.has(k) ? `${s.prefix}${k}.jpg` : null;
+  }
+
   /** Lists the library; `rescan` looks for new files instead of reusing the last scan. */
   async loadLibrary(rescan = true) {
     try {
       this.library = await invoke<Library>(rescan ? "library_rescan" : "library_list");
     } catch {
-      this.library = { folders: [], items: [] };
+      this.library = { folders: [], items: [], music: [] };
     }
   }
+
+  async loadPlaylists() {
+    try {
+      this.playlists = await invoke<SavedPlaylist[]>("playlists_list");
+    } catch {
+      this.playlists = [];
+    }
+  }
+
+  /** Runs a command that answers with the saved playlists. Returns whether it worked. */
+  async #playlists(cmd: string, args: Record<string, unknown>): Promise<boolean> {
+    try {
+      this.playlists = await invoke<SavedPlaylist[]>(cmd, args);
+      return true;
+    } catch (e) {
+      this.notify("error", String(e));
+      return false;
+    }
+  }
+
+  createPlaylist = (name: string, fromQueue: boolean) => this.#playlists("playlists_create", { name, fromQueue });
+  importPlaylist = (path: string) => this.#playlists("playlists_import", { path });
+  renamePlaylist = (id: string, name: string) => this.#playlists("playlists_rename", { id, name });
+  deletePlaylist = (id: string) => this.#playlists("playlists_delete", { id });
+  addToPlaylist = (id: string, uris: string[]) => this.#playlists("playlists_add", { id, uris });
+  removeFromPlaylist = (id: string, index: number, uri: string) => this.#playlists("playlists_remove_item", { id, index, uri });
+  /** Plays a saved playlist from one of its items; it takes the queue's place. */
+  playPlaylist = (id: string, index = 0) => this.#call("playlists_play", { id, index });
+
+  async loadStations() {
+    try {
+      this.stations = await invoke<Station[]>("radio_favorites");
+    } catch {
+      this.stations = [];
+    }
+  }
+
+  async setFavoriteStation(station: Station, on: boolean) {
+    try {
+      this.stations = await invoke<Station[]>("radio_favorite", { station: $state.snapshot(station), on });
+    } catch (e) {
+      this.notify("error", String(e));
+    }
+  }
+
+  playStation = (station: Station) => this.#call("radio_play", { station: $state.snapshot(station) });
 
   #refreshTimer: ReturnType<typeof setTimeout> | undefined;
   // Thumbnails arrive one by one; refresh the lists at most every couple of seconds.
@@ -719,7 +910,7 @@ export function chapterAt(chapters: Chapter[], ms: number): Chapter | null {
 
 /** Whether a history entry was left part-way through (mirrors the backend's rule). */
 export function resumable(e: HistoryEntry) {
-  return !e.finished && e.position > 15_000 && (e.length === 0 || e.position < e.length - 15_000);
+  return !e.finished && e.position > 15_000 && e.length > 0 && e.position < e.length - 15_000;
 }
 
 /** Parses "1:02:03", "2:03" or "123" (seconds) into ms; null if invalid. */

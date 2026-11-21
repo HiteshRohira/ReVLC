@@ -1,0 +1,132 @@
+# Runs ReVLC's engine tests on macOS, Windows and Linux: the libVLC
+# integration tests (src-tauri/src/vlc_it.rs: the real libVLC that ships, the
+# system one on Linux, plays generated media into memory and a WAV file, and
+# the tests check the frames and samples) and the FFmpeg seek-preview tests
+# (src-tauri/src/keyframes_it.rs, with the FFmpeg that ships). No screen,
+# GPU or sound card needed. On every app change, on main, in the merge
+# queue and before a release; "Engine tests passed" is the one gate.
+name: Engine tests
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+  push:
+    branches: [main]
+  merge_group:
+  workflow_call:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: engine-tests-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  scope:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      run_app_checks: ${{ steps.scope.outputs.run_app_checks }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          fetch-depth: 0
+      - id: scope
+        uses: ./.github/actions/scope
+
+  vlc-it:
+    needs: scope
+    if: needs.scope.outputs.run_app_checks == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-15, windows-latest, ubuntu-24.04]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 40
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Linux dependencies
+        if: runner.os == 'Linux'
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
+          # The hosted runner's Azure mirror can stall; see linux-build.yml.
+          [[ -f /etc/apt/apt-mirrors.txt ]] && echo 'https://archive.ubuntu.com/ubuntu/' | sudo tee /etc/apt/apt-mirrors.txt
+          sudo -E apt-get -o Acquire::http::Timeout=30 -o Acquire::Retries=2 update
+          sudo -E apt-get -o Acquire::http::Timeout=30 -o Acquire::Retries=2 install -y \
+            libwebkit2gtk-4.1-dev build-essential libssl-dev librsvg2-dev libx11-dev patchelf \
+            libvlc5 libvlccore9 vlc-plugin-base vlc-plugin-video-output ffmpeg
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest
+      - run: npm ci
+      # The Rust build embeds the built UI.
+      - run: npm run build
+      # The scripts check versions and checksums and skip what's already
+      # there, so a cached copy is only used when it's the pinned one.
+      - uses: actions/cache@v4
+        if: runner.os != 'Linux'
+        with:
+          path: |
+            src-tauri/vlc
+            src-tauri/binaries
+          key: engine-media-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('scripts/prepare-libvlc.sh', 'scripts/prepare-ffmpeg.sh') }}
+      - name: Download libVLC and FFmpeg
+        if: runner.os != 'Linux'
+        run: bash scripts/prepare-libvlc.sh && bash scripts/prepare-ffmpeg.sh
+      - name: Run the engine tests
+        working-directory: src-tauri
+        run: |
+          if [[ "$RUNNER_OS" == Linux ]]; then
+            export REVLC_TEST_FFMPEG=ffmpeg  # and the system libVLC
+          else
+            export REVLC_VLC_DIR="$PWD/vlc"
+            export REVLC_TEST_FFMPEG="$(ls "$PWD"/binaries/ffmpeg-*)"
+          fi
+          export REVLC_IT_DIR="$RUNNER_TEMP/revlc-vlc-it"
+          "$REVLC_TEST_FFMPEG" -hide_banner -version | head -1
+          # One test at a time (src-tauri/.config/nextest.toml), each in its
+          # own process, so a crash or hang names the test.
+          cargo nextest run --locked --profile ci --run-ignored only -E 'test(/_it_/)'
+      # The generated media and what the tests captured, to look at a failure.
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: engine-tests-${{ matrix.os }}
+          path: ${{ runner.temp }}/revlc-vlc-it/
+          if-no-files-found: ignore
+
+  required:
+    # The branch protection on main requires this check by name.
+    name: Engine tests passed
+    if: always()
+    needs: [scope, vlc-it]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Require every platform when app checks are in scope
+        env:
+          SCOPE_RESULT: ${{ needs.scope.result }}
+          RUN_APP_CHECKS: ${{ needs.scope.outputs.run_app_checks }}
+          TESTS_RESULT: ${{ needs.vlc-it.result }}
+        run: |
+          [[ "$SCOPE_RESULT" == "success" ]]
+          if [[ "$RUN_APP_CHECKS" == "true" ]]; then
+            [[ "$TESTS_RESULT" == "success" ]]
+          else
+            [[ "$RUN_APP_CHECKS" == "false" && "$TESTS_RESULT" == "skipped" ]]
+          fi

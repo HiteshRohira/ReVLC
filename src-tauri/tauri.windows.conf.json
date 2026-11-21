@@ -4,6 +4,7 @@
     "windows": [
       {
         "label": "main",
+        "create": false,
         "title": "ReVLC",
         "width": 1280,
         "height": 800,
@@ -24,6 +25,7 @@
     "targets": [
       "nsis"
     ],
+    "externalBin": ["binaries/ffmpeg"],
     "fileAssociations": [],
     "windows": {
       "nsis": {

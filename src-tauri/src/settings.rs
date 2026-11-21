@@ -37,6 +37,8 @@ pub struct Settings {
     pub stop_after_each: bool,
     pub pause_when_minimized: bool,
     pub seekbar_chapters: bool,
+    /// Show a frame from the video above the seek bar while hovering or dragging.
+    pub seekbar_preview: bool,
     pub wheel: Wheel,
     /// Download and install new versions in the background.
     pub auto_update: bool,
@@ -105,6 +107,7 @@ impl Default for Settings {
             stop_after_each: false,
             pause_when_minimized: false,
             seekbar_chapters: true,
+            seekbar_preview: true,
             wheel: Wheel::Volume,
             auto_update: true,
             analytics: true,
@@ -157,11 +160,50 @@ impl Default for Settings {
 }
 
 impl Settings {
-    pub fn load(data_dir: &Path) -> Self {
-        std::fs::read(file(data_dir))
-            .ok()
-            .and_then(|b| serde_json::from_slice(&b).ok())
-            .unwrap_or_default()
+    /// The saved settings, and what happened to the file if it couldn't be
+    /// read. Then the settings are the defaults, except that analytics is
+    /// off: whether the user had turned it off can't be known. They're saved
+    /// at once, so the next launch doesn't turn it back on.
+    pub fn load(data_dir: &Path) -> (Self, Option<crate::store::Damaged>) {
+        let path = file(data_dir);
+        let mut damaged = match crate::store::read_json::<serde_json::Value>(&path) {
+            Ok(None) => return (Self::default(), None),
+            Ok(Some(json @ serde_json::Value::Object(_))) => return (Self::from_json(json), None),
+            // JSON, but not a settings object.
+            Ok(Some(_)) => crate::store::set_aside(&path),
+            Err(damaged) => damaged,
+        };
+        let settings = Self { analytics: false, ..Self::default() };
+        if let Err(e) = settings.save(data_dir) {
+            eprintln!("revlc: {e}");
+            // With no file at all, the next launch would start as a fresh
+            // install, analytics on. The damaged one keeps it off.
+            if let Some(aside) = damaged.aside.take()
+                && std::fs::rename(&aside, &path).is_err()
+            {
+                damaged.aside = Some(aside);
+            }
+        }
+        (settings, Some(damaged))
+    }
+
+    /// A field that can't be read takes its default on its own, so one bad
+    /// value (a hand edit, a type a later version changed) doesn't reset the
+    /// rest, the analytics opt-out above all.
+    fn from_json(json: serde_json::Value) -> Self {
+        if let Ok(s) = serde_json::from_value(json.clone()) {
+            return s;
+        }
+        let serde_json::Value::Object(fields) = json else { return Self::default() };
+        let mut merged = serde_json::to_value(Self::default()).expect("settings serialize");
+        for (key, value) in fields {
+            let mut candidate = merged.clone();
+            candidate[&key] = value;
+            if serde_json::from_value::<Self>(candidate.clone()).is_ok() {
+                merged = candidate;
+            }
+        }
+        serde_json::from_value(merged).unwrap_or_default()
     }
 
     pub fn save(&self, data_dir: &Path) -> Result<(), String> {

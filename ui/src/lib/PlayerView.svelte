@@ -6,11 +6,12 @@
   import SeekBar from "./SeekBar.svelte";
   import SettingsMenu from "./SettingsMenu.svelte";
   import Transport from "./Transport.svelte";
-  import { player, formatTime, genericChapter, cleanTitle } from "./player.svelte";
+  import { player, formatTime, genericChapter, cleanTitle, thumbUrl } from "./player.svelte";
   import { ui } from "./ui.svelte";
   import { modKey } from "./platform";
 
-  let { hidden, onfullscreen, onadd }: { hidden: boolean; onfullscreen: () => void; onadd: () => void } = $props();
+  // `menusWidth`: room to leave after the back button for the Windows and Linux menus.
+  let { hidden, onfullscreen, onadd, menusWidth = 0 }: { hidden: boolean; onfullscreen: () => void; onadd: () => void; menusWidth?: number } = $props();
 
   const s = $derived(player.state);
   const VolumeIcon = $derived(s.muted || s.volume === 0 ? VolumeX : s.volume < 50 ? Volume1 : Volume2);
@@ -63,12 +64,21 @@
 
 <svelte:window onpointerdown={onWindowPointer} />
 
+<!-- Text, not a label on the spinner: WebView2 leaves an empty element out
+     of UI Automation. Always there, so screen readers hear it change. -->
+<div class="status" role="status">{#if spinner}Buffering{/if}</div>
 {#if spinner}
-  <div class="loading" role="status" aria-label="Buffering"><div class="ring"></div></div>
+  <div class="loading" aria-hidden="true"><div class="ring"></div></div>
 {/if}
 
-<!-- Covers the video while the controls show, so it takes the double-click too. -->
-<div class="player" class:hidden role="presentation" ondblclick={(e) => e.target === e.currentTarget && onfullscreen()}>
+<!-- Covers the video while the controls show, so it takes clicks on the video too. -->
+<div
+  class="player"
+  class:hidden
+  role="presentation"
+  onclick={(e) => e.target === e.currentTarget && player.closeStrip?.()}
+  ondblclick={(e) => e.target === e.currentTarget && onfullscreen()}
+>
   {#if !s.hasVideo}
     <div class="audio">
       {#if !spinner}
@@ -78,10 +88,14 @@
     </div>
   {/if}
 
+  {#if player.scrubShown}
+    <img class="scrubbed" src={thumbUrl(player.scrubShown, player.scrubVersion)} alt="" draggable="false" />
+  {/if}
+
   <div class="top" data-tauri-drag-region>
     <div class="bar" data-tauri-drag-region>
       <button class="back" data-tip="Back to home" aria-label="Back to home" onclick={player.stop}><ChevronLeft size={18} /></button>
-      <div class="title" data-tauri-drag-region>
+      <div class="title" data-tauri-drag-region style:margin-left={menusWidth ? `${menusWidth + 8}px` : null}>
         {cleanTitle(player.current?.title ?? "")}{#if chapterName}<span>&nbsp;·&nbsp;{chapterName}</span>{/if}
       </div>
     </div>
@@ -273,6 +287,24 @@
     position: absolute;
     right: -88px;
     bottom: 48px;
+  }
+  /* The scrubbed-to frame over the video, scaled up from a small preview. */
+  .scrubbed {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    object-fit: contain;
+    background: #000;
+    pointer-events: none;
+  }
+  .status {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
   }
   .loading {
     position: absolute;

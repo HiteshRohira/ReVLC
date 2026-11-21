@@ -38,6 +38,8 @@ Main features come first. Ship, get feedback, then keep ticking boxes.
 - [x] Search and sort
 - [x] Library folders with thumbnails, grouped by subfolder
 - [x] Library metadata and artwork (titles, posters, seasons)
+- [x] Music library: albums and songs, from tags and cover art
+- [x] Saved playlists: make from the queue or files, import, rename, delete
 
 ## Subtitles
 - [x] Embedded track selection (SRT, ASS/SSA, PGS, VobSub, WebVTT, DVB…) *(engine)*
@@ -84,10 +86,11 @@ Main features come first. Ship, get feedback, then keep ticking boxes.
 
 ## Network and casting
 - [ ] Chromecast
-- [ ] UPnP / DLNA browsing
-- [ ] SMB, SFTP, FTP, NFS browsing
-- [ ] SAP announcements
-- [ ] Internet radio and podcast directories
+- [ ] UPnP / DLNA browsing. Servers found on the network are listed under Network shares and open through libVLC, but this has not been tried against a real server yet.
+- [x] SMB, SFTP, FTP, NFS browsing. SMB shares are mounted by macOS (VLC 3 for macOS has no SMB of its own) or read as `\\server\share` paths on Windows; the rest go through libVLC.
+- [ ] SAP announcements. Listed under Network shares when found; not tried against a real announcer yet.
+- [x] Internet radio directory (radio-browser.info), with favourites
+- [ ] Podcast directories
 
 ## Control
 - [x] Keyboard shortcuts (VLC-style) and a shortcut overlay (`?`)

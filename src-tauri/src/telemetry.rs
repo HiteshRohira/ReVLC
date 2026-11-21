@@ -77,6 +77,13 @@ struct Saved {
 
 static TELEMETRY: OnceLock<Telemetry> = OnceLock::new();
 
+/// The id `start` keeps, as it reads it (for the data-compatibility tests).
+#[cfg(test)]
+pub(crate) fn saved_id(data_dir: &Path) -> String {
+    let saved: Saved = std::fs::read(data_dir.join("analytics.json")).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
+    saved.id
+}
+
 /// Starts analytics, sending the launch (and first-install or update) event.
 pub fn start(data_dir: &Path, enabled: bool, engine: &str) {
     let file = data_dir.join("analytics.json");
