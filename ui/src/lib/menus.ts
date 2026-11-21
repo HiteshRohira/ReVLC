@@ -1,7 +1,7 @@
 /**
  * The menus the title strip shows on Windows, laid out like VLC's. Ids are
  * action ids (see actions.ts) or app items the backend runs ("quit",
- * "checkUpdates", "github", "newWindow"); "-" is a separator. Keep the player menus in
+ * "checkUpdates", "github"); "-" is a separator. Keep the player menus in
  * step with src-tauri/src/menu.rs, which builds the macOS menu bar.
  */
 export interface MenuDef {
@@ -15,8 +15,6 @@ export const MENUS: MenuDef[] = [
   {
     label: "Media",
     items: [
-      ["newWindow", "New Window"],
-      SEP,
       ["open", "Open File…"],
       ["openFolder", "Open Folder…"],
       ["openDisc", "Open Disc…"],
