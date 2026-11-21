@@ -8,6 +8,7 @@ export interface Settings {
   resume: Resume;
   stopAfterEach: boolean;
   pauseWhenMinimized: boolean;
+  openInNewWindow: boolean;
   seekbarChapters: boolean;
   seekbarPreview: boolean;
   /** What the mouse wheel does over the video. */

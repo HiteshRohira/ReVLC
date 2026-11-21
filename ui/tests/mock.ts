@@ -18,7 +18,7 @@ const VIDEO = "/media/Big Buck Bunny.mp4";
 const SECOND = "/media/Sintel.mkv";
 
 const settingsDefaults: Json = {
-  resume: "ask", stopAfterEach: false, pauseWhenMinimized: false, seekbarChapters: true, seekbarPreview: true, wheel: "volume",
+  resume: "ask", stopAfterEach: false, pauseWhenMinimized: false, openInNewWindow: true, seekbarChapters: true, seekbarPreview: true, wheel: "volume",
   autoUpdate: false, analytics: false,
   video: true, startFullscreen: false, alwaysOnTop: false, deinterlace: -1, deinterlaceMode: "auto",
   snapshotPath: "", snapshotPrefix: "vlcsnap-", snapshotFormat: "png", snapshotSequential: false,

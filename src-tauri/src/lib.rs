@@ -406,6 +406,13 @@ impl Session {
         matches!(self.vlc.state(), State::Playing | State::Paused | State::Opening | State::Buffering)
     }
 
+    /// Whether a video opened now should start in a new window: the setting
+    /// is on and this window is already busy with one.
+    #[cfg(target_os = "macos")]
+    fn wants_new_window(&self) -> bool {
+        self.settings().open_in_new_window && self.is_busy()
+    }
+
     /// Sends an event to this window only.
     fn emit<S: Serialize + Clone>(&self, event: &str, payload: S) {
         let _ = self.app.emit_to(self.label.as_str(), event, payload);
@@ -1826,6 +1833,16 @@ fn background_priority() {
 
 #[tauri::command]
 async fn open(player: Player, uris: Vec<String>, play: bool) -> Res {
+    // A video that would replace what's playing starts in a new window instead.
+    #[cfg(target_os = "macos")]
+    if play && player.core()?.wants_new_window() {
+        let shared = player.shared()?.clone();
+        return tauri::async_runtime::spawn_blocking(move || {
+            open_player(&shared, Launch { files: uris, ..Launch::default() }).map(|_| ())
+        })
+        .await
+        .map_err(|e| e.to_string())?;
+    }
     off_main(player, move |core| core.add(uris, play)).await?
 }
 
@@ -3371,7 +3388,7 @@ pub fn run() {
             // window, so a second video opened from Finder plays alongside the first.
             match shared_of(handle) {
                 Some(shared) => match shared.target_session() {
-                    Some(session) if !session.is_busy() => session.add_from_main(uris, Vec::new()),
+                    Some(session) if !session.wants_new_window() => session.add_from_main(uris, Vec::new()),
                     _ => {
                         // Off the main thread, which creating a window can block.
                         thread::spawn(move || {

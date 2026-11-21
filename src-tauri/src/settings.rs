@@ -36,6 +36,9 @@ pub struct Settings {
     /// VLC "play-and-stop": stop after each item instead of playing the next.
     pub stop_after_each: bool,
     pub pause_when_minimized: bool,
+    /// macOS: a video opened while a window is already playing one starts in
+    /// a new window (File > Open, drag and drop, Finder), instead of replacing it.
+    pub open_in_new_window: bool,
     pub seekbar_chapters: bool,
     /// Show a frame from the video above the seek bar while hovering or dragging.
     pub seekbar_preview: bool,
@@ -106,6 +109,7 @@ impl Default for Settings {
             resume: Resume::Ask,
             stop_after_each: false,
             pause_when_minimized: false,
+            open_in_new_window: true,
             seekbar_chapters: true,
             seekbar_preview: true,
             wheel: Wheel::Volume,
