@@ -45,12 +45,19 @@ pub fn attach(
     window.setOpaque(true);
 
     window.setAcceptsMouseMovedEvents(true);
+    // The monitor sees every window's events, and each player window has
+    // its own: only this window's count.
+    let this = window as *const NSWindow;
     let handler = RcBlock::new(move |event: NonNull<NSEvent>| -> *mut NSEvent {
-        on_pointer();
+        // SAFETY: AppKit hands the monitor a live event.
+        let from = unsafe { event.as_ref() }.window(mtm);
+        if from.is_some_and(|w| std::ptr::eq(&*w, this)) {
+            on_pointer();
+        }
         event.as_ptr()
     });
     let mask = NSEventMask::MouseMoved | NSEventMask::LeftMouseDragged | NSEventMask::ScrollWheel;
-    // The monitor lives for the whole app.
+    // The monitor lives for the whole app (it stays, idle, after its window closes).
     std::mem::forget(unsafe { NSEvent::addLocalMonitorForEventsMatchingMask_handler(mask, &handler) });
 
     // After entering or leaving fullscreen, the web page can lose focus
