@@ -3613,13 +3613,16 @@ mod tests {
         let pump_core = core.clone();
         let pump = thread::spawn(move || pump_events(pump_core, rx));
 
-        // Seed resume position for track 1 and set Resume::Always.
+        // Seed resume position for track 1 and set Resume::Always. Use platform-native
+        // paths under `dir` so Windows path normalization (`\` vs `/`) matches identically.
+        let path_a = dir.join("a.mp4").to_string_lossy().into_owned();
+        let path_b = dir.join("b.mp4").to_string_lossy().into_owned();
         core.settings().resume = Resume::Always;
-        core.history().touch("/media/a.mp4", "a.mp4");
-        core.history().update("/media/a.mp4", 42_000, 120_000);
+        core.history().touch(&path_a, "a.mp4");
+        core.history().update(&path_a, 42_000, 120_000);
 
-        core.add(vec!["/media/a.mp4".into(), "/media/b.mp4".into()], true).unwrap();
-        assert_eq!(mock.opened_uris.lock().unwrap().as_slice(), ["/media/a.mp4"]);
+        core.add(vec![path_a.clone(), path_b.clone()], true).unwrap();
+        assert_eq!(mock.opened_uris.lock().unwrap().as_slice(), [path_a.as_str()]);
 
         // Playing event triggers pending resume seek.
         mock.send_event(EventKind::Playing, 100.0, -1);
@@ -3635,7 +3638,7 @@ mod tests {
         // EndReached after playback advances to track 2.
         mock.send_event(EventKind::EndReached, 100.0, -1);
         assert!(wait_until(Duration::from_secs(2), || {
-            mock.opened_uris.lock().unwrap().as_slice() == ["/media/a.mp4", "/media/b.mp4"]
+            mock.opened_uris.lock().unwrap().as_slice() == [path_a.as_str(), path_b.as_str()]
         }));
         assert_eq!(core.playlist().current, Some(1));
 
@@ -3667,12 +3670,14 @@ mod tests {
         let pump_core = core.clone();
         let pump = thread::spawn(move || pump_events(pump_core, rx));
 
+        let bad_1 = dir.join("1.mp4").to_string_lossy().into_owned();
+        let bad_2 = dir.join("2.mp4").to_string_lossy().into_owned();
         core.playlist().repeat = Repeat::All;
-        core.add(vec!["/bad/1.mp4".into(), "/bad/2.mp4".into()], true).unwrap();
+        core.add(vec![bad_1.clone(), bad_2.clone()], true).unwrap();
         // Item 0 errors without ever advancing time > 0 -> advances to item 1.
         mock.send_event(EventKind::Error, 0.0, -1);
         assert!(wait_until(Duration::from_secs(2), || {
-            mock.opened_uris.lock().unwrap().as_slice() == ["/bad/1.mp4", "/bad/2.mp4"]
+            mock.opened_uris.lock().unwrap().as_slice() == [bad_1.as_str(), bad_2.as_str()]
         }));
 
         // Item 1 also errors -> wait until its error notice is emitted, then verify
