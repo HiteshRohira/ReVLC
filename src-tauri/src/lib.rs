@@ -400,6 +400,11 @@ struct Snapshot {
 }
 
 impl Session {
+    /// Whether something is playing, paused or loading in this window.
+    fn is_busy(&self) -> bool {
+        matches!(self.vlc.state(), State::Playing | State::Paused | State::Opening | State::Buffering)
+    }
+
     /// Sends an event to this window only.
     fn emit<S: Serialize + Clone>(&self, event: &str, payload: S) {
         let _ = self.app.emit_to(self.label.as_str(), event, payload);
@@ -3352,9 +3357,22 @@ pub fn run() {
                 .into_iter()
                 .map(|u| u.to_file_path().map(|p| p.to_string_lossy().into_owned()).unwrap_or_else(|_| u.to_string()))
                 .collect();
-            // Into the window that was used last; before there is one, `setup` plays them.
-            match shared_of(handle).and_then(|s| s.target_session()) {
-                Some(session) => session.add_from_main(uris, Vec::new()),
+            // Before there is a window, `setup` plays them. After that, into the
+            // window that was used last if it has nothing playing, else a new
+            // window, so a second video opened from Finder plays alongside the first.
+            match shared_of(handle) {
+                Some(shared) => match shared.target_session() {
+                    Some(session) if !session.is_busy() => session.add_from_main(uris, Vec::new()),
+                    _ => {
+                        // Off the main thread, which creating a window can block.
+                        thread::spawn(move || {
+                            let launch = Launch { files: uris, ..Launch::default() };
+                            if let Err(e) = open_player(&shared, launch) {
+                                eprintln!("revlc: could not open a window for the file: {e}");
+                            }
+                        });
+                    }
+                },
                 None => EARLY_OPENS.lock().unwrap_or_else(|e| e.into_inner()).extend(uris),
             }
         }
