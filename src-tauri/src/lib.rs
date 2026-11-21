@@ -1520,6 +1520,8 @@ fn run_app_item(app: &AppHandle, id: &str) -> bool {
             let opener = if cfg!(windows) { "explorer" } else { "open" };
             let _ = std::process::Command::new(opener).arg("https://github.com/HiteshRohira/ReVLC").spawn();
         }
+        // Only macOS has more than one player window.
+        #[cfg(target_os = "macos")]
         "newWindow" => {
             // Off the main thread: on Windows, creating a window there deadlocks WebView2.
             let app = app.clone();
@@ -2435,27 +2437,19 @@ fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
 pub fn run() {
     let builder = tauri::Builder::default();
     // Windows starts a new process for each file opened from Explorer; it
-    // hands its files to the running copy and exits. Files join the player
-    // window that was used last (as in VLC), so a burst of Explorer launches
-    // doesn't open a window each; a launch with no files opens a new window.
+    // hands its files to the running copy and exits. Windows has a single
+    // player window; more than one is macOS-only for now.
     #[cfg(windows)]
     let builder = builder.plugin(tauri_plugin_single_instance::init(|app, args, cwd| {
         // libVLC has started, so only the files and their start times count.
         let mut cli = cli::parse(args.into_iter().skip(1));
         cli.resolve_paths(Path::new(&cwd));
-        let Some(shared) = shared_of(app) else { return };
-        if cli.files.is_empty() {
-            let shared = shared.clone();
-            thread::spawn(move || {
-                let _ = open_player(&shared, Launch::default());
-            });
-            return;
+        let Some(session) = shared_of(app).and_then(|s| s.target_session()) else { return };
+        if let Some(window) = app.get_webview_window(&session.label) {
+            let _ = window.unminimize();
+            let _ = window.set_focus();
         }
-        if let Some(session) = shared.target_session() {
-            if let Some(window) = app.get_webview_window(&session.label) {
-                let _ = window.unminimize();
-                let _ = window.set_focus();
-            }
+        if !cli.files.is_empty() {
             session.add_from_main(cli.files, cli.media_options);
         }
     }));
