@@ -1100,6 +1100,14 @@ def playback(ctx):
             if MAC:
                 args["delivery_mode"] = "foreground"
             cua("move_cursor", args)
+            if WIN:
+                # SetCursorPos alone doesn't always emit WM_MOUSEMOVE to WebView2;
+                # a 1px relative MOUSEEVENTF_MOVE delivers a real pointermove event.
+                try:
+                    import ctypes
+                    ctypes.windll.user32.mouse_event(0x0001, 1, 0, 0, 0)
+                except Exception:
+                    pass
 
         def mean_diff(im_a, im_b, box):
             pa = pixels(im_a.crop(box))
