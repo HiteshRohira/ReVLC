@@ -1462,9 +1462,7 @@ fn pump_events(core: Arc<Session>, rx: Receiver<vlc::Event>) {
         if [event::PLAYING, event::LENGTH_CHANGED, event::MEDIA_CHANGED, event::TITLE_CHANGED].iter().any(|&e| has(e)) {
             core.emit_chapters();
         }
-        // A local file keeps its file name as its title; streams take the one libVLC reports.
         if has(event::PLAYING)
-            && core.current_uri().is_some_and(|uri| uri.contains("://"))
             && let Some(title) = core.vlc.media_title()
         {
             let mut playlist = core.playlist();

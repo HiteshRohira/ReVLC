@@ -220,9 +220,8 @@ pub fn is_release_name(title: &str) -> bool {
     find_episode(&words(title)).is_some()
 }
 
-/// A short title for a local file (not used for the player, which shows the file name): "Show - S01E02 - Title",
+/// A short title for a local file until it reports its own: "Show - S01E02 - Title",
 /// "Movie (1999)", or the file name.
-#[cfg_attr(not(test), allow(dead_code))]
 pub fn display_title(path: &Path) -> String {
     let file = path.file_name().map(|f| f.to_string_lossy().into_owned()).unwrap_or_default();
     let info = parse_path(path);
