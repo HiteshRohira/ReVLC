@@ -38,6 +38,7 @@ pub struct Settings {
     pub pause_when_minimized: bool,
     /// macOS: a video opened while a window is already playing one starts in
     /// a new window (File > Open, drag and drop, Finder), instead of replacing it.
+    /// Off by default.
     pub open_in_new_window: bool,
     pub seekbar_chapters: bool,
     /// Show a frame from the video above the seek bar while hovering or dragging.
@@ -109,7 +110,7 @@ impl Default for Settings {
             resume: Resume::Ask,
             stop_after_each: false,
             pause_when_minimized: false,
-            open_in_new_window: true,
+            open_in_new_window: false,
             seekbar_chapters: true,
             seekbar_preview: true,
             wheel: Wheel::Volume,
