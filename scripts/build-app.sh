@@ -23,7 +23,6 @@ fi
 cd "$ROOT"
 # Replaces src-tauri/vlc if it holds another libVLC version.
 bash scripts/prepare-libvlc.sh
-bash scripts/prepare-ffmpeg.sh
 npx tauri build
 case "$(uname -s)" in
   MINGW* | MSYS* | CYGWIN*) ;;

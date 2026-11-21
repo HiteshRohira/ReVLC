@@ -1081,16 +1081,100 @@ def playback(ctx):
         if ctx.no_video:
             # ReVLC only makes previews for a video it shows.
             raise Skip("this runner can't show video")
-        # ReVLC makes the seek bar's preview frames as files in its cache
-        # once a video plays: 150 for this 5-minute clip. A failed FFmpeg
-        # pass is caught by the log check after the scenario.
-        scrub = ctx.cache_dir() / "scrub"
-        made = lambda: len(list(scrub.rglob("*.jpg"))) if scrub.exists() else 0
+        # Stage 3 stores seek previews in a bounded in-memory LRU cache served
+        # over scrub:// (zero .jpg files on disk). Hover at two spread-out
+        # points on the Seek slider and verify the tooltip visibly changes the
+        # screen above the slider (compared to an unhovered baseline) and shows
+        # real non-black preview pixels.
+        seek_els = wait_for(lambda: [e for e in app.find("Seek") if (e.get("frame") or {}).get("w")], "the Seek slider", 10)
+        f = seek_els[0]["frame"]
+        st = cua("get_window_state", {"pid": app.pid, "window_id": app.window_id, "include_accessibility_tree": False})
+        wb = st.get("window_bounds") or app.bounds() or app.frame
+        wscale = (st.get("screenshot_width") or wb["width"]) / wb["width"]
+
+        def move_screen(sx, sy):
+            cua("move_cursor", {
+                "scope": "desktop",
+                "delivery_mode": "foreground",
+                "x": round(sx * wscale),
+                "y": round(sy * wscale),
+            })
+
+        def sample_preview_at(frac, shot_name):
+            hx = f["x"] + f["w"] * frac
+            hy = f["y"] + f["h"] / 2
+            move_screen(hx, hy)
+            move_screen(hx + 6.0, hy)
+            nudge = [0]
+
+            def preview_ready():
+                els = [e for e in app.read() if "seek preview" in " ".join(str(e.get(k) or "") for k in ("label", "title", "description")).lower()]
+                if els:
+                    return els[0]
+                nudge[0] = (nudge[0] + 1) % 3
+                move_screen(hx + 4.0 + nudge[0] * 3.0, hy)
+                return None
+
+            img_el = wait_for(preview_ready, f'"Seek preview" image at {int(frac * 100)}%', 30, interval=0.5)
+            shot = app.shot(shot_name)
+            im = Image.open(shot).convert("RGB")
+            ef = img_el.get("frame") if isinstance(img_el, dict) else None
+            if ef and ef.get("w", 0) > 20 and ef.get("h", 0) > 10:
+                box = (
+                    max(0, round((ef["x"] - wb["x"]) * wscale)),
+                    max(0, round((ef["y"] - wb["y"]) * wscale)),
+                    min(im.width, round((ef["x"] + ef["w"] - wb["x"]) * wscale)),
+                    min(im.height, round((ef["y"] + ef["h"] - wb["y"]) * wscale)),
+                )
+            else:
+                cx = round((hx + 6.0 - wb["x"]) * wscale)
+                bottom = round((f["y"] - wb["y"] - 24) * wscale)
+                half_w = round(70 * wscale)
+                top = max(0, bottom - round(85 * wscale))
+                box = (max(0, cx - half_w), top, min(im.width, cx + half_w), max(top + 1, min(im.height, bottom)))
+            return im, box
+
+        def mean_diff(im_a, im_b, box):
+            pa = pixels(im_a.crop(box))
+            pb = pixels(im_b.crop(box))
+            n = min(len(pa), len(pb))
+            if n == 0:
+                return 0.0
+            return sum(abs(a[0] - b[0]) + abs(a[1] - b[1]) + abs(a[2] - b[2]) for a, b in zip(pa[:n], pb[:n])) / (3 * n)
+
         try:
-            n = wait_for(lambda: (n := made()) >= 100 and n, "100 preview frames", 60)
-        except Fail:
-            raise Fail(f"only {made()} preview frames after 60 s")
-        return f"{n} preview frames made"
+            # Pause briefly so baseline vs hovered comparison measures the tooltip,
+            # not moving video frames behind it, then resume in finally.
+            was_playing = app.playing()
+            if was_playing:
+                app.key("space")
+                app.wait("Play", button=True, timeout=5)
+            # Park pointer away from the seek bar for the unhovered baseline.
+            move_screen(wb["x"] + wb["width"] * 0.5, wb["y"] + wb["height"] * 0.3)
+            time.sleep(0.2)
+            base_im = Image.open(app.shot("seek-preview-baseline")).convert("RGB")
+
+            im1, box1 = sample_preview_at(0.35, "seek-preview-35")
+            im2, box2 = sample_preview_at(0.70, "seek-preview-70")
+            px1 = pixels(im1.crop(box1))
+            sat1 = sum(max(p) - min(p) > 60 and max(p) > 80 for p in px1) / max(1, len(px1))
+            diff1 = mean_diff(base_im, im1, box1)
+            diff2 = mean_diff(base_im, im2, box2)
+            ensure(sat1 > 0.05, f"seek preview box looks blank/dark ({sat1:.0%} colourful pixels)")
+            ensure(diff1 > 6.0 and diff2 > 6.0, f"seek preview did not visibly render over video (diff={diff1:.1f}, {diff2:.1f})")
+        finally:
+            try:
+                move_screen(wb["x"] + wb["width"] * 0.5, wb["y"] + wb["height"] * 0.3)
+            except RuntimeError:
+                pass
+            if 'was_playing' in locals() and was_playing and not app.playing():
+                app.key("space")
+                app.wait("Pause", button=True, timeout=5)
+
+        scrub = ctx.cache_dir() / "scrub"
+        disk_jpgs = len(list(scrub.rglob("*.jpg"))) if scrub.exists() else 0
+        ensure(disk_jpgs == 0, f"expected 0 preview .jpg files on disk, found {disk_jpgs}")
+        return f"Seek previews rendered at 35%/70% ({sat1:.0%} colourful, diff={diff1:.1f}/{diff2:.1f}, 0 .jpg files on disk)"
 
     ctx.check("seek previews are made", previews, app=app)
 

@@ -107,7 +107,7 @@ fn filter_on() -> Filter {
 }
 
 fn apply(vlc: &Vlc, fx: &Effects) {
-    vlc.set_video_filters(&fx.video_chain());
+    vlc.set_video_filters(&video_chain(fx));
 }
 
 #[test]
@@ -291,7 +291,7 @@ fn vlc_it_pitch_filter_shifts_an_octave() {
     let mut pitch = filter_on();
     pitch.values.insert("pitch-shift".into(), 12.0);
     assert!(fx.set_filter("pitch", pitch));
-    let (l, _) = record(&left_tone(), |vlc| vlc.set_audio_filters(&fx.audio_chain(), &fx.audio_params(), true));
+    let (l, _) = record(&left_tone(), |vlc| vlc.set_audio_filters(&audio_chain(&fx), &fx.audio_params(), true));
     let shifted = frequency(&l, 48_000.0);
     assert!((shifted - 880.0).abs() < 30.0, "+12 semitones gave {shifted} Hz");
 }

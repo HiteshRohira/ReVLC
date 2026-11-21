@@ -12,6 +12,9 @@
 set -euo pipefail
 
 VLC_VERSION="${VLC_VERSION:-3.0.24}"
+# Bump when the pruned plugin set changes so existing src-tauri/vlc trees get
+# re-pruned and their plugins.dat regenerated without re-downloading VLC.
+PRUNE_VERSION="2"
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 DEST="$ROOT/src-tauri/vlc"
 
@@ -20,6 +23,46 @@ if [[ "$(uname -s)" == Linux ]]; then
   echo "  sudo apt install libvlc5 libvlccore9 vlc-plugin-base vlc-plugin-video-output"
   exit 0
 fi
+
+# Plugins ReVLC never uses: VLC's own UIs/controls, stream-out/muxers/VOD
+# servers, pure video/audio encoders (ReVLC only decodes; PNG/JPEG stay for
+# snapshots), audio visualisers, video wall splitters, and filters not exposed
+# by effects.rs. All playback decoders/demuxers, effects.rs filters, subtitles/
+# teletext, discs, capture, network/UPnP/SAP/Bonjour/Lua and snapshots remain.
+PRUNE_NAMES=(
+  # Interfaces, controls, speech
+  macosx osx_notifications qt skins2 ncurses oldrc hotkeys gestures motion
+  netsync nsspeechsynthesizer win_msg ntservice
+  # Pure encoders (keep png & jpeg for snapshots; keep schroedinger for Dirac decode)
+  x264 x26410b x265 twolame t140 edummy
+  # Stream-out helpers, VOD server, Chromecast, recording/exporting
+  vod_rtsp demux_chromecast record export demuxdump
+  # Visualisers, video splitters, remote OSD, addons/scrobbling/fingerprinting
+  goom visual projectm glspectrum wall clone panoramix remoteosd
+  addonsfsstorage addonsvorepository audioscrobbler fingerprinter
+  blendbench flaschen yuv dynamicoverlay rss mosaic
+  audiobargraph_v audiobargraph_a scene puzzle magnify erase alphamask
+  bluescreen ball oldmovie vhs freeze colorthres extract motiondetect
+  edgedetection karaoke param_eq stats
+  file_logger syslog
+)
+
+prune_plugins() {
+  local ext="$1"
+  local dir="$DEST/plugins"
+  # Windows lays plugins out in category subdirectories; macOS keeps them flat.
+  rm -rf "$dir/gui" "$dir/stream_out" "$dir/access_output" "$dir/mux" \
+    "$dir/visualization" "$dir/video_splitter"
+  find "$dir" -type f \( \
+    -name "libstream_out_*_plugin.$ext" \
+    -o -name "libaccess_output_*_plugin.$ext" \
+    -o -name "libmux_*_plugin.$ext" \
+  \) -delete
+  local name
+  for name in "${PRUNE_NAMES[@]}"; do
+    find "$dir" -type f -name "lib${name}_plugin.$ext" -delete
+  done
+}
 
 # A plugin cache makes libVLC start faster: without one it opens every
 # plugin on each launch. VLC.app's own cache lists the plugins we drop, so
@@ -43,11 +86,26 @@ vlc.libvlc_release(ctypes.c_void_p(inst))
 }
 
 if [[ $# -eq 0 && "$(cat "$DEST/VERSION" 2>/dev/null)" == "$VLC_VERSION" ]]; then
-  if [[ "$(uname -s)" == Darwin && ! -f "$DEST/plugins/plugins.dat" ]]; then
-    make_plugin_cache_macos
+  if [[ "$(cat "$DEST/PRUNE_VERSION" 2>/dev/null)" != "$PRUNE_VERSION" ]]; then
+    case "$(uname -s)" in
+      MINGW* | MSYS* | CYGWIN*)
+        # Windows needs vlc-cache-gen.exe from the zip to rebuild plugins.dat.
+        ;;
+      *)
+        prune_plugins dylib
+        make_plugin_cache_macos
+        echo "$PRUNE_VERSION" >"$DEST/PRUNE_VERSION"
+        du -sh "$DEST"
+        exit 0
+        ;;
+    esac
+  else
+    if [[ "$(uname -s)" == Darwin && ! -f "$DEST/plugins/plugins.dat" ]]; then
+      make_plugin_cache_macos
+    fi
+    echo "libVLC $VLC_VERSION is already in $DEST"
+    exit 0
   fi
-  echo "libVLC $VLC_VERSION is already in $DEST"
-  exit 0
 fi
 
 prepare_windows() {
@@ -67,8 +125,7 @@ prepare_windows() {
   mkdir -p "$DEST"
   cp "$src/libvlc.dll" "$src/libvlccore.dll" "$DEST/"
   cp -r "$src/plugins" "$DEST/plugins"
-  # VLC's own interfaces aren't needed; ReVLC is the interface.
-  rm -rf "$DEST/plugins/gui"
+  prune_plugins dll
   # Lua scripts (sites like Vimeo, playlist parsers) and HRTF data.
   cp -r "$src/lua" "$src/hrtfs" "$DEST/"
   # A plugin cache makes libVLC start faster. libVLC checks each plugin's
@@ -113,9 +170,8 @@ prepare_macos() {
   mkdir -p "$DEST/share"
   # Resolve symlinks (libvlc.dylib -> libvlc.5.dylib) so bundling copies real files.
   rsync -aL "$src/lib/" "$DEST/lib/"
-  # VLC's own Cocoa interface isn't needed; ReVLC is the interface. The
-  # notifications plugin needs Growl, which VLC doesn't ship, so it never loads.
-  rsync -a --exclude 'libmacosx_plugin.dylib' --exclude 'libosx_notifications_plugin.dylib' "$src/plugins/" "$DEST/plugins/"
+  rsync -a "$src/plugins/" "$DEST/plugins/"
+  prune_plugins dylib
   # Lua scripts (sites like Vimeo, playlist parsers) and HRTF data.
   rsync -a "$src/share/lua" "$src/share/hrtfs" "$DEST/share/"
   make_plugin_cache_macos
@@ -127,5 +183,6 @@ case "$(uname -s)" in
 esac
 
 echo "$VLC_VERSION" >"$DEST/VERSION"
+echo "$PRUNE_VERSION" >"$DEST/PRUNE_VERSION"
 
 du -sh "$DEST"

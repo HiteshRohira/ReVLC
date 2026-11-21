@@ -95,17 +95,10 @@ jobs:
         if: runner.os == 'Linux'
         run: npx tsc -p tsconfig.tests.json
 
-      # The Rust build embeds the built UI and bundles src-tauri/vlc and, on
-      # macOS and Windows, the FFmpeg sidecar. Empty stand-ins do: nothing
-      # here runs them.
+      # The Rust build embeds the built UI and bundles src-tauri/vlc. An
+      # empty directory does: nothing here runs libVLC.
       - name: Build the UI
-        run: |
-          npm run build && mkdir -p src-tauri/vlc src-tauri/binaries
-          triple="$(rustc -vV | sed -n 's/^host: //p')"
-          case "$RUNNER_OS" in
-            Windows) touch "src-tauri/binaries/ffmpeg-$triple.exe" ;;
-            macOS) touch "src-tauri/binaries/ffmpeg-$triple" ;;
-          esac
+        run: npm run build && mkdir -p src-tauri/vlc
 
       - name: Clippy
         working-directory: src-tauri

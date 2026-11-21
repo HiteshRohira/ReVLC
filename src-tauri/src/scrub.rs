@@ -1,7 +1,9 @@
 //! Seek bar previews: small frames every few seconds through the whole
 //! video, made in the background while it plays and cached as JPEGs.
 
+#[cfg(test)]
 use std::collections::hash_map::DefaultHasher;
+#[cfg(test)]
 use std::hash::{Hash, Hasher};
 use std::path::Path;
 use std::sync::Mutex;
@@ -11,24 +13,37 @@ use std::time::{Duration, SystemTime};
 /// Width of a preview frame, in pixels (twice what's shown, for sharp screens).
 pub const WIDTH: u32 = 320;
 
+/// Maximum preview slots per video: caps both queue memory and the in-memory
+/// LRU cache so even ultra-long or malformed-duration videos never OOM or
+/// trigger broken cache evictions.
+pub const MAX_SLOTS: i64 = 2000;
+
 /// Changes when frames made by earlier versions shouldn't be reused. (5:
 /// libVLC could cache frames of a file's default video stream under another
 /// stream's name.)
+#[cfg(test)]
 const CACHE_VERSION: u8 = 5;
 
 /// How long unused frames stay in the cache.
 const KEEP: Duration = Duration::from_secs(7 * 24 * 3600);
 
 /// How far apart the frames are: close enough for the zoomed-in strip, far
-/// enough that a long video is done in a few minutes.
+/// enough that a long video is done quickly and never exceeds [`MAX_SLOTS`].
 pub fn step(length_ms: i64) -> i64 {
-    if length_ms <= 300_000 {
+    let base: i64 = if length_ms <= 300_000 {
         2000
     } else if length_ms <= 1_800_000 {
         5000
     } else {
         10_000
+    };
+    if length_ms <= base.saturating_mul(MAX_SLOTS) {
+        return base;
     }
+    // Scale up in whole seconds so `(length_ms - 1) / step + 1 <= MAX_SLOTS`.
+    let raw = (length_ms - 1) / MAX_SLOTS + 1;
+    let secs = (raw + 999) / 1000;
+    secs.saturating_mul(1000).max(base)
 }
 
 /// Frame indexes coarse to fine: every 64th, then the halves in between,
@@ -54,6 +69,7 @@ pub fn order(count: usize) -> Vec<usize> {
 /// `uri`, one every `step` ms: frame `k` is `{prefix}{k}.jpg`. `signature`
 /// (the file's size and modification time) keeps a replaced file from
 /// reusing the previews of the one before.
+#[cfg(test)]
 pub fn prefix(dir: &Path, uri: &str, length_ms: i64, signature: (u64, u128), track: usize, step: i64) -> String {
     let mut h = DefaultHasher::new();
     (CACHE_VERSION, uri, length_ms, signature, track).hash(&mut h);
@@ -104,16 +120,24 @@ impl Plan {
     }
 }
 
-/// Whether two frame files show the same picture: neighbouring frames taken
+/// Whether two JPEG frames show the same picture: neighbouring frames taken
 /// from the same keyframe.
-pub fn same_picture(a: &Path, b: &Path) -> bool {
-    let (Ok(a), Ok(b)) = (image::open(a), image::open(b)) else { return false };
+pub fn same_picture_bytes(a: &[u8], b: &[u8]) -> bool {
+    let (Ok(a), Ok(b)) = (image::load_from_memory(a), image::load_from_memory(b)) else { return false };
     let (a, b) = (a.to_rgb8(), b.to_rgb8());
     if a.dimensions() != b.dimensions() {
         return false;
     }
     let sum: u64 = a.as_raw().iter().zip(b.as_raw()).map(|(x, y)| x.abs_diff(*y) as u64).sum();
     sum < a.as_raw().len() as u64 * 2
+}
+
+/// Whether two frame files show the same picture: neighbouring frames taken
+/// from the same keyframe.
+#[cfg(test)]
+pub fn same_picture(a: &Path, b: &Path) -> bool {
+    let (Ok(a), Ok(b)) = (std::fs::read(a), std::fs::read(b)) else { return false };
+    same_picture_bytes(&a, &b)
 }
 
 /// Deletes frames not touched for a week.
@@ -179,6 +203,10 @@ mod tests {
         assert_eq!(step(120_000), 2000);
         assert_eq!(step(1_400_000), 5000);
         assert_eq!(step(7_000_000), 10_000);
+        // Ultra-long / malformed durations stay bounded by MAX_SLOTS.
+        let ten_hours = 10 * 3600 * 1000;
+        let s = step(ten_hours);
+        assert!((ten_hours - 1) / s < MAX_SLOTS);
     }
 
     #[test]

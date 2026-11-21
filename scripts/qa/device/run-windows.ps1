@@ -60,9 +60,12 @@ if ($Installer) {
     if (-not $Exe) { throw "No ReVLC executable in $dest after installing" }
 }
 $Exe = (Resolve-Path $Exe).Path
-$ffmpeg = Join-Path (Split-Path $Exe) "ffmpeg.exe"
-if (-not (Test-Path $ffmpeg)) { $ffmpeg = (Get-Command ffmpeg -ErrorAction SilentlyContinue).Source }
-if (-not $ffmpeg) { throw "No ffmpeg.exe next to $Exe or on PATH (it makes the test media)" }
+$ffmpeg = $null
+foreach ($candidate in @($env:REVLC_TEST_FFMPEG, $env:QA_FFMPEG, (Join-Path (Split-Path $Exe) "ffmpeg.exe"))) {
+    if ($candidate -and (Test-Path $candidate -PathType Leaf)) { $ffmpeg = (Resolve-Path $candidate).Path; break }
+}
+if (-not $ffmpeg) { $ffmpeg = (Get-Command ffmpeg -ErrorAction SilentlyContinue).Source }
+if (-not $ffmpeg) { throw "No ffmpeg.exe found via REVLC_TEST_FFMPEG/QA_FFMPEG, next to $Exe, or on PATH (it makes the test media)" }
 (Get-Item $Exe).VersionInfo.ProductVersion | Set-Content (Join-Path $run "version.txt")
 Write-Host "Testing $Exe ($((Get-Content (Join-Path $run 'version.txt'))))"
 

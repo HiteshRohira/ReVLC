@@ -77,7 +77,15 @@ cleanup() {
 }
 trap cleanup EXIT
 
-args=(--out "$run" --ffmpeg "$run/ReVLC.app/Contents/MacOS/ffmpeg" --bundle "$run/ReVLC.app")
+ffmpeg="${REVLC_TEST_FFMPEG:-}"
+[[ -f "$ffmpeg" && -x "$ffmpeg" ]] || ffmpeg="$run/ReVLC.app/Contents/MacOS/ffmpeg"
+[[ -f "$ffmpeg" && -x "$ffmpeg" ]] || ffmpeg="$(PATH="/opt/homebrew/bin:/usr/local/bin:$PATH" command -v ffmpeg || true)"
+[[ -f "$ffmpeg" && -x "$ffmpeg" ]] && "$ffmpeg" -hide_banner -version >/dev/null 2>&1 || {
+  echo "No working ffmpeg binary found (set REVLC_TEST_FFMPEG or install ffmpeg on PATH to make test media)" >&2
+  exit 1
+}
+
+args=(--out "$run" --ffmpeg "$ffmpeg" --bundle "$run/ReVLC.app")
 [[ -n "$only" ]] && args+=(--only "$only")
 [[ -n "$quick" ]] && args+=(--quick)
 [[ -n "$dmg" ]] && args+=(--installer "$dmg")

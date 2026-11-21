@@ -475,7 +475,15 @@ class Player {
       listen<Bookmark[]>("player://bookmarks", (e) => (this.bookmarks = e.payload)),
       listen<{ run: number; k: number }>("player://scrub", (e) => {
         const s = this.scrub;
-        if (!s || s.run !== e.payload.run) return;
+        if (!s || s.run !== e.payload.run) {
+          // Buffer frames arriving while `scrub_prepare`'s invoke promise is still in flight.
+          if (this.#scrubPreparing) {
+            const list = this.#scrubPending.get(e.payload.run) ?? [];
+            list.push(e.payload.k);
+            this.#scrubPending.set(e.payload.run, list);
+          }
+          return;
+        }
         // A frame made again (it repeated its neighbour) keeps its file name.
         if (s.ready.has(e.payload.k)) this.scrubVersion++;
         else this.scrub = { ...s, ready: new Set(s.ready).add(e.payload.k) };
@@ -509,19 +517,42 @@ class Player {
     await Promise.all([this.loadHistory(), this.loadLibrary()]);
   }
 
+  #scrubEpoch = 0;
+  #scrubPreparing = false;
+  #scrubPending = new Map<number, number[]>();
+
   /** Starts making seek bar preview frames for what's playing (none when off or not a local video). */
   async prepareScrub() {
+    const epoch = ++this.#scrubEpoch;
     this.scrub = null;
+    this.#scrubPreparing = true;
+    this.#scrubPending.clear();
     try {
       const info = await invoke<{ run: number; prefix: string; step: number; ready: number[] } | null>("scrub_prepare");
-      this.scrub = info && { ...info, ready: new Set(info.ready) };
+      if (epoch !== this.#scrubEpoch) return;
+      this.#scrubPreparing = false;
+      if (!info) {
+        this.#scrubPending.clear();
+        return;
+      }
+      const ready = new Set(info.ready);
+      for (const k of this.#scrubPending.get(info.run) ?? []) ready.add(k);
+      this.#scrubPending.clear();
+      this.scrub = { ...info, ready };
     } catch {
+      if (epoch === this.#scrubEpoch) {
+        this.#scrubPreparing = false;
+        this.#scrubPending.clear();
+      }
       // No previews; the seek bar works without them.
     }
   }
 
   /** Stops making preview frames and forgets them, until the next prepareScrub. */
   cancelScrub() {
+    this.#scrubEpoch++;
+    this.#scrubPreparing = false;
+    this.#scrubPending.clear();
     this.scrub = null;
     invoke("scrub_cancel").catch(() => {});
   }
@@ -892,9 +923,14 @@ export function trackName(name: string) {
   return name === "Disable" ? "Off" : name;
 }
 
-/** URL for a thumbnail file in the app cache. */
+/** URL for a thumbnail file in the app cache, or a custom-protocol preview URL. */
 export function thumbUrl(path: string | null, version = 0) {
-  return path ? `${convertFileSrc(path)}?v=${version}` : null;
+  if (!path) return null;
+  if (path.startsWith("scrub://") || path.startsWith("http://") || path.startsWith("https://")) {
+    const sep = path.includes("?") ? "&" : "?";
+    return `${path}${sep}v=${version}`;
+  }
+  return `${convertFileSrc(path)}?v=${version}`;
 }
 
 /** True for placeholder chapter names like "Chapter 01". */

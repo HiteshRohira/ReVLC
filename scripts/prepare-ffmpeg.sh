@@ -1,14 +1,12 @@
 #!/usr/bin/env bash
-# Puts FFmpeg in src-tauri/binaries as the app's sidecar: the build places it
-# next to ReVLC (Contents/MacOS on macOS) and signs it with the app. It makes
-# the seek bar previews, decoding a video's keyframes on the GPU
-# (VideoToolbox on macOS, D3D11VA on Windows). On macOS, Martin Riedl's
-# static builds; on Windows (Git Bash), Gyan Doshi's "essentials" build.
-# All are pinned to a version and checksum.
+# Optional developer/test helper: downloads a pinned FFmpeg binary into
+# src-tauri/binaries for generating synthetic test media (`vlc_it` /
+# `keyframes_it`). ReVLC no longer bundles FFmpeg as an app sidecar — seek
+# bar previews use native OS hardware decoders (VideoToolbox on macOS,
+# Media Foundation + D3D11VA on Windows) with an optional fallback to any
+# system `ffmpeg` on PATH or libVLC.
 #
-# Does nothing if the sidecar is already $FFMPEG_VERSION. When the version
-# changes, update the URLs and checksums below and the version and source
-# links in licenses/README.md.
+# Does nothing if src-tauri/binaries already holds $FFMPEG_VERSION.
 set -euo pipefail
 
 FFMPEG_VERSION="9.0.2"
