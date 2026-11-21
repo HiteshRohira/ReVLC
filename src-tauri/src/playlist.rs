@@ -18,7 +18,14 @@ pub struct Item {
 impl Item {
     pub fn new(uri: impl Into<String>) -> Self {
         let uri = uri.into();
-        let title = if uri.contains("://") { title_for(&uri) } else { crate::meta::display_title(std::path::Path::new(&uri)) };
+        // A local file is titled by its file name, the same in every window; only
+        // streams take a title from what libVLC reports.
+        let title = if uri.contains("://") {
+            title_for(&uri)
+        } else {
+            let path = std::path::Path::new(&uri);
+            path.file_name().map_or_else(|| uri.clone(), |f| f.to_string_lossy().into_owned())
+        };
         Self { title, uri, options: Vec::new(), trusted: false }
     }
 }
@@ -337,5 +344,11 @@ mod tests {
         assert_eq!(p.current, Some(1));
         assert!(p.remove(1));
         assert_eq!(p.current, None);
+    }
+
+    #[test]
+    fn a_local_file_is_titled_by_its_file_name() {
+        let name = "The.Odyssey.2026.1080p.BluRay.x264.AAC5.1-[YTS.GG - YTS.BZ].mp4";
+        assert_eq!(Item::new(format!("/m/{name}")).title, name);
     }
 }
