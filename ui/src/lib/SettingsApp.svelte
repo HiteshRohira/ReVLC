@@ -207,11 +207,6 @@
             onchange={(val) => settings.set({ stopAfterEach: val === "stop" })} />
         </Row>
         <Row label="Pause when minimised">{@render toggle("pauseWhenMinimized")}</Row>
-        {#if isMac}
-          <Row label="Open each video in a new window" help="When a window is already playing a video, opening another one starts it in a new window instead of replacing it.">
-            {@render toggle("openInNewWindow")}
-          </Row>
-        {/if}
         <Row label="Mouse wheel over the video" help="Scrolling up turns the volume up or jumps forward 5 seconds.">
           {@render choice("wheel", [["volume", "Changes the volume"], ["seek", "Seeks"], ["none", "Does nothing"]])}
         </Row>
@@ -235,6 +230,14 @@
           {@render toggle("analytics")}
         </Row>
       </div>
+      {#if isMac}
+        <h3>Windows</h3>
+        <div class="group">
+          <Row label="Open each video in a new window" help="When a window is already playing a video, opening another one starts it in a new window instead of replacing it.">
+            {@render toggle("openInNewWindow")}
+          </Row>
+        </div>
+      {/if}
     {:else if tab === "video"}
       <h3>Display</h3>
       <div class="group">
