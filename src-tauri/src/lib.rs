@@ -401,6 +401,7 @@ struct Snapshot {
 
 impl Session {
     /// Whether something is playing, paused or loading in this window.
+    #[cfg(target_os = "macos")]
     fn is_busy(&self) -> bool {
         matches!(self.vlc.state(), State::Playing | State::Paused | State::Opening | State::Buffering)
     }
