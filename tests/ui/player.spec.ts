@@ -405,3 +405,24 @@ test("the gear menu's Deinterlace toggle follows Settings until it's used", asyn
   await settingsWith({ deinterlace: 0, deinterlaceMode: "blend" });
   await expect(toggle).toHaveAttribute("aria-checked", "false");
 });
+
+test("switching video tracks doesn't flash the audio screen", async ({ page }) => {
+  const note = page.locator(".player .audio");
+  await page.evaluate(() =>
+    window.__mock.emit("player://tracks", {
+      audio: [], audioCurrent: -1, subtitles: [], subtitleCurrent: -1, teletext: false, teletextOn: false,
+      video: [{ id: -1, name: "Disable" }, { id: 0, name: "Track 1" }, { id: 1, name: "Track 2" }], videoCurrent: 0,
+    }),
+  );
+  await page.getByRole("button", { name: "Settings" }).click();
+  await page.getByRole("menu", { name: "Settings" }).getByRole("button", { name: /^Video/ }).click();
+  await page.getByRole("menuitemradio", { name: "Track 2" }).click();
+  expect(await lastCall(page, "set_video_track")).toEqual({ id: 1 });
+  // libVLC drops its video output while it switches tracks.
+  await page.evaluate(() => window.__mock.setState({ hasVideo: false }));
+  await expect(note).toHaveCount(0);
+  await page.evaluate(() => window.__mock.setState({ hasVideo: true }));
+  // A video output that doesn't come back shows the audio screen after all.
+  await page.evaluate(() => window.__mock.setState({ hasVideo: false }));
+  await expect(note).toBeVisible({ timeout: 4000 });
+});

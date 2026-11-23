@@ -415,6 +415,12 @@ class Player {
     sleepAfterItem: false,
   });
   tracks = $state<Tracks>({ audio: [], audioCurrent: -1, video: [], videoCurrent: -1, subtitles: [], subtitleCurrent: -1, teletext: false, teletextOn: false });
+  /** Set for a moment after picking another video track: libVLC drops its
+   *  video output while it switches, which shouldn't flash the audio screen. */
+  switchingVideo = $state(false);
+  #switchTimer?: ReturnType<typeof setTimeout>;
+  /** Whether to show the picture rather than the audio screen. */
+  showsVideo = $derived(this.state.hasVideo || (this.switchingVideo && this.state.state !== "stopped"));
   effects = $state<Effects>(structuredClone(DEFAULT_EFFECTS));
   /** `--fullscreen` was given on the command line. */
   startFullscreen = $state(false);
@@ -737,7 +743,12 @@ class Player {
   }
 
   setAudioTrack = (id: number) => this.#call("set_audio_track", { id });
-  setVideoTrack = (id: number) => this.#call("set_video_track", { id });
+  setVideoTrack = (id: number) => {
+    clearTimeout(this.#switchTimer);
+    this.switchingVideo = id >= 0 && this.showsVideo;
+    if (this.switchingVideo) this.#switchTimer = setTimeout(() => (this.switchingVideo = false), 2000);
+    return this.#call("set_video_track", { id });
+  };
   setSubtitleTrack = (id: number) => this.#call("set_subtitle_track", { id });
   addSubtitle = (uri: string) => this.#call("add_subtitle", { uri });
 

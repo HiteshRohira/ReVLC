@@ -303,7 +303,7 @@
 <svelte:window onkeydown={onKeyDown} onkeydowncapture={(e) => (moving = FOCUS_KEYS.has(e.key))} onpointerdowncapture={() => (moving = false)} onfocusin={onFocusIn} onpointermove={wake} onpointerdown={wake} onwheel={onWheel} />
 <svelte:document onvisibilitychange={onVisibility} />
 
-<div class="app" class:video={showPlayer && player.state.hasVideo} class:hide-cursor={controlsHidden} class:fullscreen={ui.fullscreen}>
+<div class="app" class:video={showPlayer && player.showsVideo} class:hide-cursor={controlsHidden} class:fullscreen={ui.fullscreen}>
   {#if !theme.onboarded}
     <Onboarding />
   {:else if showPlayer}
