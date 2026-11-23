@@ -1,7 +1,7 @@
 /**
  * The menus the title strip shows on Windows, laid out like VLC's. Ids are
  * action ids (see actions.ts) or app items the backend runs ("quit",
- * "checkUpdates", "github"); "-" is a separator. Keep the player menus in
+ * "checkUpdates", "github", "licenses", "about"); "-" is a separator. Keep the player menus in
  * step with src-tauri/src/menu.rs, which builds the macOS menu bar.
  */
 export interface MenuDef {
@@ -112,6 +112,9 @@ export const MENUS: MenuDef[] = [
       SEP,
       ["checkUpdates", "Check for Updates…"],
       ["github", "ReVLC on GitHub"],
+      SEP,
+      ["licenses", "Third-Party Licences"],
+      ["about", "About ReVLC"],
     ],
   },
 ];

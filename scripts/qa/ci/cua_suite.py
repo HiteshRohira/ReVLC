@@ -1081,16 +1081,138 @@ def playback(ctx):
         if ctx.no_video:
             # ReVLC only makes previews for a video it shows.
             raise Skip("this runner can't show video")
-        # ReVLC makes the seek bar's preview frames as files in its cache
-        # once a video plays: 150 for this 5-minute clip. A failed FFmpeg
-        # pass is caught by the log check after the scenario.
-        scrub = ctx.cache_dir() / "scrub"
-        made = lambda: len(list(scrub.rglob("*.jpg"))) if scrub.exists() else 0
+        # Stage 3 stores seek previews in a bounded in-memory LRU cache served
+        # over scrub:// (zero .jpg files on disk). Because the tooltip sits
+        # inside `role="slider"` (whose descendants are hidden from native AX/
+        # UIA/AT-SPI per WAI-ARIA), verify visually against an unhovered paused
+        # baseline at two spread-out positions on the Seek slider.
+        seek_els = wait_for(lambda: [e for e in app.find("Seek") if (e.get("frame") or {}).get("w")], "the Seek slider", 10)
+        f = seek_els[0]["frame"]
+        st = cua("get_window_state", {"pid": app.pid, "window_id": app.window_id, "include_accessibility_tree": False})
+        wb = st.get("window_bounds") or app.bounds() or app.frame
+        wscale = (st.get("screenshot_width") or wb["width"]) / wb["width"]
+        # move_cursor(scope="desktop") takes native display backing pixels, while
+        # get_window_state downscales window screenshots to max_image_dimension.
+        dscale = float(cua("get_screen_size", {}).get("scale_factor") or 1.0) if MAC else 1.0
+
+        def move_screen(sx, sy):
+            args = {"scope": "desktop", "x": round(sx * dscale), "y": round(sy * dscale)}
+            if MAC:
+                args["delivery_mode"] = "foreground"
+            cua("move_cursor", args)
+            if WIN:
+                # SetCursorPos alone doesn't always emit WM_MOUSEMOVE to WebView2;
+                # a 1px relative MOUSEEVENTF_MOVE delivers a real pointermove event.
+                try:
+                    import ctypes
+                    ctypes.windll.user32.mouse_event(0x0001, 1, 0, 0, 0)
+                except Exception:
+                    pass
+
+        def under_cursor():
+            # Windows only: which top-level window the real cursor is over, as
+            # (pid, title). The hover goes to whatever window is on top there,
+            # so a terminal or another app covering ReVLC eats it.
+            import ctypes
+            from ctypes import wintypes
+            u = ctypes.windll.user32
+            u.WindowFromPoint.argtypes = [wintypes.POINT]
+            u.WindowFromPoint.restype = wintypes.HWND
+            u.GetAncestor.argtypes = [wintypes.HWND, wintypes.UINT]
+            u.GetAncestor.restype = wintypes.HWND
+            pt = wintypes.POINT()
+            u.GetCursorPos(ctypes.byref(pt))
+            root = u.GetAncestor(u.WindowFromPoint(pt), 2)  # GA_ROOT
+            pid = wintypes.DWORD()
+            u.GetWindowThreadProcessId(root, ctypes.byref(pid))
+            buf = ctypes.create_unicode_buffer(256)
+            u.GetWindowTextW(root, buf, 256)
+            return pid.value, buf.value
+
+        def ensure_on_top():
+            # Put ReVLC in front so the desktop cursor hovers it, not whatever
+            # window happens to cover the Seek bar (the runner's console, an
+            # editor). Without this the check passed or failed by window order.
+            if not WIN:
+                return
+            for _ in range(3):
+                pid, title = under_cursor()
+                if pid == app.pid:
+                    return
+                cua("bring_to_front", {"pid": app.pid, "window_id": app.window_id})
+                time.sleep(0.4)
+            pid, title = under_cursor()
+            ensure(pid == app.pid, f"another window covers the Seek bar: {title!r} (pid {pid})")
+
+        def mean_diff(im_a, im_b, box):
+            pa = pixels(im_a.crop(box))
+            pb = pixels(im_b.crop(box))
+            n = min(len(pa), len(pb))
+            if n == 0:
+                return 0.0
+            return sum(abs(a[0] - b[0]) + abs(a[1] - b[1]) + abs(a[2] - b[2]) for a, b in zip(pa[:n], pb[:n])) / (3 * n)
+
+        def tooltip_box(hx, im):
+            # .tip.framed sits 24px above .seek, holding a 168×95 preview image above the timestamp row.
+            cx = round((hx - wb["x"]) * wscale)
+            bottom = round((f["y"] - wb["y"] - 36) * wscale)
+            half_w = round(70 * wscale)
+            top = max(0, bottom - round(84 * wscale))
+            return (max(0, cx - half_w), top, min(im.width, cx + half_w), max(top + 1, min(im.height, bottom)))
+
+        def wait_preview_at(frac, shot_name, base_im):
+            hx = f["x"] + f["w"] * frac
+            hy = f["y"] + f["h"] / 2
+            move_screen(hx, hy)
+            ensure_on_top()
+            move_screen(hx + 4.0, hy)
+            nudge = [0]
+
+            def ready():
+                nudge[0] += 1
+                if nudge[0] > 1:
+                    move_screen(hx + 2.0 + (nudge[0] % 3) * 3.0, hy)
+                im = Image.open(app.shot(shot_name)).convert("RGB")
+                box = tooltip_box(hx + 4.0, im)
+                px = pixels(im.crop(box))
+                sat = sum(max(p) - min(p) > 60 and max(p) > 80 for p in px) / max(1, len(px))
+                diff = mean_diff(base_im, im, box)
+                # The "Making preview" placeholder is near-black monochrome (sat ~ 0),
+                # whereas a decoded testsrc2 preview frame is colourful AND differs from
+                # the unhovered paused video behind it.
+                if diff > 10.0 and sat > 0.08:
+                    return (sat, diff)
+                return None
+
+            return wait_for(ready, f"visible seek preview tooltip at {int(frac * 100)}%", 30, interval=0.6)
+
+        was_playing = app.playing()
         try:
-            n = wait_for(lambda: (n := made()) >= 100 and n, "100 preview frames", 60)
-        except Fail:
-            raise Fail(f"only {made()} preview frames after 60 s")
-        return f"{n} preview frames made"
+            # Pause briefly so baseline vs hovered comparison measures the tooltip,
+            # not moving video frames behind it, then resume in finally.
+            if was_playing:
+                app.key("space")
+                app.wait("Play", button=True, timeout=5)
+            # Park pointer away from the seek bar for the unhovered baseline.
+            move_screen(wb["x"] + wb["width"] * 0.5, wb["y"] + wb["height"] * 0.3)
+            time.sleep(0.3)
+            base_im = Image.open(app.shot("seek-preview-baseline")).convert("RGB")
+
+            sat1, diff1 = wait_preview_at(0.35, "seek-preview-35", base_im)
+            sat2, diff2 = wait_preview_at(0.70, "seek-preview-70", base_im)
+        finally:
+            try:
+                move_screen(wb["x"] + wb["width"] * 0.5, wb["y"] + wb["height"] * 0.3)
+            except RuntimeError:
+                pass
+            if was_playing and not app.playing():
+                app.key("space")
+                app.wait("Pause", button=True, timeout=5)
+
+        scrub = ctx.cache_dir() / "scrub"
+        disk_jpgs = len(list(scrub.rglob("*.jpg"))) if scrub.exists() else 0
+        ensure(disk_jpgs == 0, f"expected 0 preview .jpg files on disk, found {disk_jpgs}")
+        return f"Seek previews rendered at 35%/70% ({sat1:.0%}/{sat2:.0%} colourful, diff={diff1:.1f}/{diff2:.1f}, 0 .jpg files on disk)"
 
     ctx.check("seek previews are made", previews, app=app)
 

@@ -107,7 +107,7 @@ fn filter_on() -> Filter {
 }
 
 fn apply(vlc: &Vlc, fx: &Effects) {
-    vlc.set_video_filters(&fx.video_chain());
+    vlc.set_video_filters(&video_chain(fx));
 }
 
 #[test]
@@ -291,7 +291,7 @@ fn vlc_it_pitch_filter_shifts_an_octave() {
     let mut pitch = filter_on();
     pitch.values.insert("pitch-shift".into(), 12.0);
     assert!(fx.set_filter("pitch", pitch));
-    let (l, _) = record(&left_tone(), |vlc| vlc.set_audio_filters(&fx.audio_chain(), &fx.audio_params(), true));
+    let (l, _) = record(&left_tone(), |vlc| vlc.set_audio_filters(&audio_chain(&fx), &fx.audio_params(), true));
     let shifted = frequency(&l, 48_000.0);
     assert!((shifted - 880.0).abs() < 30.0, "+12 semitones gave {shifted} Hz");
 }
@@ -529,6 +529,27 @@ fn vlc_it_switches_video_tracks() {
         (c[2] > 180.0 && c[0] < 80.0).then_some((px, w, h))
     });
     assert_eq!((w, h), (320, 180), "second track");
+
+    // Paused, the other track's picture shows without playing on.
+    vlc.set_pause(true);
+    wait("paused", 5, || (vlc.state() == State::Paused).then_some(()));
+    let _ = frame(&frames, Duration::from_millis(300));
+    let at = vlc.time();
+    vlc.set_video_track(ids[0]);
+    let (_, w, h) = wait("the first track while paused", 5, || {
+        let f = frames.lock().unwrap().take()?;
+        let px: Vec<[u8; 3]> = (0..f.height)
+            .flat_map(|y| (0..f.width as usize).map(move |x| (y, x)))
+            .map(|(y, x)| {
+                let i = (y * f.stride) as usize + x * 4;
+                [f.pixels[i + 2], f.pixels[i + 1], f.pixels[i]]
+            })
+            .collect();
+        (mean(&px)[0] > 180.0).then_some((px, f.width, f.height))
+    });
+    assert_eq!((w, h), (320, 240), "first track again");
+    assert_eq!(vlc.state(), State::Paused, "still paused");
+    assert!((vlc.time() - at).abs() < 100, "at the same time: {} then {}", at, vlc.time());
     vlc.stop();
 }
 

@@ -1,4 +1,4 @@
-import { test, expect, open, isMacProject, layoutHost } from "./fixtures";
+import { test, expect, open, calls, isMacProject, layoutHost } from "./fixtures";
 
 test("Home lists what to continue watching", async ({ page }) => {
   await open(page, "home");
@@ -48,5 +48,15 @@ test("Windows and Linux show the title-bar menus on Home", async ({ page }, info
   await open(page, "home");
   for (const name of ["Media", "Playback", "Audio", "Video", "Subtitles", "Tools", "Help"]) {
     await expect(page.getByRole("button", { name, exact: true }).first()).toBeVisible();
+  }
+});
+
+test("the Help menu on Windows and Linux has About and the licences", async ({ page }, info) => {
+  test.skip(isMacProject(info.project.name), "macOS has them in the app menu");
+  await open(page, "home");
+  for (const [name, id] of [["About ReVLC", "about"], ["Third-Party Licences", "licenses"]]) {
+    await page.getByRole("button", { name: "Help", exact: true }).first().click();
+    await page.getByRole("menuitem", { name }).click();
+    expect((await calls(page, "app_menu_item")).at(-1)).toEqual({ id });
   }
 });

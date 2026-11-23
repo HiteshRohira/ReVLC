@@ -138,10 +138,11 @@ npm ci
 npm run build:app
 ```
 
-FFmpeg makes the seek bar previews: it decodes a whole video's keyframes in
-one pass, on the GPU through VA-API where it can. Without it ReVLC falls back
-to libVLC, which is several times slower. (The macOS and Windows packages
-bundle FFmpeg, decoding with VideoToolbox and D3D11VA: `scripts/prepare-ffmpeg.sh`.)
+Seek bar previews use native OS hardware decoders on macOS (VideoToolbox) and
+Windows (Media Foundation + D3D11VA) with an in-memory LRU cache — no FFmpeg
+sidecar is bundled. On Linux, ReVLC uses the distribution's `ffmpeg` package
+(decoding keyframes on the GPU through VA-API or NVDEC where available) and
+falls back to libVLC if it isn't installed.
 
 Use Rust stable and Node 22+. The package is written to
 `src-tauri/target/release/bundle/deb/`; no updater signing key is needed.

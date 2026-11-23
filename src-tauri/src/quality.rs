@@ -22,15 +22,18 @@ use std::time::{Duration, Instant};
 
 use serde_json::{Map, Value, json};
 
+use crate::engine::{Engine, EngineEvent, EventKind, State, StreamInfo};
 use crate::telemetry;
-use crate::vlc::{Event, StreamInfo, Vlc, event};
 
 /// A seek that takes longer than this counts as failed.
 const SEEK_TIMEOUT: Duration = Duration::from_secs(60);
 
+pub type EventSink = Box<dyn Fn(&str, Value) + Send + Sync>;
+
 #[derive(Default)]
 pub struct Quality {
     playback: Option<Playback>,
+    sink: Option<EventSink>,
 }
 
 struct Playback {
@@ -77,6 +80,24 @@ pub struct Open<'a> {
 }
 
 impl Quality {
+    #[cfg(test)]
+    pub fn with_sink(sink: EventSink) -> Self {
+        Self { playback: None, sink: Some(sink) }
+    }
+
+    fn emit(&self, playback: &Playback, name: &str, extra: Value) {
+        let mut props = playback.props.clone();
+        props.insert("playback_id".into(), playback.id.clone().into());
+        if let Value::Object(extra) = extra {
+            props.extend(extra);
+        }
+        let payload = Value::Object(props);
+        match &self.sink {
+            Some(sink) => sink(name, payload),
+            None => telemetry::capture(name, payload),
+        }
+    }
+
     /// A new item was opened (or failed to open) as `generation`.
     pub fn opened(&mut self, open: Open, generation: u64, error: Option<&str>) {
         self.close("replaced");
@@ -103,7 +124,7 @@ impl Quality {
             watched_ms: 0,
         };
         match error {
-            Some(_) => playback.capture("playback_failed", json!({ "stage": "open", "elapsed_ms": 0 })),
+            Some(_) => self.emit(&playback, "playback_failed", json!({ "stage": "open", "elapsed_ms": 0 })),
             None => self.playback = Some(playback),
         }
     }
@@ -124,11 +145,11 @@ impl Quality {
     }
 
     /// The user asked to seek to `target` from `from` (ms).
-    pub fn seek_requested(&mut self, vlc: &Vlc, from: i64, target: i64, kind: &'static str) {
+    pub fn seek_requested(&mut self, engine: &dyn Engine, from: i64, target: i64, kind: &'static str) {
         let Some(p) = &mut self.playback else { return };
         // Before the first frame, seeks only move the start; paused, playback
         // doesn't resume until the user says so.
-        if p.first_frame.is_none() || !vlc.seekable() || vlc.state() != crate::vlc::State::Playing {
+        if p.first_frame.is_none() || !engine.seekable() || engine.state() != State::Playing {
             return;
         }
         p.close_stall(Instant::now());
@@ -136,7 +157,7 @@ impl Quality {
             p.superseded += 1;
         }
         p.seeks += 1;
-        let rate = vlc.rate();
+        let rate = engine.rate();
         p.seek = Some(Seek { requested: Instant::now(), from, target, rate: if rate > 0.0 { rate } else { 1.0 }, kind, flushed: false });
     }
 
@@ -145,39 +166,50 @@ impl Quality {
         let Some(mut p) = self.playback.take() else { return };
         let now = Instant::now();
         if p.first_frame.is_none() {
-            p.capture("playback_abandoned", json!({ "reason": reason, "waited_ms": ms(now - p.opened) }));
+            self.emit(&p, "playback_abandoned", json!({ "reason": reason, "waited_ms": ms(now - p.opened) }));
             return;
         }
         if let Some(seek) = p.seek.take() {
-            p.capture("seek_failed", seek.props(json!({ "reason": "closed", "waited_ms": ms(now - seek.requested) })));
+            self.emit(&p, "seek_failed", seek.props(json!({ "reason": "closed", "waited_ms": ms(now - seek.requested) })));
         }
-        p.end(reason, now);
+        let extra = p.finish_props(reason, now);
+        self.emit(&p, "playback_ended", extra);
     }
 
-    /// Handles a batch of libVLC events, in the order they came.
-    pub fn handle(&mut self, events: &[Event], vlc: &Vlc) {
+    /// Handles a batch of engine events, in the order they came.
+    pub fn handle(&mut self, events: &[EngineEvent], engine: &dyn Engine) {
         for e in events {
             let Some(p) = &mut self.playback else { return };
             if e.generation != p.generation {
                 continue;
             }
             match e.kind {
-                event::BUFFERING => p.buffering(e),
-                event::VOUT if p.first_frame.is_none() && e.cache >= 100.0 && vlc.has_video() => p.started(e.at, vlc),
-                event::TIME_CHANGED => p.time_changed(e, vlc),
-                event::PAUSED => {
+                EventKind::Buffering => p.buffering(e),
+                EventKind::Vout if p.first_frame.is_none() && e.cache >= 100.0 && engine.has_video() => {
+                    let extra = p.started(e.at, engine);
+                    let p_snap = self.playback.as_ref().unwrap();
+                    self.emit(p_snap, "playback_started", extra);
+                }
+                EventKind::TimeChanged => {
+                    if let Some((name, extra)) = p.time_changed(e, engine) {
+                        let p_snap = self.playback.as_ref().unwrap();
+                        self.emit(p_snap, name, extra);
+                    }
+                }
+                EventKind::Paused => {
                     // Paused before playback resumed: the wait is the user's.
                     p.seek = None;
                     p.close_stall(e.at);
                 }
-                event::ERROR | event::END_REACHED => {
+                EventKind::Error | EventKind::EndReached => {
                     let mut p = self.playback.take().unwrap();
-                    let error = e.kind == event::ERROR;
+                    let error = e.kind == EventKind::Error;
                     if p.first_frame.is_none() {
                         let stage = if error { "error" } else { "ended_before_playing" };
-                        p.capture("playback_failed", json!({ "stage": stage, "elapsed_ms": ms(e.at - p.opened) }));
+                        self.emit(&p, "playback_failed", json!({ "stage": stage, "elapsed_ms": ms(e.at.saturating_duration_since(p.opened)) }));
                     } else {
-                        p.end(if error { "error" } else { "finished" }, e.at);
+                        let extra = p.finish_props(if error { "error" } else { "finished" }, e.at);
+                        self.emit(&p, "playback_ended", extra);
                     }
                 }
                 _ => {}
@@ -187,24 +219,15 @@ impl Quality {
 }
 
 impl Playback {
-    fn capture(&self, name: &str, extra: Value) {
-        let mut props = self.props.clone();
-        props.insert("playback_id".into(), self.id.clone().into());
-        if let Value::Object(extra) = extra {
-            props.extend(extra);
-        }
-        telemetry::capture(name, Value::Object(props));
-    }
-
-    fn started(&mut self, at: Instant, vlc: &Vlc) {
+    fn started(&mut self, at: Instant, engine: &dyn Engine) -> Value {
         self.first_frame = Some(at);
-        let info = vlc.stream_info();
-        let length = vlc.length();
+        let info = engine.stream_info();
+        let length = engine.length();
         self.props.extend(stream_props(&info, length));
-        self.capture("playback_started", json!({ "ttff_ms": ms(at.saturating_duration_since(self.opened)) }));
+        json!({ "ttff_ms": ms(at.saturating_duration_since(self.opened)) })
     }
 
-    fn buffering(&mut self, e: &Event) {
+    fn buffering(&mut self, e: &EngineEvent) {
         self.cache = e.cache;
         if self.first_frame.is_none() {
             return;
@@ -220,7 +243,7 @@ impl Playback {
         }
     }
 
-    fn time_changed(&mut self, e: &Event, vlc: &Vlc) {
+    fn time_changed(&mut self, e: &EngineEvent, engine: &dyn Engine) -> Option<(&'static str, Value)> {
         let previous = self.last_time.replace(e.time);
         if self.first_frame.is_none() {
             // Audio, or video whose output came before buffering finished.
@@ -228,22 +251,23 @@ impl Playback {
             // off what has played since.
             if e.cache >= 100.0 {
                 let played = (e.time - self.start_ms).clamp(0, 2000);
-                self.started(e.at - Duration::from_millis(played as u64), vlc);
+                let extra = self.started(e.at.checked_sub(Duration::from_millis(played as u64)).unwrap_or(e.at), engine);
+                return Some(("playback_started", extra));
             }
-            return;
+            return None;
         }
         if let Some(seek) = &self.seek {
             let waited = e.at.saturating_duration_since(seek.requested);
             if waited > SEEK_TIMEOUT {
                 let seek = self.seek.take().unwrap();
-                self.capture("seek_failed", seek.props(json!({ "reason": "timeout", "waited_ms": ms(waited) })));
+                return Some(("seek_failed", seek.props(json!({ "reason": "timeout", "waited_ms": ms(waited) }))));
             } else if seek.flushed && e.cache >= 100.0 {
                 let ahead = ((e.time - seek.target).max(0) as f32 / seek.rate) as u64;
                 let latency = waited.saturating_sub(Duration::from_millis(ahead));
                 let seek = self.seek.take().unwrap();
-                self.capture("seek_completed", seek.props(json!({ "latency_ms": ms(latency) })));
+                return Some(("seek_completed", seek.props(json!({ "latency_ms": ms(latency) }))));
             }
-            return;
+            return None;
         }
         // Watch time: media time that played, skipping jumps.
         if let Some(previous) = previous {
@@ -252,6 +276,7 @@ impl Playback {
                 self.watched_ms += delta;
             }
         }
+        None
     }
 
     fn close_stall(&mut self, at: Instant) {
@@ -261,17 +286,16 @@ impl Playback {
         }
     }
 
-    fn end(&mut self, reason: &str, at: Instant) {
+    fn finish_props(&mut self, reason: &str, at: Instant) -> Value {
         self.close_stall(at);
-        let props = json!({
+        json!({
             "reason": reason,
             "watched_ms": self.watched_ms,
             "stalls": self.stalls,
             "stall_ms": self.stall_ms,
             "seeks": self.seeks,
             "superseded_seeks": self.superseded,
-        });
-        self.capture("playback_ended", props);
+        })
     }
 }
 
@@ -392,6 +416,117 @@ mod tests {
         assert_eq!(resolution(7680, 4320), "8K");
         assert_eq!(resolution(1280, 720), "720p");
         assert_eq!(resolution(320, 184), "SD");
+    }
+
+    type EventLog = std::sync::Arc<std::sync::Mutex<Vec<(String, Value)>>>;
+
+    fn recorder() -> (Quality, EventLog) {
+        let log = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let log_clone = log.clone();
+        let q = Quality::with_sink(Box::new(move |name, props| {
+            log_clone.lock().unwrap().push((name.to_string(), props));
+        }));
+        (q, log)
+    }
+
+    fn ev(kind: EventKind, generation: u64, at: Instant, cache: f32, time: i64) -> EngineEvent {
+        EngineEvent { kind, generation, at, cache, time }
+    }
+
+    #[test]
+    fn quality_tracks_ttff_seeks_stalls_and_watch_time_with_mock_engine() {
+        let engine = crate::engine::mock::MockEngine::default();
+        engine.open("/Movies/clip.mp4", &[], true).unwrap();
+        let generation = engine.generation();
+        let (mut q, log) = recorder();
+        q.opened(
+            Open { uri: "/Movies/clip.mp4", resume_ms: None, hardware_decoding: true, file_caching: 1000, network_caching: 1000 },
+            generation,
+            None,
+        );
+        let t0 = Instant::now();
+        // Stale event from previous generation is ignored.
+        q.handle(&[ev(EventKind::Error, generation - 1, t0, 0.0, -1)], &engine);
+        assert!(log.lock().unwrap().is_empty());
+
+        // First frame via Vout when cache >= 100.
+        q.handle(&[ev(EventKind::Vout, generation, t0 + Duration::from_millis(50), 100.0, -1)], &engine);
+        {
+            let events = log.lock().unwrap();
+            assert_eq!(events.len(), 1);
+            assert_eq!(events[0].0, "playback_started");
+            assert_eq!(events[0].1["resolution"], "1080p");
+            assert_eq!(events[0].1["video_codec"], "h264");
+        }
+
+        // Watch time accumulates on TimeChanged.
+        q.handle(
+            &[
+                ev(EventKind::TimeChanged, generation, t0 + Duration::from_millis(200), 100.0, 1000),
+                ev(EventKind::TimeChanged, generation, t0 + Duration::from_millis(700), 100.0, 1500),
+            ],
+            &engine,
+        );
+
+        // Stall mid-playback.
+        q.handle(
+            &[
+                ev(EventKind::Buffering, generation, t0 + Duration::from_millis(800), 20.0, -1),
+                ev(EventKind::Buffering, generation, t0 + Duration::from_millis(1050), 100.0, -1),
+            ],
+            &engine,
+        );
+
+        // Superseded seek followed by completed seek.
+        q.seek_requested(&engine, 1500, 30_000, "jump");
+        q.seek_requested(&engine, 1500, 45_000, "jump");
+        let after_seek = Instant::now();
+        q.handle(
+            &[
+                ev(EventKind::Buffering, generation, after_seek + Duration::from_millis(5), 0.0, -1),
+                ev(EventKind::Buffering, generation, after_seek + Duration::from_millis(20), 100.0, -1),
+                ev(EventKind::TimeChanged, generation, after_seek + Duration::from_millis(40), 100.0, 45_010),
+            ],
+            &engine,
+        );
+
+        // End of playback summarizes watch time, stalls, seeks, superseded seeks.
+        q.handle(&[ev(EventKind::EndReached, generation, after_seek + Duration::from_millis(100), 100.0, -1)], &engine);
+
+        let events = log.lock().unwrap();
+        let names: Vec<&str> = events.iter().map(|(n, _)| n.as_str()).collect();
+        assert_eq!(names, ["playback_started", "seek_completed", "playback_ended"]);
+        assert_eq!(events[1].1["kind"], "jump");
+        assert_eq!(events[1].1["direction"], "forward");
+        assert_eq!(events[2].1["reason"], "finished");
+        assert_eq!(events[2].1["watched_ms"], 500);
+        assert_eq!(events[2].1["stalls"], 1);
+        assert_eq!(events[2].1["stall_ms"], 250);
+        assert_eq!(events[2].1["seeks"], 2);
+        assert_eq!(events[2].1["superseded_seeks"], 1);
+    }
+
+    #[test]
+    fn quality_reports_abandoned_and_failed_playbacks() {
+        let engine = crate::engine::mock::MockEngine::default();
+        let (mut q, log) = recorder();
+        q.opened(
+            Open { uri: "/Movies/bad.mkv", resume_ms: None, hardware_decoding: true, file_caching: 1000, network_caching: 1000 },
+            1,
+            Some("open failed"),
+        );
+        q.opened(
+            Open { uri: "/Movies/slow.mkv", resume_ms: None, hardware_decoding: true, file_caching: 1000, network_caching: 1000 },
+            2,
+            None,
+        );
+        q.close("stopped");
+        let events = log.lock().unwrap();
+        assert_eq!(events[0].0, "playback_failed");
+        assert_eq!(events[0].1["stage"], "open");
+        assert_eq!(events[1].0, "playback_abandoned");
+        assert_eq!(events[1].1["reason"], "stopped");
+        let _ = engine;
     }
 }
 

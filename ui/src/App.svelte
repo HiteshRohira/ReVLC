@@ -95,6 +95,17 @@
     if (settings.value) appWindow.setAlwaysOnTop(settings.value.alwaysOnTop);
   });
 
+  // Changing deinterlacing in Settings applies it to the player (unless it's
+  // Automatic), so the player's toggle follows Settings again.
+  let deinterlaceSetting = "";
+  $effect(() => {
+    if (!settings.value) return;
+    const { deinterlace, deinterlaceMode } = settings.value;
+    const now = `${deinterlace} ${deinterlaceMode}`;
+    if (deinterlaceSetting && now !== deinterlaceSetting && deinterlace >= 0) player.deinterlaceChoice = null;
+    deinterlaceSetting = now;
+  });
+
   // "Start in fullscreen": once per item, when its video appears.
   let fullscreenedFor: string | null = null;
   $effect(() => {
@@ -292,7 +303,7 @@
 <svelte:window onkeydown={onKeyDown} onkeydowncapture={(e) => (moving = FOCUS_KEYS.has(e.key))} onpointerdowncapture={() => (moving = false)} onfocusin={onFocusIn} onpointermove={wake} onpointerdown={wake} onwheel={onWheel} />
 <svelte:document onvisibilitychange={onVisibility} />
 
-<div class="app" class:video={showPlayer && player.state.hasVideo} class:hide-cursor={controlsHidden} class:fullscreen={ui.fullscreen}>
+<div class="app" class:video={showPlayer && player.showsVideo} class:hide-cursor={controlsHidden} class:fullscreen={ui.fullscreen}>
   {#if !theme.onboarded}
     <Onboarding />
   {:else if showPlayer}

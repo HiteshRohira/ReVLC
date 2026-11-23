@@ -9,7 +9,7 @@ use std::time::UNIX_EPOCH;
 
 use serde::{Deserialize, Serialize};
 
-use crate::vlc::MediaMeta;
+use crate::engine::MediaMeta;
 
 /// What a file's name and folders say about it.
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -400,6 +400,11 @@ impl MetaCache {
         }
         self.dirty |= !gone.is_empty();
         gone
+    }
+
+    /// Returns all cached embedded artwork paths currently referenced by entries.
+    pub fn referenced_artwork(&self) -> std::collections::HashSet<PathBuf> {
+        self.map.values().filter_map(|c| c.meta.artwork.as_ref().map(PathBuf::from)).collect()
     }
 
     pub fn save(&mut self) {

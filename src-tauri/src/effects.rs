@@ -350,7 +350,7 @@ impl Param {
 }
 
 impl Filter {
-    fn value(&self, p: &Param) -> f32 {
+    pub fn value(&self, p: &Param) -> f32 {
         p.clamp(self.values.get(p.key).copied())
     }
 
@@ -359,16 +359,6 @@ impl Filter {
         let values = spec.params.iter().map(|p| (p.key.to_string(), self.value(p))).collect();
         Self { enabled: self.enabled, values }
     }
-}
-
-/// A number as VLC's option parser reads it: no exponent, trailing zeros trimmed.
-fn number(v: f32, int: bool) -> String {
-    if int {
-        return format!("{}", v.round() as i64);
-    }
-    let s = format!("{v:.3}");
-    let s = s.trim_end_matches('0').trim_end_matches('.');
-    if s == "-0" { "0".into() } else { s.into() }
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -397,7 +387,7 @@ pub struct AudioParam {
 }
 
 impl Effects {
-    fn filter(&self, spec: &FilterSpec) -> Option<&Filter> {
+    pub fn enabled_filter(&self, spec: &FilterSpec) -> Option<&Filter> {
         self.filters.get(spec.id).filter(|f| f.enabled)
     }
 
@@ -409,36 +399,7 @@ impl Effects {
         true
     }
 
-    /// VLC's "video-filter" chain for these effects, like
-    /// "transform{type=90}:adjust:sharpen{sigma=0.5}".
-    pub fn video_chain(&self) -> String {
-        let mut parts: Vec<String> = Vec::new();
-        if let Some(ty) = self.transform.vlc_type() {
-            parts.push(format!("transform{{type={ty}}}"));
-        }
-        // libVLC's colour adjustments live in the same chain.
-        if self.adjust.enabled {
-            parts.push("adjust".into());
-        }
-        for spec in VIDEO_FILTERS {
-            let Some(f) = self.filter(spec) else { continue };
-            let mut options: Vec<String> = spec.params.iter().map(|p| format!("{}={}", p.key, number(f.value(p), p.int))).collect();
-            if !spec.fixed.is_empty() {
-                options.insert(0, spec.fixed.to_string());
-            }
-            parts.push(if options.is_empty() { spec.module.to_string() } else { format!("{}{{{}}}", spec.module, options.join(",")) });
-        }
-        parts.join(":")
-    }
-
-    /// VLC's "audio-filter" chain, the equaliser first.
-    pub fn audio_chain(&self) -> String {
-        let eq = self.equalizer.enabled.then_some("equalizer");
-        let rest = AUDIO_FILTERS.iter().filter(|s| self.filter(s).is_some()).map(|s| s.module);
-        eq.into_iter().chain(rest).collect::<Vec<_>>().join(":")
-    }
-
-    /// Every audio filter's settings (on or off), for the audio output.
+    /// Every audio filter's settings (on or off).
     pub fn audio_params(&self) -> Vec<AudioParam> {
         AUDIO_FILTERS
             .iter()
@@ -527,58 +488,28 @@ mod tests {
     }
 
     #[test]
-    fn video_chain_follows_the_effects() {
-        let mut e = Effects::default();
-        assert_eq!(e.video_chain(), "");
-        e.transform = Transform::Rotate90;
-        e.adjust.enabled = true;
-        assert!(e.set_filter("sharpen", on(&[("sigma", 0.5)])));
-        assert!(e.set_filter("invert", on(&[])));
-        assert!(e.set_filter("edges", on(&[])));
-        assert!(e.set_filter("posterize", on(&[("level", 5.6)])));
-        e.set_filter("grain", Filter { enabled: false, ..on(&[("variance", 3.0)]) });
-        assert_eq!(e.video_chain(), "transform{type=90}:adjust:sharpen{sigma=0.5}:posterize{level=6}:invert:gradient{mode=edge}");
-        e.transform = Transform::FlipHorizontal;
-        e.adjust.enabled = false;
-        assert_eq!(e.video_chain(), "transform{type=hflip}:sharpen{sigma=0.5}:posterize{level=6}:invert:gradient{mode=edge}");
-    }
-
-    #[test]
     fn filter_settings_are_clamped_and_filled_in() {
         let mut e = Effects::default();
         assert!(!e.set_filter("nonsense", on(&[])));
         e.set_filter("sharpen", on(&[("sigma", 9.0), ("bogus", 1.0)]));
         assert_eq!(e.filters["sharpen"].values, BTreeMap::from([("sigma".to_string(), 2.0)]));
         e.set_filter("blur", on(&[("sigma", f32::NAN)]));
-        assert_eq!(e.video_chain(), "sharpen{sigma=2}:gaussianblur{sigma=2}");
+        assert_eq!(e.filters["blur"].values, BTreeMap::from([("sigma".to_string(), 2.0)]));
         e.set_filter("rotate", on(&[]));
-        assert!(e.video_chain().starts_with("rotate{angle=30}:"));
+        assert_eq!(e.filters["rotate"].values, BTreeMap::from([("angle".to_string(), 30.0)]));
     }
 
     #[test]
-    fn audio_chain_keeps_the_equalizer_first() {
+    fn audio_params_fill_defaults_and_overrides() {
         let mut e = Effects::default();
-        assert_eq!(e.audio_chain(), "");
         e.set_filter("pitch", on(&[("pitch-shift", 3.0)]));
         e.set_filter("compressor", on(&[]));
-        assert_eq!(e.audio_chain(), "compressor:scaletempo_pitch");
-        e.equalizer.enabled = true;
-        assert_eq!(e.audio_chain(), "equalizer:compressor:scaletempo_pitch");
         let params = e.audio_params();
         assert_eq!(params.len(), AUDIO_FILTERS.iter().map(|s| s.params.len()).sum::<usize>());
         let get = |n: &str| params.iter().find(|p| p.name == n).unwrap().value;
         assert_eq!(get("pitch-shift"), 3.0);
         assert_eq!(get("compressor-ratio"), 4.0);
         assert_eq!(get("spatializer-roomsize"), 0.85);
-    }
-
-    #[test]
-    fn numbers_read_like_vlc_expects() {
-        assert_eq!(number(0.05, false), "0.05");
-        assert_eq!(number(2.0, false), "2");
-        assert_eq!(number(-0.0001, false), "0");
-        assert_eq!(number(-11.5, false), "-11.5");
-        assert_eq!(number(5.6, true), "6");
     }
 
     #[test]
