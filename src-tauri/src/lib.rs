@@ -1067,6 +1067,9 @@ impl Core {
                 return Ok(());
             }
         }
+        // libVLC looks for subtitles when it opens a video, so only one
+        // opened with it here can already have them.
+        let opened_now = !items.is_empty() && play;
         if !items.is_empty() {
             let first = self.playlist().add(items);
             self.emit_playlist();
@@ -1084,7 +1087,7 @@ impl Core {
                 break;
             };
             // libVLC loads it with the video already; adding it lists it twice.
-            if !(autodetect && vlc_autodetects(Path::new(&video), Path::new(&uri), fuzzy)) {
+            if !(opened_now && autodetect && vlc_autodetects(Path::new(&video), Path::new(&uri), fuzzy)) {
                 self.add_subtitle(file_uri(&uri))?;
             }
             self.notice("osd", "Subtitles added");
@@ -1333,8 +1336,8 @@ fn pump_events(core: Arc<Core>, rx: Receiver<EngineEvent>) {
     // The last media that got past its start. Some broken files end
     // without an error, having played nothing.
     let mut played = None;
-    // How far the current media got (its generation and time), from time
-    // updates before its end: a seek into data a truncated file lacks ends
+    // How far the current media got (its generation and time), from the
+    // times its updates carry: a seek into data a truncated file lacks ends
     // it early, which isn't watching it to the end.
     let mut reached: Option<(u64, i64)> = None;
     // The media whose end or error has been dealt with, so one that sends
@@ -1359,8 +1362,13 @@ fn pump_events(core: Arc<Core>, rx: Receiver<EngineEvent>) {
         if current(EventKind::TimeChanged) && core.engine.time() > 0 {
             played = Some(generation);
         }
-        if current(EventKind::TimeChanged) && !current(EventKind::EndReached) {
-            reached = Some((generation, core.engine.time()));
+        if let Some(time) = batch
+            .iter()
+            .filter(|e| e.kind == EventKind::TimeChanged && e.generation == generation && e.time >= 0)
+            .map(|e| e.time)
+            .next_back()
+        {
+            reached = Some((generation, time));
         }
 
         // Web pages and remote playlists end by expanding into what they hold:
@@ -1803,6 +1811,15 @@ impl Core {
             return;
         }
 
+        // Past where a truncated file's data runs out there's nothing to show
+        // (or play): count those slots as done so no fallback fills them.
+        let data_end = container::index_video(Path::new(&*grid.uri))
+            .ok()
+            .and_then(|m| m.video_tracks.get(grid.track).and_then(|t| t.data_end_ms));
+        if let Some(end) = data_end {
+            succeeded.extend((0..grid.count).filter(|&k| scrub::time_at(grid.length, grid.step, k) >= end));
+        }
+
         // Fallback 1: system `ffmpeg` on PATH (exotic containers/codecs, Linux, or mid-stream error).
         if let Some(ffmpeg) = keyframes::ffmpeg() {
             self.scrub_pass_ffmpeg(grid, &ffmpeg, succeeded, cancel);
@@ -2181,7 +2198,10 @@ fn run_app_item(app: &AppHandle, id: &str) -> bool {
         }
         "licenses" => {
             if let Ok(dir) = app.path().resource_dir() {
-                open_externally(dir.join("licenses"));
+                // The Linux package keeps "../licenses/" under "_up_".
+                let folder = ["licenses", "_up_/licenses"].map(|p| dir.join(p)).into_iter().find(|p| p.is_dir());
+                // Explorer can't open a \\?\ path.
+                open_externally(dunce::simplified(&folder.unwrap_or(dir)));
             }
         }
         "quit" => app.exit(0),
@@ -2625,16 +2645,18 @@ async fn take_snapshot(app: AppHandle, player: tauri::State<'_, Player>) -> Res 
     let dir = player.core()?.settings().snapshot_dir(default.ok()).ok_or("no snapshot folder")?;
     // The engine waits for the video to hand over a frame.
     off_main(player, move |core| {
-        let (prefix, format) = {
-            let settings = core.settings();
-            (settings.snapshot_prefix.clone(), settings.snapshot_format.clone())
-        };
-        let before = snapshot_pngs(&dir, &prefix);
+        // One at a time, so each finds only the file it made.
+        static TAKING: Mutex<()> = Mutex::new(());
+        let _taking = TAKING.lock().unwrap_or_else(|e| e.into_inner());
+        let format = core.settings().snapshot_format.clone();
+        let before = snapshot_pngs(&dir);
         core.user_snapshot.store(true, Ordering::Release);
         core.engine.snapshot(&dir, 0)?;
         // libVLC's snapshot call always writes PNG, whatever the format setting.
+        // Its name comes from the prefix setting, cleaned of characters a file
+        // name can't have, so the new file is found by what wasn't there before.
         if format != "png" {
-            for png in snapshot_pngs(&dir, &prefix).difference(&before) {
+            for png in snapshot_pngs(&dir).difference(&before) {
                 convert_snapshot(png, &format)?;
             }
         }
@@ -2643,17 +2665,10 @@ async fn take_snapshot(app: AppHandle, player: tauri::State<'_, Player>) -> Res 
     .await?
 }
 
-/// The PNG snapshots in `dir` whose names start with `prefix`.
-fn snapshot_pngs(dir: &Path, prefix: &str) -> HashSet<PathBuf> {
+/// The PNG files in `dir`.
+fn snapshot_pngs(dir: &Path) -> HashSet<PathBuf> {
     let Ok(entries) = std::fs::read_dir(dir) else { return HashSet::new() };
-    entries
-        .flatten()
-        .map(|e| e.path())
-        .filter(|p| {
-            let name = p.file_name().and_then(|n| n.to_str()).unwrap_or_default();
-            name.starts_with(prefix) && p.extension().is_some_and(|e| e.eq_ignore_ascii_case("png"))
-        })
-        .collect()
+    entries.flatten().map(|e| e.path()).filter(|p| p.extension().is_some_and(|e| e.eq_ignore_ascii_case("png"))).collect()
 }
 
 /// Re-encodes the PNG snapshot at `png` as `format` ("jpg" or "tiff") beside
@@ -2903,7 +2918,13 @@ async fn open_capture(player: tauri::State<'_, Player>, capture: Capture) -> Res
 /// with it, 4 only the same name. Names are compared ignoring case and
 /// punctuation, without extensions.
 fn vlc_autodetects(video: &Path, subtitle: &Path, fuzzy: i64) -> bool {
-    if fuzzy <= 0 || video.parent() != subtitle.parent() {
+    // libVLC 3's SLAVE_SPU_EXTENSIONS: the files it looks for (not .mks).
+    const AUTODETECTED: &[&str] = &[
+        "aqt", "ass", "cdg", "dks", "idx", "jss", "mpl2", "mpsub", "pjs", "psb", "rt", "sami", "sbv", "scc", "smi", "srt",
+        "ssa", "stl", "sub", "tt", "ttml", "usf", "vtt", "webvtt",
+    ];
+    let ext = subtitle.extension().map(|e| e.to_string_lossy().to_lowercase()).unwrap_or_default();
+    if fuzzy <= 0 || video.parent() != subtitle.parent() || !AUTODETECTED.contains(&ext.as_str()) {
         return false;
     }
     let name = |p: &Path| {
@@ -2911,6 +2932,9 @@ fn vlc_autodetects(video: &Path, subtitle: &Path, fuzzy: i64) -> bool {
         stem.split(|c: char| !c.is_alphanumeric()).filter(|w| !w.is_empty()).collect::<Vec<_>>().join(" ")
     };
     let (video, subtitle) = (name(video), name(subtitle));
+    if video.is_empty() {
+        return false;
+    }
     let level = if subtitle == video {
         4
     } else if subtitle.starts_with(&video) {
@@ -4091,11 +4115,11 @@ mod tests {
             image::RgbImage::from_pixel(4, 2, image::Rgb([200, 10, 20])).save(&path).unwrap();
             path
         };
-        let before = snapshot_pngs(&dir, "snap-");
+        png("earlier.png");
+        let before = snapshot_pngs(&dir);
         let first = png("snap-00001.png");
-        png("other.png");
-        let new: Vec<_> = snapshot_pngs(&dir, "snap-").difference(&before).cloned().collect();
-        assert_eq!(new, vec![first.clone()], "only new snapshots with the prefix are converted");
+        let new: Vec<_> = snapshot_pngs(&dir).difference(&before).cloned().collect();
+        assert_eq!(new, vec![first.clone()], "only the new snapshot is converted");
 
         convert_snapshot(&first, "jpg").unwrap();
         let jpg = std::fs::read(dir.join("snap-00001.jpg")).unwrap();
@@ -4164,5 +4188,7 @@ mod tests {
         assert!(!at("The Film (2020).en.srt", 4) && at("The Film (2020).srt", 4));
         assert!(!at("The Film (2020).srt", 0), "autodetection off");
         assert!(!vlc_autodetects(&video, Path::new("/elsewhere/The Film (2020).srt"), 3), "another folder");
+        assert!(!at("The Film (2020).mks", 3), "libVLC doesn't look for .mks files");
+        assert!(!vlc_autodetects(&dir.join("---.mkv"), &dir.join("Other.srt"), 3), "a name of only punctuation matches nothing");
     }
 }

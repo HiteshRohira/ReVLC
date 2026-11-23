@@ -524,9 +524,10 @@ pub struct VlcEngine {
     /// The opening frame of each file thumbnailed; `None` when it's too plain
     /// to recognise. See [`VlcEngine::thumbnail_at`].
     openings: std::sync::Mutex<std::collections::HashMap<OpeningKey, Option<Opening>>>,
-    /// Held while an opening frame is made, so preview workers starting
-    /// together wait for one instead of each decoding the same frame.
-    making_opening: std::sync::Mutex<()>,
+    /// A lock per opening frame being made, so preview workers starting
+    /// together on a file wait for one instead of each decoding the same
+    /// frame, without waiting on other files.
+    making_opening: std::sync::Mutex<std::collections::HashMap<OpeningKey, std::sync::Arc<std::sync::Mutex<()>>>>,
     /// Command-line options libVLC wouldn't start with (see [`VlcEngine::load`]).
     pub rejected_args: Vec<String>,
     /// Running network discoveries: each one's name and its libVLC object.
@@ -1545,8 +1546,9 @@ impl Vlc {
         unsafe { (self.api.libvlc_video_set_track)(self.mp, id) };
         // Paused, libVLC doesn't decode the new track, so no picture shows
         // until playback resumes. A seek to where it is shows one.
-        if id >= 0 && self.state() == State::Paused {
-            self.set_time(self.time());
+        let at = unsafe { (self.api.libvlc_media_player_get_time)(self.mp) };
+        if id >= 0 && at >= 0 && self.seekable() && self.state() == State::Paused {
+            self.set_time(at);
         }
     }
 
@@ -2250,13 +2252,15 @@ impl Vlc {
         if let Some(known) = known() {
             return known;
         }
-        let _making = self.making_opening.lock().unwrap_or_else(|e| e.into_inner());
+        let making = self.making_opening.lock().unwrap_or_else(|e| e.into_inner()).entry(key.clone()).or_default().clone();
+        let _making = making.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(known) = known() {
             return known;
         }
         let frame = self.grab(path, 0, width, false, None).ok();
         let opening = frame.and_then(|f| f.buf).map(|b| b.as_slice().to_vec()).filter(|v| detailed(v)).map(std::sync::Arc::new);
-        self.openings.lock().unwrap_or_else(|e| e.into_inner()).insert(key, opening.clone());
+        self.openings.lock().unwrap_or_else(|e| e.into_inner()).insert(key.clone(), opening.clone());
+        self.making_opening.lock().unwrap_or_else(|e| e.into_inner()).remove(&key);
         opening
     }
 

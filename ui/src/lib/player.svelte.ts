@@ -760,12 +760,12 @@ class Player {
     this.notify("osd", `Crop: ${geometry ?? "None"}`);
     return this.#call("set_crop", { geometry });
   }
-  /** Turns deinterlacing on, with Settings' method (Yadif when that's Automatic), or off. */
+  /** Turns deinterlacing on, with Settings' method (Blend when that's Automatic, as Settings does), or off. */
   setDeinterlace(on: boolean) {
     this.deinterlaceChoice = on;
     this.notify("osd", `Deinterlace ${on ? "on" : "off"}`);
     const mode = settings.value?.deinterlaceMode ?? "auto";
-    return this.#call("set_deinterlace", { mode: on ? (mode === "auto" ? "yadif" : mode) : null });
+    return this.#call("set_deinterlace", { mode: on ? (mode === "auto" ? "blend" : mode) : null });
   }
 
   snapshot = () => this.#call("take_snapshot");

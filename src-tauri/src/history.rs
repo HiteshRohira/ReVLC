@@ -12,11 +12,12 @@ const SAVE_INTERVAL: Duration = Duration::from_secs(10);
 /// Don't offer to resume within this many ms of the start or the end.
 const RESUME_MARGIN: i64 = 15_000;
 
-/// Whether media that ended had played to `reached` ms close enough to its
-/// `length` to count as watched: no closer than resuming would offer. One
-/// with no known length counts once it ends.
+/// Whether media that ended had played to `reached` ms (its last time update
+/// before the end) close enough to its `length` to count as watched: within a
+/// tenth of it, at least 3 s for time updates and at most what resuming
+/// leaves out. One with no known length counts once it ends.
 pub fn reached_the_end(reached: i64, length: i64) -> bool {
-    length <= 0 || reached >= length - RESUME_MARGIN
+    length <= 0 || reached >= length - (length / 10).clamp(3_000, RESUME_MARGIN)
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -196,12 +197,16 @@ mod tests {
     #[test]
     fn only_media_played_to_its_end_counts_as_watched() {
         assert!(reached_the_end(119_750, 120_000));
-        assert!(reached_the_end(106_000, 120_000), "close enough that resuming wouldn't be offered");
+        assert!(reached_the_end(108_000, 120_000), "within a tenth of the end");
         // A truncated file that stops at 0:58 after a seek to 1:33 of 2:00.
         assert!(!reached_the_end(58_000, 120_000));
         assert!(!reached_the_end(93_000, 120_000));
         assert!(reached_the_end(0, 0), "no known length: ending is the end");
-        assert!(reached_the_end(0, 8_000), "a short clip that ends before reporting its time");
+        assert!(reached_the_end(7_800, 8_000));
+        assert!(reached_the_end(0, 900), "a clip shorter than its first time update");
+        // A 12 s clip whose data stops at 2 s.
+        assert!(!reached_the_end(2_000, 12_000));
+        assert!(reached_the_end(7_190_000, 7_200_000) && !reached_the_end(7_180_000, 7_200_000), "at most 15 s short");
     }
 
     fn history() -> History {
