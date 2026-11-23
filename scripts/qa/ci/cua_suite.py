@@ -1109,6 +1109,41 @@ def playback(ctx):
                 except Exception:
                     pass
 
+        def under_cursor():
+            # Windows only: which top-level window the real cursor is over, as
+            # (pid, title). The hover goes to whatever window is on top there,
+            # so a terminal or another app covering ReVLC eats it.
+            import ctypes
+            from ctypes import wintypes
+            u = ctypes.windll.user32
+            u.WindowFromPoint.argtypes = [wintypes.POINT]
+            u.WindowFromPoint.restype = wintypes.HWND
+            u.GetAncestor.argtypes = [wintypes.HWND, wintypes.UINT]
+            u.GetAncestor.restype = wintypes.HWND
+            pt = wintypes.POINT()
+            u.GetCursorPos(ctypes.byref(pt))
+            root = u.GetAncestor(u.WindowFromPoint(pt), 2)  # GA_ROOT
+            pid = wintypes.DWORD()
+            u.GetWindowThreadProcessId(root, ctypes.byref(pid))
+            buf = ctypes.create_unicode_buffer(256)
+            u.GetWindowTextW(root, buf, 256)
+            return pid.value, buf.value
+
+        def ensure_on_top():
+            # Put ReVLC in front so the desktop cursor hovers it, not whatever
+            # window happens to cover the Seek bar (the runner's console, an
+            # editor). Without this the check passed or failed by window order.
+            if not WIN:
+                return
+            for _ in range(3):
+                pid, title = under_cursor()
+                if pid == app.pid:
+                    return
+                cua("bring_to_front", {"pid": app.pid, "window_id": app.window_id})
+                time.sleep(0.4)
+            pid, title = under_cursor()
+            ensure(pid == app.pid, f"another window covers the Seek bar: {title!r} (pid {pid})")
+
         def mean_diff(im_a, im_b, box):
             pa = pixels(im_a.crop(box))
             pb = pixels(im_b.crop(box))
@@ -1129,6 +1164,7 @@ def playback(ctx):
             hx = f["x"] + f["w"] * frac
             hy = f["y"] + f["h"] / 2
             move_screen(hx, hy)
+            ensure_on_top()
             move_screen(hx + 4.0, hy)
             nudge = [0]
 
