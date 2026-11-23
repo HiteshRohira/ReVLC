@@ -501,11 +501,11 @@ mod tests {
 
         // P010: high byte carries the 8-bit MSB of each 10-bit sample.
         let mut y10 = vec![0u8; (w * h * 2) as usize];
-        for chunk in y10.chunks_exact_mut(2) {
+        for chunk in y10.as_chunks_mut::<2>().0 {
             chunk[1] = 200;
         }
         let mut uv10 = vec![0u8; (w * h) as usize];
-        for chunk in uv10.chunks_exact_mut(2) {
+        for chunk in uv10.as_chunks_mut::<2>().0 {
             chunk[1] = 128;
         }
         let jpg10 = p010_to_scaled_jpeg(&y10, &uv10, w, h, (w * 2) as usize, (w * 2) as usize, 0, 16).unwrap();

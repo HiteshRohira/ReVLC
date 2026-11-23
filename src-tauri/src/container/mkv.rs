@@ -440,11 +440,7 @@ fn parse_info(b: &[u8], timestamp_scale: &mut u64, meta: &mut MediaMeta) {
                 }
             }
             ID_DURATION => duration_ticks = read_float(payload),
-            ID_TITLE => {
-                if meta.title.is_none() {
-                    meta.title = read_str(payload);
-                }
-            }
+            ID_TITLE if meta.title.is_none() => meta.title = read_str(payload),
             _ => {}
         }
     }
