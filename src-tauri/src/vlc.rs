@@ -524,6 +524,9 @@ pub struct VlcEngine {
     /// The opening frame of each file thumbnailed; `None` when it's too plain
     /// to recognise. See [`VlcEngine::thumbnail_at`].
     openings: std::sync::Mutex<std::collections::HashMap<OpeningKey, Option<Opening>>>,
+    /// Held while an opening frame is made, so preview workers starting
+    /// together wait for one instead of each decoding the same frame.
+    making_opening: std::sync::Mutex<()>,
     /// Command-line options libVLC wouldn't start with (see [`VlcEngine::load`]).
     pub rejected_args: Vec<String>,
     /// Running network discoveries: each one's name and its libVLC object.
@@ -726,6 +729,7 @@ impl VlcEngine {
                 version,
                 rejected_args,
                 openings: Default::default(),
+                making_opening: Default::default(),
                 discoverers: Default::default(),
                 teletext_page: Default::default(),
             })
@@ -1539,6 +1543,11 @@ impl Vlc {
 
     pub fn set_video_track(&self, id: i32) {
         unsafe { (self.api.libvlc_video_set_track)(self.mp, id) };
+        // Paused, libVLC doesn't decode the new track, so no picture shows
+        // until playback resumes. A seek to where it is shows one.
+        if id >= 0 && self.state() == State::Paused {
+            self.set_time(self.time());
+        }
     }
 
     /// Sets the stereo mode code (see [`crate::effects::StereoMode`]).
@@ -2237,8 +2246,13 @@ impl Vlc {
         // path has another opening.
         let file = std::fs::metadata(path).ok().map(|m| (m.len(), m.modified().ok()));
         let key = (path.to_string(), width, file);
-        if let Some(known) = self.openings.lock().unwrap_or_else(|e| e.into_inner()).get(&key) {
-            return known.clone();
+        let known = || self.openings.lock().unwrap_or_else(|e| e.into_inner()).get(&key).cloned();
+        if let Some(known) = known() {
+            return known;
+        }
+        let _making = self.making_opening.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(known) = known() {
+            return known;
         }
         let frame = self.grab(path, 0, width, false, None).ok();
         let opening = frame.and_then(|f| f.buf).map(|b| b.as_slice().to_vec()).filter(|v| detailed(v)).map(std::sync::Arc::new);
@@ -2292,6 +2306,9 @@ impl Vlc {
             ]
             .into_iter()
             .chain((!precise).then(|| ":input-fast-seek".to_string()))
+            // Software decoding: the frame is copied to memory anyway, and
+            // VideoToolbox's copy back made the first TS preview twice as slow.
+            .chain(cfg!(target_os = "macos").then(|| ":no-videotoolbox".to_string()))
             {
                 let o = cstr(&opt);
                 (api.libvlc_media_add_option_flag)(media, o.as_ptr(), OPTION_TRUSTED | OPTION_UNIQUE);

@@ -13,16 +13,17 @@ use serde::Serialize;
 pub const VIDEO_EXTENSIONS: &[&str] = &[
     "mp4", "m4v", "mkv", "webm", "mov", "qt", "avi", "ts", "m2ts", "mts", "m2t", "mt2s", "tp", "mpg", "mpeg", "m1v",
     "m2v", "m2p", "wmv", "flv", "f4v", "ogv", "ogm", "ogx", "3gp", "3g2", "vob", "vro", "evo", "divx", "rm",
-    "rmvb", "asf", "dv", "mxf", "gxf", "wtv", "nsv", "nuv", "tod", "bik", "crf", "axv", "anx", "mks", "dav", "xesc",
+    "rmvb", "asf", "dv", "mxf", "gxf", "wtv", "nsv", "nuv", "tod", "bik", "crf", "axv", "anx", "dav", "xesc",
 ];
 pub const AUDIO_EXTENSIONS: &[&str] = &[
     "mp3", "m4a", "m4b", "aac", "ac3", "eac3", "flac", "wav", "ogg", "oga", "opus", "spx", "wma", "alac", "aif",
     "aiff", "aifc", "ape", "mka", "wv", "tta", "mpc", "dts", "mlp", "aob", "m2a", "mp1", "mp2", "mpa", "amr", "oma",
     "voc", "vqf", "axa", "mid", "midi", "rmi", "xm", "s3m",
 ];
+// Includes Matroska subtitles (.mks), which hold no video, as VLC's list does.
 pub const SUBTITLE_EXTENSIONS: &[&str] = &[
     "srt", "ass", "ssa", "vtt", "sub", "mpsub", "idx", "sup", "smi", "ttml", "usf", "utf", "rt", "aqt", "jss", "pjs",
-    "psb",
+    "psb", "mks",
 ];
 
 /// Stop scanning after this many files so a huge folder can't stall the app.
@@ -409,6 +410,7 @@ mod tests {
         assert!(is_media(Path::new("song.flac")));
         assert!(!is_media(Path::new("notes.txt")));
         assert!(is_subtitle(Path::new("Movie.en.SRT")));
+        assert!(is_subtitle(Path::new("Movie.mks")) && !is_media(Path::new("Movie.mks")), "subtitle-only Matroska");
         assert!(!is_media(Path::new("Movie.srt")));
         assert!(!is_media(Path::new("paper.ps")));
     }

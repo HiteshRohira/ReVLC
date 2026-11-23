@@ -12,6 +12,13 @@ const SAVE_INTERVAL: Duration = Duration::from_secs(10);
 /// Don't offer to resume within this many ms of the start or the end.
 const RESUME_MARGIN: i64 = 15_000;
 
+/// Whether media that ended had played to `reached` ms close enough to its
+/// `length` to count as watched: no closer than resuming would offer. One
+/// with no known length counts once it ends.
+pub fn reached_the_end(reached: i64, length: i64) -> bool {
+    length <= 0 || reached >= length - RESUME_MARGIN
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Entry {
@@ -185,6 +192,17 @@ fn thumb_name(uri: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_media_played_to_its_end_counts_as_watched() {
+        assert!(reached_the_end(119_750, 120_000));
+        assert!(reached_the_end(106_000, 120_000), "close enough that resuming wouldn't be offered");
+        // A truncated file that stops at 0:58 after a seek to 1:33 of 2:00.
+        assert!(!reached_the_end(58_000, 120_000));
+        assert!(!reached_the_end(93_000, 120_000));
+        assert!(reached_the_end(0, 0), "no known length: ending is the end");
+        assert!(reached_the_end(0, 8_000), "a short clip that ends before reporting its time");
+    }
 
     fn history() -> History {
         let dir = std::env::temp_dir().join(format!("revlc-history-test-{}", std::process::id()));

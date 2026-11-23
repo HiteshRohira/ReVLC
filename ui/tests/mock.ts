@@ -284,6 +284,8 @@ declare global {
       scrubPrepare: null | (() => Promise<Json | null> | Json | null);
       emit: typeof push;
       setState: typeof setState;
+      /** Settings changed elsewhere (the Settings window), as the app announces it. */
+      setSettings(patch: Json): Promise<void>;
       callsTo(cmd: string): unknown[];
     };
   }
@@ -299,5 +301,9 @@ window.__mock = {
   scrubPrepare: null,
   emit: push,
   setState,
+  setSettings: (patch) => {
+    settings = { ...settings, ...patch };
+    return push("settings://changed", settings);
+  },
   callsTo: (cmd) => calls.filter((c) => c.cmd === cmd).map((c) => c.args),
 };

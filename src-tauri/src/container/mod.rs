@@ -80,6 +80,9 @@ pub struct VideoTrackIndex {
     pub header_strip: Vec<u8>,
     /// Keyframes sorted by `pts_ms` ascending.
     pub keyframes: Vec<KeyframeEntry>,
+    /// Where a truncated file's data runs out: no frame at or after this time
+    /// can be read. `None` when the whole track is present.
+    pub data_end_ms: Option<i64>,
 }
 
 impl VideoTrackIndex {
@@ -263,6 +266,7 @@ mod tests {
                 KeyframeEntry { pts_ms: 2000, offset: 100, size: 10, cluster_rel_offset: None, block_number: None },
                 KeyframeEntry { pts_ms: 5000, offset: 200, size: 10, cluster_rel_offset: None, block_number: None },
             ],
+            data_end_ms: None,
         };
         assert_eq!(track.nearest_keyframe_index(-100), Some(0));
         assert_eq!(track.nearest_keyframe_index(0), Some(0));

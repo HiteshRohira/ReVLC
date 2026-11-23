@@ -552,6 +552,7 @@ fn parse_tracks(b: &[u8]) -> Vec<VideoTrackIndex> {
             extradata,
             header_strip,
             keyframes: Vec::new(),
+            data_end_ms: None,
         });
         ordinal += 1;
     }
@@ -1112,6 +1113,7 @@ mod tests {
             extradata: Vec::new(),
             header_strip: Vec::new(),
             keyframes: Vec::new(),
+            data_end_ms: None,
         };
         let mut f = File::open(&p).unwrap();
         let (is_t1, is_kf1, _) = probe_block(&mut f, all.len() as u64, ID_BLOCK_GROUP, delta_off, bg_delta.len() as u64, &track).unwrap();

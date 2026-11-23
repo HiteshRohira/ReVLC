@@ -1,5 +1,6 @@
 import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { settings } from "./settings.svelte";
 
 export type PlayState = "idle" | "opening" | "buffering" | "playing" | "paused" | "stopped" | "ended" | "error";
 export type Repeat = "off" | "all" | "one";
@@ -355,7 +356,7 @@ export interface Notice {
   text: string;
 }
 
-export const SUBTITLE_EXTENSIONS = ["srt", "ass", "ssa", "vtt", "sub", "idx", "sup", "smi", "ttml"];
+export const SUBTITLE_EXTENSIONS = ["srt", "ass", "ssa", "vtt", "sub", "idx", "sup", "smi", "ttml", "mks"];
 export const ASPECT_RATIOS = [null, "16:9", "4:3", "1:1", "16:10", "2.21:1", "2.35:1", "2.39:1", "5:4"];
 export const CROPS = [null, "16:9", "4:3", "1:1", "16:10", "2.21:1", "2.35:1", "2.39:1", "5:4"];
 export const SPEEDS = [0.25, 0.5, 0.75, 1, 1.25, 1.5, 1.75, 2, 3, 4];
@@ -445,7 +446,9 @@ class Player {
   notices = $state<Notice[]>([]);
   aspect = $state<string | null>(null);
   crop = $state<string | null>(null);
-  deinterlace = $state(false);
+  /** The player's own deinterlace choice; `null` until it's toggled, while Settings decides. */
+  deinterlaceChoice = $state<boolean | null>(null);
+  deinterlace = $derived(this.deinterlaceChoice ?? settings.value?.deinterlace === 1);
 
   active = $derived(ACTIVE.includes(this.state.state));
   playing = $derived(this.state.state === "playing" || this.state.state === "buffering" || this.state.state === "opening");
@@ -757,10 +760,12 @@ class Player {
     this.notify("osd", `Crop: ${geometry ?? "None"}`);
     return this.#call("set_crop", { geometry });
   }
+  /** Turns deinterlacing on, with Settings' method (Yadif when that's Automatic), or off. */
   setDeinterlace(on: boolean) {
-    this.deinterlace = on;
+    this.deinterlaceChoice = on;
     this.notify("osd", `Deinterlace ${on ? "on" : "off"}`);
-    return this.#call("set_deinterlace", { mode: on ? "yadif" : null });
+    const mode = settings.value?.deinterlaceMode ?? "auto";
+    return this.#call("set_deinterlace", { mode: on ? (mode === "auto" ? "yadif" : mode) : null });
   }
 
   snapshot = () => this.#call("take_snapshot");

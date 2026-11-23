@@ -89,6 +89,12 @@ impl WarmSession {
         &self.track
     }
 
+    /// False past the point where a truncated file's data runs out, where
+    /// playback can't go either, so no preview is shown there.
+    pub fn covers(&self, target_ms: i64) -> bool {
+        self.track.data_end_ms.is_none_or(|end| target_ms < end)
+    }
+
     /// Decodes the keyframe nearest `target_ms` into a JPEG `target_width` px wide.
     /// Reuses the warm decoder session and deduplicates repeated keyframe lookups.
     pub fn decode_nearest(&mut self, target_ms: i64, target_width: u32) -> Result<(i64, Vec<u8>), String> {

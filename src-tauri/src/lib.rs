@@ -603,9 +603,11 @@ impl Core {
                     Default::default()
                 }
             };
-            // libVLC reports the file name as the title when there's no tag.
+            // libVLC reports the file name as the title when there's no tag
+            // (and the scanner drops it, but older caches can have it). A tag
+            // that matches the name without its extension is a real title.
             let file = path.file_name().map(|f| f.to_string_lossy().into_owned()).unwrap_or_default();
-            track.name = tags.title.filter(|t| *t != file && *t != track.name).unwrap_or(title);
+            track.name = tags.title.filter(|t| *t != file).unwrap_or(title);
             track.track = tags.track.or(number);
             track.disc = tags.disc;
             track.artist = tags.artist;
@@ -1072,12 +1074,19 @@ impl Core {
                 self.play_index(first)?;
             }
         }
+        let (autodetect, fuzzy) = {
+            let settings = self.settings();
+            (settings.sub_autodetect, settings.sub_autodetect_fuzzy)
+        };
         for uri in subtitles {
-            if self.current_uri().is_none() {
+            let Some(video) = self.current_uri() else {
                 self.notice("error", "Open a video first, then its subtitles");
                 break;
+            };
+            // libVLC loads it with the video already; adding it lists it twice.
+            if !(autodetect && vlc_autodetects(Path::new(&video), Path::new(&uri), fuzzy)) {
+                self.add_subtitle(file_uri(&uri))?;
             }
-            self.add_subtitle(file_uri(&uri))?;
             self.notice("osd", "Subtitles added");
         }
         Ok(())
@@ -1213,10 +1222,9 @@ fn scan_metadata_worker(core: Arc<Core>) {
         core.meta_scanner.tried.lock().unwrap_or_else(|e| e.into_inner()).insert(uri.clone());
         let path = Path::new(&uri);
         let sig_before = file_sig(path);
-        let tags = match container::parse_metadata(path, &core.embedded_art_dir) {
-            Some(meta) => Ok(meta),
-            None => core.engine.parse(&uri, 5000),
-        };
+        let tags = metadata_with_fallback(container::parse_metadata(path, &core.embedded_art_dir), || {
+            core.engine.parse(&uri, 5000).map(|meta| without_file_name_title(meta, path))
+        });
         // Skip committing if the file was modified/replaced mid-parse so stale tags
         // aren't stamped with the replacement file's mtime.
         if sig_before.is_some() && file_sig(path) != sig_before {
@@ -1242,6 +1250,34 @@ fn scan_metadata_worker(core: Arc<Core>) {
                 }
             }
             Err(e) => eprintln!("revlc: metadata scan failed: {e}"),
+        }
+    }
+}
+
+/// Drops the title libVLC reports when a file has no title tag: the file's
+/// name, with or without its extension.
+fn without_file_name_title(mut meta: engine::MediaMeta, path: &Path) -> engine::MediaMeta {
+    let names = [path.file_name(), path.file_stem()].map(|n| n.map(|n| n.to_string_lossy().into_owned()));
+    if meta.title.as_ref().is_some_and(|t| names.iter().flatten().any(|n| n == t)) {
+        meta.title = None;
+    }
+    meta
+}
+
+/// Prefers the pure-Rust metadata and falls back to libVLC when the format
+/// isn't handled. Some containers don't record a duration (fragmented MP4
+/// with a zero movie-header duration, MKV without Info/Duration), so libVLC
+/// fills it in while the Rust tags and artwork are kept.
+fn metadata_with_fallback(rust: Option<engine::MediaMeta>, vlc: impl FnOnce() -> Result<engine::MediaMeta, String>) -> Result<engine::MediaMeta, String> {
+    match rust {
+        None => vlc(),
+        Some(mut meta) => {
+            if meta.duration <= 0
+                && let Ok(v) = vlc()
+            {
+                meta.duration = v.duration;
+            }
+            Ok(meta)
         }
     }
 }
@@ -1297,6 +1333,10 @@ fn pump_events(core: Arc<Core>, rx: Receiver<EngineEvent>) {
     // The last media that got past its start. Some broken files end
     // without an error, having played nothing.
     let mut played = None;
+    // How far the current media got (its generation and time), from time
+    // updates before its end: a seek into data a truncated file lacks ends
+    // it early, which isn't watching it to the end.
+    let mut reached: Option<(u64, i64)> = None;
     // The media whose end or error has been dealt with, so one that sends
     // both, in the same batch of events or apart, is dealt with once.
     let mut over = None;
@@ -1318,6 +1358,9 @@ fn pump_events(core: Arc<Core>, rx: Receiver<EngineEvent>) {
         let current = |ty: EventKind| batch.iter().any(|e| e.kind == ty && e.generation == generation);
         if current(EventKind::TimeChanged) && core.engine.time() > 0 {
             played = Some(generation);
+        }
+        if current(EventKind::TimeChanged) && !current(EventKind::EndReached) {
+            reached = Some((generation, core.engine.time()));
         }
 
         // Web pages and remote playlists end by expanding into what they hold:
@@ -1357,7 +1400,10 @@ fn pump_events(core: Arc<Core>, rx: Receiver<EngineEvent>) {
                 over = Some(generation);
                 let did_play = played == Some(generation);
                 if did_play && !current(EventKind::Error) {
-                    if let Some(uri) = core.current_uri() {
+                    let reached = reached.filter(|r| r.0 == generation).map_or(0, |r| r.1);
+                    if let Some(uri) = core.current_uri()
+                        && history::reached_the_end(reached, core.engine.length())
+                    {
                         core.history().finish(&uri);
                         core.save_history();
                     }
@@ -1724,6 +1770,9 @@ impl Core {
                     return;
                 }
                 let target_ms = scrub::time_at(grid.length, grid.step, k);
+                if !session.covers(target_ms) {
+                    continue;
+                }
                 match session.decode_nearest(target_ms, scrub::WIDTH) {
                     Ok((_, jpeg)) => {
                         consecutive_errors = 0;
@@ -2119,14 +2168,32 @@ fn run_app_item(app: &AppHandle, id: &str) -> bool {
             let app = app.clone();
             tauri::async_runtime::spawn(async move { updater::check(&app, true).await });
         }
-        "github" => {
-            let opener = if cfg!(windows) { "explorer" } else if cfg!(target_os = "macos") { "open" } else { "xdg-open" };
-            let _ = std::process::Command::new(opener).arg("https://github.com/HiteshRohira/ReVLC").spawn();
+        "github" => open_externally("https://github.com/HiteshRohira/ReVLC"),
+        // macOS has its own About panel in the app menu; these are for the
+        // menus the UI draws elsewhere.
+        "about" => {
+            use tauri_plugin_dialog::{DialogExt, MessageDialogKind};
+            let text = format!(
+                "ReVLC {}\n\nA media player built on libVLC.\nThe licences of ReVLC and the software it includes are under Help → Third-Party Licences.",
+                app.package_info().version
+            );
+            app.dialog().message(text).title("About ReVLC").kind(MessageDialogKind::Info).show(|_| {});
+        }
+        "licenses" => {
+            if let Ok(dir) = app.path().resource_dir() {
+                open_externally(dir.join("licenses"));
+            }
         }
         "quit" => app.exit(0),
         _ => return false,
     }
     true
+}
+
+/// Opens a web page or folder in the system's app for it.
+fn open_externally(target: impl AsRef<std::ffi::OsStr>) {
+    let opener = if cfg!(windows) { "explorer" } else if cfg!(target_os = "macos") { "open" } else { "xdg-open" };
+    let _ = std::process::Command::new(opener).arg(target).spawn();
 }
 
 #[tauri::command]
@@ -2558,10 +2625,106 @@ async fn take_snapshot(app: AppHandle, player: tauri::State<'_, Player>) -> Res 
     let dir = player.core()?.settings().snapshot_dir(default.ok()).ok_or("no snapshot folder")?;
     // The engine waits for the video to hand over a frame.
     off_main(player, move |core| {
+        let (prefix, format) = {
+            let settings = core.settings();
+            (settings.snapshot_prefix.clone(), settings.snapshot_format.clone())
+        };
+        let before = snapshot_pngs(&dir, &prefix);
         core.user_snapshot.store(true, Ordering::Release);
-        core.engine.snapshot(&dir, 0)
+        core.engine.snapshot(&dir, 0)?;
+        // libVLC's snapshot call always writes PNG, whatever the format setting.
+        if format != "png" {
+            for png in snapshot_pngs(&dir, &prefix).difference(&before) {
+                convert_snapshot(png, &format)?;
+            }
+        }
+        Ok(())
     })
     .await?
+}
+
+/// The PNG snapshots in `dir` whose names start with `prefix`.
+fn snapshot_pngs(dir: &Path, prefix: &str) -> HashSet<PathBuf> {
+    let Ok(entries) = std::fs::read_dir(dir) else { return HashSet::new() };
+    entries
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| {
+            let name = p.file_name().and_then(|n| n.to_str()).unwrap_or_default();
+            name.starts_with(prefix) && p.extension().is_some_and(|e| e.eq_ignore_ascii_case("png"))
+        })
+        .collect()
+}
+
+/// Re-encodes the PNG snapshot at `png` as `format` ("jpg" or "tiff") beside
+/// it, under the same name when that's free, and removes the PNG.
+fn convert_snapshot(png: &Path, format: &str) -> Res {
+    let ext = if format == "tiff" { "tiff" } else { "jpg" };
+    let image = image::open(png).map_err(|e| format!("could not read the snapshot: {e}"))?.to_rgb8();
+    let free = |p: &Path| !p.exists() && !p.with_extension("png").exists();
+    let mut out = png.with_extension(ext);
+    if out.exists() {
+        // A name from an earlier run: sequential names take the next free
+        // number, others a suffix.
+        let stem = png.file_stem().and_then(|s| s.to_str()).unwrap_or("snapshot");
+        let digits = stem.len() - stem.trim_end_matches(|c: char| c.is_ascii_digit()).len();
+        let (base, first) = match stem.split_at(stem.len() - digits) {
+            (base, num) if digits > 0 => (base.to_string(), num.parse::<u64>().unwrap_or(0) + 1),
+            _ => (format!("{stem}-"), 1),
+        };
+        out = (first..)
+            .map(|n| png.with_file_name(format!("{base}{n:0digits$}.{ext}")))
+            .find(|p| free(p))
+            .ok_or("no free snapshot name")?;
+    }
+    let bytes = if ext == "tiff" {
+        tiff_rgb(image.width(), image.height(), image.as_raw())
+    } else {
+        let mut bytes = Vec::new();
+        image::codecs::jpeg::JpegEncoder::new_with_quality(&mut bytes, 92)
+            .encode_image(&image)
+            .map_err(|e| format!("could not save the snapshot: {e}"))?;
+        bytes
+    };
+    std::fs::write(&out, bytes).map_err(|e| format!("could not save the snapshot: {e}"))?;
+    let _ = std::fs::remove_file(png);
+    Ok(())
+}
+
+/// An uncompressed baseline TIFF of 8-bit RGB pixels.
+fn tiff_rgb(width: u32, height: u32, rgb: &[u8]) -> Vec<u8> {
+    const ENTRIES: u16 = 10;
+    let ifd = 8u32;
+    let bits = ifd + 2 + ENTRIES as u32 * 12 + 4;
+    let pixels = bits + 6;
+    let mut out = Vec::with_capacity(pixels as usize + rgb.len());
+    out.extend_from_slice(b"II*\0");
+    out.extend_from_slice(&ifd.to_le_bytes());
+    out.extend_from_slice(&ENTRIES.to_le_bytes());
+    let mut entry = |tag: u16, kind: u16, count: u32, value: u32| {
+        out.extend_from_slice(&tag.to_le_bytes());
+        out.extend_from_slice(&kind.to_le_bytes());
+        out.extend_from_slice(&count.to_le_bytes());
+        out.extend_from_slice(&value.to_le_bytes());
+    };
+    const SHORT: u16 = 3;
+    const LONG: u16 = 4;
+    entry(256, LONG, 1, width); // ImageWidth
+    entry(257, LONG, 1, height); // ImageLength
+    entry(258, SHORT, 3, bits); // BitsPerSample, at `bits`
+    entry(259, SHORT, 1, 1); // Compression: none
+    entry(262, SHORT, 1, 2); // Photometric: RGB
+    entry(273, LONG, 1, pixels); // StripOffsets
+    entry(277, SHORT, 1, 3); // SamplesPerPixel
+    entry(278, LONG, 1, height); // RowsPerStrip
+    entry(279, LONG, 1, rgb.len() as u32); // StripByteCounts
+    entry(284, SHORT, 1, 1); // PlanarConfiguration: chunky
+    out.extend_from_slice(&0u32.to_le_bytes());
+    for _ in 0..3 {
+        out.extend_from_slice(&8u16.to_le_bytes());
+    }
+    out.extend_from_slice(rgb);
+    out
 }
 
 #[tauri::command]
@@ -2732,6 +2895,32 @@ fn capture_devices() -> Devices {
 #[tauri::command]
 async fn open_capture(player: tauri::State<'_, Player>, capture: Capture) -> Res {
     off_main(player, move |core| core.add_items(vec![capture::item(&capture)], true)).await?
+}
+
+/// Whether libVLC's subtitle autodetection loads `subtitle` with `video` by
+/// itself, by its rules for files in the video's folder: `fuzzy` 1 takes any
+/// subtitle file, 2 one whose name contains the video's, 3 one that starts
+/// with it, 4 only the same name. Names are compared ignoring case and
+/// punctuation, without extensions.
+fn vlc_autodetects(video: &Path, subtitle: &Path, fuzzy: i64) -> bool {
+    if fuzzy <= 0 || video.parent() != subtitle.parent() {
+        return false;
+    }
+    let name = |p: &Path| {
+        let stem = p.file_stem().map(|s| s.to_string_lossy().to_lowercase()).unwrap_or_default();
+        stem.split(|c: char| !c.is_alphanumeric()).filter(|w| !w.is_empty()).collect::<Vec<_>>().join(" ")
+    };
+    let (video, subtitle) = (name(video), name(subtitle));
+    let level = if subtitle == video {
+        4
+    } else if subtitle.starts_with(&video) {
+        3
+    } else if subtitle.contains(&video) {
+        2
+    } else {
+        1
+    };
+    level >= fuzzy
 }
 
 /// Paths and URLs as queue items: folders give their media, playlist files
@@ -3870,5 +4059,110 @@ mod tests {
             .collect();
         assert!(leftovers.is_empty(), "leftover scrub temp files: {leftovers:?}");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn metadata_fallback_fills_a_missing_duration_and_keeps_rust_tags() {
+        let vlc = || Ok(engine::MediaMeta { duration: 180_021, title: Some("vlc".into()), ..Default::default() });
+        // Fragmented MP4 / MKV without Info/Duration: Rust found tags but no length.
+        let rust = engine::MediaMeta { title: Some("rust".into()), artwork: Some("art.jpg".into()), ..Default::default() };
+        let meta = metadata_with_fallback(Some(rust), vlc).unwrap();
+        assert_eq!(meta.duration, 180_021);
+        assert_eq!(meta.title.as_deref(), Some("rust"));
+        assert_eq!(meta.artwork.as_deref(), Some("art.jpg"));
+        // A known duration never asks libVLC.
+        let rust = engine::MediaMeta { duration: 5_000, ..Default::default() };
+        let meta = metadata_with_fallback(Some(rust), || panic!("libVLC parse not needed")).unwrap();
+        assert_eq!(meta.duration, 5_000);
+        // Unsupported formats go to libVLC; a libVLC failure keeps the Rust tags.
+        assert_eq!(metadata_with_fallback(None, vlc).unwrap().duration, 180_021);
+        let rust = engine::MediaMeta { title: Some("rust".into()), ..Default::default() };
+        let meta = metadata_with_fallback(Some(rust), || Err("timeout".into())).unwrap();
+        assert_eq!((meta.duration, meta.title.as_deref()), (0, Some("rust")));
+    }
+
+    #[test]
+    fn snapshots_are_saved_in_the_chosen_format() {
+        let dir = std::env::temp_dir().join(format!("revlc-snapshot-format-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let png = |name: &str| {
+            let path = dir.join(name);
+            image::RgbImage::from_pixel(4, 2, image::Rgb([200, 10, 20])).save(&path).unwrap();
+            path
+        };
+        let before = snapshot_pngs(&dir, "snap-");
+        let first = png("snap-00001.png");
+        png("other.png");
+        let new: Vec<_> = snapshot_pngs(&dir, "snap-").difference(&before).cloned().collect();
+        assert_eq!(new, vec![first.clone()], "only new snapshots with the prefix are converted");
+
+        convert_snapshot(&first, "jpg").unwrap();
+        let jpg = std::fs::read(dir.join("snap-00001.jpg")).unwrap();
+        assert_eq!(&jpg[..3], &[0xFF, 0xD8, 0xFF], "JPEG signature");
+        assert!(!first.exists(), "the PNG is replaced");
+
+        // A later run where libVLC reuses number 1: the next free number is taken.
+        convert_snapshot(&png("snap-00001.png"), "jpg").unwrap();
+        assert!(dir.join("snap-00002.jpg").exists());
+
+        convert_snapshot(&png("snap-2026-11-23-10h00m00s123.png"), "tiff").unwrap();
+        let tiff = std::fs::read(dir.join("snap-2026-11-23-10h00m00s123.tiff")).unwrap();
+        assert_eq!(&tiff[..4], b"II*\0", "TIFF signature");
+        assert_eq!(&tiff[tiff.len() - 3..], &[200, 10, 20], "pixels stored uncompressed");
+        assert_eq!(tiff.len(), 8 + 2 + 10 * 12 + 4 + 6 + 4 * 2 * 3);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_title_tag_matching_the_file_name_keeps_its_number() {
+        let (core, _mock, _ui, dir) = test_core("music-title-stem");
+        let song = |name: &str| Song {
+            uri: dir.join(format!("{name}.mp3")).to_string_lossy().into_owned(),
+            name: name.into(),
+            root: dir.to_string_lossy().into_owned(),
+            folder: String::new(),
+            modified: 0,
+            artist: None,
+            album: None,
+            album_artist: None,
+            genre: None,
+            track: None,
+            disc: None,
+            year: None,
+            duration: 0,
+            art: None,
+        };
+        let mut songs = [song("31-id3v23"), song("07 Untagged"), song("02 Old cache")];
+        let title = |t: &str| engine::MediaMeta { title: Some(t.into()), ..Default::default() };
+        core.meta.lock().unwrap().insert(&songs[0].uri, title("31-id3v23"));
+        core.meta.lock().unwrap().insert(&songs[1].uri, engine::MediaMeta::default());
+        // libVLC's file-name title, cached by an older version.
+        core.meta.lock().unwrap().insert(&songs[2].uri, title("02 Old cache.mp3"));
+        core.add_music_metadata(&mut songs, &mut Vec::new(), &mut Vec::new());
+        let names: Vec<_> = songs.iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(names, ["31-id3v23", "Untagged", "Old cache"]);
+
+        // libVLC's stand-in title (the file name, with or without extension) isn't a tag.
+        let path = Path::new("/music/07 Song.flac");
+        assert_eq!(without_file_name_title(title("07 Song.flac"), path).title, None);
+        assert_eq!(without_file_name_title(title("07 Song"), path).title, None);
+        assert_eq!(without_file_name_title(title("Song"), path).title.as_deref(), Some("Song"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn subtitles_libvlc_autodetects_are_not_added_again() {
+        let dir = Path::new("/films");
+        let video = dir.join("The Film (2020).mkv");
+        let at = |name: &str, fuzzy| vlc_autodetects(&video, &dir.join(name), fuzzy);
+        assert!(at("The Film (2020).srt", 3));
+        assert!(at("the.film.2020.en.srt", 3), "case and punctuation don't matter");
+        assert!(!at("Extras - The Film 2020.srt", 3));
+        assert!(at("Extras - The Film 2020.srt", 2), "contains the name");
+        assert!(at("Other.srt", 1) && !at("Other.srt", 2));
+        assert!(!at("The Film (2020).en.srt", 4) && at("The Film (2020).srt", 4));
+        assert!(!at("The Film (2020).srt", 0), "autodetection off");
+        assert!(!vlc_autodetects(&video, Path::new("/elsewhere/The Film (2020).srt"), 3), "another folder");
     }
 }

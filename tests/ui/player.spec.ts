@@ -388,3 +388,20 @@ test("early scrub events buffer during prepare and cancelled prepares are discar
   await expect(preview).toHaveAttribute("src", /^http:\/\/scrub\.localhost\/13\/149\.jpg\?v=\d+$/);
   await expect.poll(() => preview.evaluate((el: HTMLImageElement) => el.naturalWidth)).toBe(16);
 });
+
+test("the gear menu's Deinterlace toggle follows Settings until it's used", async ({ page }) => {
+  const toggle = page.getByRole("menuitemcheckbox", { name: "Deinterlace" });
+  const settingsWith = (patch: Record<string, unknown>) => page.evaluate((p) => window.__mock.setSettings(p), patch);
+  await page.getByRole("button", { name: "Settings" }).click();
+  await expect(toggle).toHaveAttribute("aria-checked", "false");
+  await settingsWith({ deinterlace: 1, deinterlaceMode: "blend" });
+  await expect(toggle).toHaveAttribute("aria-checked", "true");
+  await toggle.click();
+  await expect(toggle).toHaveAttribute("aria-checked", "false");
+  expect(await lastCall(page, "set_deinterlace")).toEqual({ mode: null });
+  await toggle.click();
+  expect(await lastCall(page, "set_deinterlace")).toEqual({ mode: "blend" });
+  // Settings changing it again takes over from the toggle.
+  await settingsWith({ deinterlace: 0, deinterlaceMode: "blend" });
+  await expect(toggle).toHaveAttribute("aria-checked", "false");
+});

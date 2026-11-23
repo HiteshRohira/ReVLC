@@ -107,6 +107,11 @@ pub struct NativeDecoder {
     codec: VideoCodec,
     width: u32,
     height: u32,
+    /// The container's picture size. Media Foundation's frame size can be
+    /// padded to whole macroblocks (54 rows become 64), so frames are cropped
+    /// to this before scaling.
+    visible_width: u32,
+    visible_height: u32,
     stride: i32,
     rotation: u16,
     output_format: OutputFormat,
@@ -196,6 +201,8 @@ impl NativeDecoder {
                             codec: track.codec.clone(),
                             width: out_cfg.width,
                             height: out_cfg.height,
+                            visible_width: track.width,
+                            visible_height: track.height,
                             stride: out_cfg.stride,
                             rotation: track.rotation,
                             output_format: out_cfg.format,
@@ -218,6 +225,8 @@ impl NativeDecoder {
                             codec: track.codec.clone(),
                             width: out_cfg.width,
                             height: out_cfg.height,
+                            visible_width: track.width,
+                            visible_height: track.height,
                             stride: out_cfg.stride,
                             rotation: track.rotation,
                             output_format: out_cfg.format,
@@ -402,9 +411,13 @@ impl NativeDecoder {
         let stride = pitch.unsigned_abs() as usize;
         let bottom_up = pitch < 0;
         let h_usize = h as usize;
+        let (vw, vh) = visible_size(w, h, self.visible_width, self.visible_height);
 
         match self.output_format {
             OutputFormat::Rgb32 => {
+                // Only the visible rows are read: scanline0 is the picture's top row
+                // in both layouts, and the padding sits below the picture.
+                let (w, h, h_usize) = (vw, vh, vh as usize);
                 let row_bytes = (w as usize).checked_mul(4).ok_or("RGB32 width overflow")?;
                 if stride < row_bytes {
                     return Err("RGB32 stride smaller than width*4".into());
@@ -446,13 +459,20 @@ impl NativeDecoder {
                 let y_plane = &avail[..y_plane_bytes];
                 let uv_plane = &avail[y_plane_bytes..total_need];
                 if self.output_format == OutputFormat::P010 {
-                    scale::p010_to_scaled_jpeg(y_plane, uv_plane, w, h, stride, stride, self.rotation, target_width)
+                    scale::p010_to_scaled_jpeg(y_plane, uv_plane, vw, vh, stride, stride, self.rotation, target_width)
                 } else {
-                    scale::nv12_to_scaled_jpeg(y_plane, uv_plane, w, h, stride, stride, self.rotation, target_width)
+                    scale::nv12_to_scaled_jpeg(y_plane, uv_plane, vw, vh, stride, stride, self.rotation, target_width)
                 }
             }
         }
     }
+}
+
+/// The picture inside a decoded frame of `w`×`h`: the container's size when
+/// it fits, otherwise the whole frame.
+fn visible_size(w: u32, h: u32, visible_w: u32, visible_h: u32) -> (u32, u32) {
+    let pick = |frame: u32, visible: u32| if visible > 0 && visible <= frame { visible } else { frame };
+    (pick(w, visible_w), pick(h, visible_h))
 }
 
 impl Drop for NativeDecoder {
@@ -588,4 +608,19 @@ fn extract_output_config(mt: &IMFMediaType, format: OutputFormat, fallback_w: u3
         .filter(|&s| s.unsigned_abs() as i32 >= min_stride)
         .unwrap_or(min_stride);
     OutputConfig { format, width, height, stride }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::visible_size;
+
+    #[test]
+    fn padded_frames_are_cropped_to_the_container_size() {
+        assert_eq!(visible_size(96, 64, 96, 54), (96, 54));
+        assert_eq!(visible_size(640, 368, 640, 360), (640, 360));
+        assert_eq!(visible_size(1920, 1088, 1920, 1080), (1920, 1080));
+        // Unknown or larger container sizes keep the decoded frame.
+        assert_eq!(visible_size(1280, 720, 0, 0), (1280, 720));
+        assert_eq!(visible_size(1280, 720, 1920, 1080), (1280, 720));
+    }
 }

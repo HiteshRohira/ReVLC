@@ -95,6 +95,17 @@
     if (settings.value) appWindow.setAlwaysOnTop(settings.value.alwaysOnTop);
   });
 
+  // Changing deinterlacing in Settings applies it to the player (unless it's
+  // Automatic), so the player's toggle follows Settings again.
+  let deinterlaceSetting = "";
+  $effect(() => {
+    if (!settings.value) return;
+    const { deinterlace, deinterlaceMode } = settings.value;
+    const now = `${deinterlace} ${deinterlaceMode}`;
+    if (deinterlaceSetting && now !== deinterlaceSetting && deinterlace >= 0) player.deinterlaceChoice = null;
+    deinterlaceSetting = now;
+  });
+
   // "Start in fullscreen": once per item, when its video appears.
   let fullscreenedFor: string | null = null;
   $effect(() => {

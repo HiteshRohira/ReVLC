@@ -632,8 +632,8 @@ fn parse_video_trak(
         codec = VideoCodec::Other("multi-stsd".into());
     }
 
-    let keyframes = if stsz_count == 0 || chunk_offsets.is_empty() || stsc.is_empty() || multi_desc {
-        Vec::new()
+    let (keyframes, data_end_ms) = if stsz_count == 0 || chunk_offsets.is_empty() || stsc.is_empty() || multi_desc {
+        (Vec::new(), None)
     } else {
         build_keyframes(
             timescale,
@@ -661,6 +661,7 @@ fn parse_video_trak(
         extradata,
         header_strip: Vec::new(),
         keyframes,
+        data_end_ms,
     })
 }
 
@@ -856,7 +857,7 @@ fn build_keyframes(
     sample_count: usize,
     stsz_sizes: &[u32],
     chunk_offsets: &[u64],
-) -> Vec<KeyframeEntry> {
+) -> (Vec<KeyframeEntry>, Option<i64>) {
     let sample_size = |idx: usize| -> u32 {
         if stsz_default > 0 { stsz_default } else { stsz_sizes.get(idx).copied().unwrap_or(0) }
     };
@@ -873,7 +874,7 @@ fn build_keyframes(
     targets.sort_unstable();
     targets.dedup();
     if targets.is_empty() {
-        return Vec::new();
+        return (Vec::new(), None);
     }
 
     // Cursors for stts (DTS) and ctts (PTS - DTS).
@@ -892,19 +893,28 @@ fn build_keyframes(
 
     let mut target_pos = 0usize;
     let mut keyframes = Vec::with_capacity(targets.len());
+    // Presentation time of the first sample whose bytes lie past the end of
+    // a truncated file; nothing from there on can be decoded or played.
+    let mut data_end_ms: Option<i64> = None;
 
     for s in 0..sample_count {
-        if target_pos >= targets.len() {
+        if target_pos >= targets.len() && data_end_ms.is_some() {
             break;
         }
         let sz = sample_size(s);
         let cto = ctts.get(ctts_i).map_or(0, |e| e.1);
-
-        if targets[target_pos] == s {
+        let pts_ms = || {
             let pts_ticks = dts.saturating_add(cto);
-            let pts_ms = ((pts_ticks as i128).saturating_mul(1000) / (timescale as i128))
+            ((pts_ticks as i128).saturating_mul(1000) / (timescale as i128))
                 .saturating_add(edit_offset_ms as i128)
-                .clamp(0, i64::MAX as i128) as i64;
+                .clamp(0, i64::MAX as i128) as i64
+        };
+        if data_end_ms.is_none() && cur_offset.checked_add(sz as u64).is_none_or(|end| end > file_len) {
+            data_end_ms = Some(pts_ms());
+        }
+
+        if target_pos < targets.len() && targets[target_pos] == s {
+            let pts_ms = pts_ms();
             if sz > 0
                 && (sz as usize) <= MAX_PACKET_BYTES
                 && cur_offset.checked_add(sz as u64).is_some_and(|end| end <= file_len)
@@ -957,12 +967,28 @@ fn build_keyframes(
     }
 
     keyframes.sort_by_key(|k| k.pts_ms);
-    keyframes
+    (keyframes, data_end_ms)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn keyframes_note_where_a_truncated_file_runs_out() {
+        // 10 samples of 100 bytes, one per chunk, one second apart, a keyframe
+        // every 4th sample. The file stops after 6.5 samples' worth of data.
+        let stsc = [StscEntry { first_chunk: 1, samples_per_chunk: 1, sample_desc_index: 1 }];
+        let offsets: Vec<u64> = (0..10).map(|i| i * 100).collect();
+        let stss = [1, 5, 9];
+        let build = |file_len| build_keyframes(1000, 0, file_len, &[(10, 1000)], &[], Some(&stss), &stsc, 100, 10, &[], &offsets);
+        let (kfs, end) = build(650);
+        assert_eq!(kfs.iter().map(|k| k.pts_ms).collect::<Vec<_>>(), vec![0, 4000]);
+        assert_eq!(end, Some(6000), "sample 6 is the first one cut off");
+        let (kfs, end) = build(1000);
+        assert_eq!(kfs.len(), 3);
+        assert_eq!(end, None, "an intact file has no data end");
+    }
 
     fn mp4_box(kind: &[u8; 4], payload: &[u8]) -> Vec<u8> {
         let mut out = Vec::with_capacity(8 + payload.len());
