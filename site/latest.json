@@ -1,15 +1,15 @@
 {
-  "version": "0.2.11",
-  "notes": "Music, Playlists, Network shares and Internet radio in the sidebar. Windows and Linux keep their menus while playing. Space and Return press the button the keyboard is on. Live radio is no longer offered a place to continue from. The welcome screen fits the smallest window. macOS keeps Settings in the menu bar when the engine can't start.",
-  "pub_date": "2026-11-15T15:44:56Z",
+  "version": "0.2.12",
+  "notes": "Seek previews are made by ReVLC itself, on the graphics card on Mac and Windows, without a bundled FFmpeg. Snapshots are saved in the chosen format. Library durations are filled in for files that don't store one. Videos stopped early are no longer marked Watched. Damaged data files are kept aside instead of stopping ReVLC, and unplayable items are skipped. Windows has About and Third-Party Licences in the Help menu.",
+  "pub_date": "2026-11-23T20:25:36Z",
   "platforms": {
     "darwin-aarch64": {
-      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSVlR1Wml6L0lBejYyRVlRZmV1Y0Z2azZ3cFBVY2Q1Rktvd3JrUnlLS29DSnB5eTRTVmlnYlh2MTROYnlobmlTdGNaWnR3M1d4TmNwamU1U2traHVucithc2VTRlZ2ZHdjPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzk0NzU3MjUzCWZpbGU6UmVWTEMuYXBwLnRhci5negl2ZXJzaW9uOjAuMi4xMQpnQ0VXNXJhMjVNWGFEREpIVzNjcTlxa3BhN0Z2RXZOUEJLMTlVMjB0d2VBcDFIQUZNNEx6OFVqNDBlZm9rQk1KQU9FNUFiL09WZHhRWU8rSks3Z2FDQT09Cg==",
-      "url": "https://github.com/HiteshRohira/ReVLC/releases/download/v0.2.11-alpha/ReVLC-0.2.11-alpha-arm64.app.tar.gz"
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSVlR1Wml6L0lBejNjK2pNZXJWbTFZRm1mdXM3N2dxV0JaWmticnRQLzlLdUhLZkVpc3VWOXpndkxUZUVrSXI5V0RPNm1KbWVxYXlNQVFKbkVCSXpBdkFKT0FIdUNSdEFjPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzk1NDY1NDgyCWZpbGU6UmVWTEMuYXBwLnRhci5negl2ZXJzaW9uOjAuMi4xMgpVUkJZaURJUDAzM0loMEMxTjYwcUNKaUpRM0krM2V2RmhENVNBaTZZeGdCUklPbElUNkxTeEdtUDJ6YnoxMmhNZFVMZnNXd284aEZHenB5UlpzZzBEQT09Cg==",
+      "url": "https://github.com/HiteshRohira/ReVLC/releases/download/v0.2.12-alpha/ReVLC-0.2.12-alpha-arm64.app.tar.gz"
     },
     "windows-x86_64": {
-      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSVlR1Wml6L0lBejdyMmVlbE4rUTZHRnVzeWZGRGx5U0RObFJ1WXIrU2F1OVZ2REFRaVdBN01VMDJDQjJZbzNXak9BeUhreG43RGJEYVN2NjZpTVdkTmtTWU5NSmZZU1EwPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzk0NzU3NDQyCWZpbGU6UmVWTENfMC4yLjExX3g2NC1zZXR1cC5leGUJdmVyc2lvbjowLjIuMTEKUm8zeWxMVmRYV3hCWk1FdTJ1RkZnZUJzM1RYaG9PODg3VnJiamgyVWRmUXVKeDdLeTFkODdkNnlQSFhQK211cXplZkpmWUxHTWNZajEyaGtaN2ErQlE9PQo=",
-      "url": "https://github.com/HiteshRohira/ReVLC/releases/download/v0.2.11-alpha/ReVLC-0.2.11-alpha-x64-setup.exe"
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSVlR1Wml6L0lBeng5QnJNN3BFQTJ1K1EwU2dCVVU2dFA4NzFoSEVBKzUra0lrUmVDYk5ueFhNWG9VeW5NYTFuOEJJZVFpRnBJTU1EUmZ4TjA3Q0FxRGZIaUNyWXdNa1FJPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzk1NDY1NDQzCWZpbGU6UmVWTENfMC4yLjEyX3g2NC1zZXR1cC5leGUJdmVyc2lvbjowLjIuMTIKTUswcjNHNmZmRzUxTFdaTFlYdkpiL2JBbk9CVkc4YTU1alEwUWVwT2hGbnJodERxNkpaOUo3cE5EbEdSR2NsVHNvLzcxejNUUWl4R2YrbGdSb2dmQmc9PQo=",
+      "url": "https://github.com/HiteshRohira/ReVLC/releases/download/v0.2.12-alpha/ReVLC-0.2.12-alpha-x64-setup.exe"
     }
   }
 }
