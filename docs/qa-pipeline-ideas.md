@@ -44,7 +44,9 @@ IDs refer to the audit's findings:
   when the app was started from a terminal.
 - Check the first bytes of a snapshot file for each format setting
   (PNG, JPEG, TIFF) (M3, W4).
-- Video track changes while paused and while playing (W3).
+- Video track changes while paused and while playing (W3). Assert how long
+  until the new picture shows: while playing, Windows showed black for about
+  3 s after a switch.
 - Audio pitch preservation and replay gain, measured from the output.
 
 ## Browser UI tests
@@ -65,6 +67,14 @@ IDs refer to the audit's findings:
 - Detect a Windows Security prompt (firewall) and skip the checks that need
   focus while it's open, instead of failing them. This prompt took focus on
   the PC and caused 10 of the Windows errors.
+- Running `cargo test` on Windows triggers the same firewall prompt for the
+  `revlc_lib` test binary, and the open prompt blocked seek-bar hovers in a
+  later run. Allow it once on the PC, or run the Rust tests after the GUI
+  checks.
+- The Mac double-click fullscreen check failed on 2026-11-24 for both the 0.2.12
+  and 0.2.11 releases. 0.2.11 passed it on 2026-11-22, so something in the test
+  setup changed. Find out why Cua's background double-click no longer reaches
+  the web view.
 - A display selector, so the suite uses the Agent Test Display on the Mac.
 - Refresh native window IDs after fullscreen.
 - Log preview latency, source (native, ffmpeg, libVLC) and image size, so a
