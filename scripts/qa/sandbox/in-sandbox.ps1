@@ -30,7 +30,7 @@ trap {
     exit 1
 }
 
-$env:Path = "$Tools\python;$Tools\python\Scripts;$Tools\cua-driver;$env:Path"
+$env:Path = "$Tools\python;$Tools\python\Scripts;$Tools\cua-driver;$Tools\ffmpeg;$env:Path"
 $installer = Get-ChildItem $Share -Filter *.exe | Select-Object -First 1 -ExpandProperty FullName
 if (-not $installer) { throw "No installer in $Share" }
 

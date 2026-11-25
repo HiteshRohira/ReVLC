@@ -8,7 +8,7 @@ OUT="$BUNDLE/dmg/ReVLC_${VERSION}_$(uname -m).dmg"
 
 stage="$(mktemp -d)"
 trap 'rm -rf "$stage"' EXIT
-cp -R "$BUNDLE/macos/ReVLC.app" "$stage/"
+cp -a "$BUNDLE/macos/ReVLC.app" "$stage/"
 ln -s /Applications "$stage/Applications"
 mkdir -p "$(dirname "$OUT")"
 rm -f "$OUT"

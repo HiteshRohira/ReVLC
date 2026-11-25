@@ -32,9 +32,11 @@
     });
     if (wantFrames === null) return;
     // The video track may not be known yet when the length is, so ask again a few times.
+    let cancelled = false;
     let timer: ReturnType<typeof setTimeout>;
     const ask = async (left: number) => {
       await player.prepareScrub();
+      if (cancelled) return;
       if (player.scrub) previews = "on";
       else if (left > 0) timer = setTimeout(() => ask(left - 1), 1000);
       else previews = "off";
@@ -42,6 +44,7 @@
     // Not while the video is starting: decoding previews then would hold it up.
     timer = setTimeout(() => ask(3), 2500);
     return () => {
+      cancelled = true;
       clearTimeout(timer);
       // Leaving the player (Home) stops them too.
       untrack(() => player.cancelScrub());
@@ -289,7 +292,7 @@
     {@const boxed = previews !== "off" && !fineOpen}
     <div class="tip" class:framed={boxed} style="left: clamp({boxed ? 92 : 60}px, {(hover / length) * 100}%, calc(100% - {boxed ? 92 : 60}px))">
       {#if frame}
-        <img src={thumbUrl(frame, player.scrubVersion)} alt="" draggable="false" />
+        <img src={thumbUrl(frame, player.scrubVersion)} alt="Seek preview" draggable="false" />
       {:else if boxed}
         <!-- The frame here isn't made yet. -->
         <div class="making" role="status" aria-label="Making preview"><div class="ring"></div></div>

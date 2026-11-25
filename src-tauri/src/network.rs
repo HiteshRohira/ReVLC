@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::library::{is_media, natural_cmp};
 use crate::playlist::{percent_decode, title_for};
-use crate::vlc::{BrowseEntry, Vlc};
+use crate::engine::{BrowseEntry, Engine};
 
 /// How long a server gets to list a folder.
 const BROWSE_TIMEOUT_MS: i32 = 20_000;
@@ -297,8 +297,8 @@ fn local(path: &Path) -> Result<Listing, String> {
 }
 
 /// Lists a folder: a local path, or a server's address. `user` and
-/// `password` sign in to servers libVLC browses; the system asks for its own.
-pub fn browse(vlc: &Vlc, location: &str, user: &str, password: &str) -> Result<Listing, String> {
+/// `password` sign in to servers the engine browses; the system asks for its own.
+pub fn browse(engine: &dyn Engine, location: &str, user: &str, password: &str) -> Result<Listing, String> {
     if !location.contains("://") && Path::new(location).is_absolute() {
         return local(Path::new(location));
     }
@@ -314,7 +314,7 @@ pub fn browse(vlc: &Vlc, location: &str, user: &str, password: &str) -> Result<L
         let path = unc_path(&url).ok_or("Add the shared folder's name, like smb://computer/folder")?;
         return local(Path::new(&path));
     }
-    let listed = vlc.browse(&with_credentials(&url, user, password), BROWSE_TIMEOUT_MS)?;
+    let listed = engine.browse(&with_credentials(&url, user, password), BROWSE_TIMEOUT_MS)?;
     // File servers list everything; media servers (UPnP) only list media,
     // often at addresses with no file name to go by.
     let files = scheme != "upnp";

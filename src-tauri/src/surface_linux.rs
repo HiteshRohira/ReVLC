@@ -11,7 +11,7 @@ use gtk::glib::{ControlFlow, Propagation};
 use gtk::prelude::*;
 use webkit2gtk::{HardwareAccelerationPolicy, SettingsExt, WebViewExt};
 
-use crate::vlc::PresentedFrame;
+use crate::engine::PresentedFrame;
 
 #[link(name = "X11")]
 unsafe extern "C" {

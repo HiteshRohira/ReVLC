@@ -74,6 +74,23 @@ if (-not (Test-Path "$tools\python\python.exe") -or -not (Test-Path "$tools\cua-
     Copy-Item "$cua\*.exe" "$tools\cua-driver\" -Force
     Remove-Item $dl -Recurse -Force
 }
+if (-not (Test-Path "$tools\ffmpeg\ffmpeg.exe" -PathType Leaf)) {
+    $hostFfmpeg = $null
+    foreach ($candidate in @($env:REVLC_TEST_FFMPEG, $env:QA_FFMPEG)) {
+        if ($candidate -and (Test-Path $candidate -PathType Leaf)) { $hostFfmpeg = (Resolve-Path $candidate).Path; break }
+    }
+    if (-not $hostFfmpeg) { $hostFfmpeg = (Get-Command ffmpeg -ErrorAction SilentlyContinue).Source }
+    if (-not $hostFfmpeg) { throw "No ffmpeg.exe found via REVLC_TEST_FFMPEG/QA_FFMPEG or PATH (required to stage test-media ffmpeg for Sandbox)" }
+    New-Item -ItemType Directory -Force "$tools\ffmpeg" | Out-Null
+    $ffDir = Split-Path $hostFfmpeg
+    Copy-Item $hostFfmpeg "$tools\ffmpeg\ffmpeg.exe" -Force
+    Get-ChildItem $ffDir -Filter "*.dll" -ErrorAction SilentlyContinue | Copy-Item -Destination "$tools\ffmpeg\" -Force
+    $ErrorActionPreference = "Continue"
+    & "$tools\ffmpeg\ffmpeg.exe" -hide_banner -version *> $null
+    $ffExit = $LASTEXITCODE
+    $ErrorActionPreference = "Stop"
+    if ($ffExit -ne 0) { throw "Staged $tools\ffmpeg\ffmpeg.exe failed -version (exit $ffExit)" }
+}
 
 # The run folder the Sandbox sees as C:\revlc.
 $stamp = Get-Date -Format "yyyyMMdd-HHmmss"

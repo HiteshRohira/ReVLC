@@ -1,6 +1,6 @@
 [package]
 name = "revlc"
-version = "0.2.11"
+version = "0.2.12"
 description = "A modern media player built on libVLC"
 authors = ["revlc contributors"]
 license = "GPL-3.0-or-later"
@@ -23,6 +23,7 @@ libloading = "0.8"
 # Loads libVLC from ordinary paths rather than \\?\ ones; see vlc.rs.
 dunce = "1"
 image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
+lofty = "0.25"
 tauri-plugin-updater = "2"
 # Analytics; the same HTTP and TLS crates the updater uses.
 reqwest = { version = "0.13", default-features = false, features = ["json", "rustls-no-provider", "system-proxy"] }
@@ -40,7 +41,7 @@ libc = "0.2"
 tauri-plugin-single-instance = "2"
 # The version Tauri uses, for WebView2 settings it doesn't expose.
 webview2-com = "0.39"
-windows = { version = "0.62", features = ["Win32_Media_DirectShow", "Win32_System_Com", "Win32_System_Com_StructuredStorage", "Win32_System_Ole", "Win32_System_Variant"] }
+windows = { version = "0.62", features = ["Win32_Foundation", "Win32_Graphics_Direct3D", "Win32_Graphics_Direct3D11", "Win32_Graphics_Dxgi", "Win32_Graphics_Dxgi_Common", "Win32_Media_DirectShow", "Win32_Media_MediaFoundation", "Win32_System_Com", "Win32_System_Com_StructuredStorage", "Win32_System_Ole", "Win32_System_Variant"] }
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Globalization", "Win32_Graphics_Gdi", "Win32_Storage_FileSystem", "Win32_System_LibraryLoader", "Win32_System_Registry", "Win32_System_SystemInformation", "Win32_System_WindowsProgramming", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]

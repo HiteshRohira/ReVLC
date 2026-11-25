@@ -6,15 +6,51 @@ use std::ptr::NonNull;
 
 use objc2::{MainThreadMarker, MainThreadOnly, Message, sel};
 use objc2::rc::Retained;
+use objc2::runtime::{AnyObject, ProtocolObject};
 use block2::RcBlock;
 use objc2_app_kit::{
     NSAutoresizingMaskOptions, NSColor, NSCursor, NSEvent, NSEventMask, NSView, NSWindow,
     NSWindowDidEnterFullScreenNotification, NSWindowDidExitFullScreenNotification, NSWindowOrderingMode,
 };
-use objc2_foundation::{NSNotification, NSNotificationCenter, NSObjectNSDelayedPerforming};
+use objc2_foundation::{NSNotification, NSNotificationCenter, NSObjectNSDelayedPerforming, NSObjectProtocol};
 
-/// Creates the video view below `webview` and returns it as an `NSView*`.
-/// Must run on the main thread. The view lives as long as the window.
+/// One window's video view and the AppKit hooks made for it. Dropping it
+/// (on the main thread, once libVLC has stopped drawing into the view)
+/// removes the hooks and releases the view, so a closed window leaves
+/// nothing behind.
+pub struct Surface {
+    video: Retained<NSView>,
+    monitor: Option<Retained<AnyObject>>,
+    observers: Vec<Retained<ProtocolObject<dyn NSObjectProtocol>>>,
+}
+
+impl Surface {
+    /// The video view, as the `NSView*` libVLC draws into.
+    pub fn view(&self) -> *mut c_void {
+        Retained::as_ptr(&self.video) as *mut c_void
+    }
+}
+
+impl Drop for Surface {
+    fn drop(&mut self) {
+        // SAFETY: the tokens are the ones AppKit returned when they were added.
+        unsafe {
+            if let Some(monitor) = self.monitor.take() {
+                NSEvent::removeMonitor(&monitor);
+            }
+            let center = NSNotificationCenter::defaultCenter();
+            for observer in self.observers.drain(..) {
+                // The block it holds (and the window and web view the block holds) go with it.
+                center.removeObserver(observer.as_ref());
+            }
+        }
+        self.video.removeFromSuperview();
+    }
+}
+
+/// Creates the video view below `webview`. Must run on the main thread.
+/// Keep the [`Surface`] until the window has closed and its player has
+/// stopped, then drop it on the main thread.
 ///
 /// `on_pointer` is called for every mouse move or scroll in the window, from
 /// a native event monitor. The UI uses it to show its controls, so they still
@@ -23,7 +59,7 @@ pub fn attach(
     webview: *mut c_void,
     window: *mut c_void,
     on_pointer: impl Fn() + 'static,
-) -> Result<*mut c_void, String> {
+) -> Result<Surface, String> {
     let mtm = MainThreadMarker::new().ok_or("attach must run on the main thread")?;
     // SAFETY: Tauri hands us the window's live WKWebView and NSWindow.
     let webview: &NSView = unsafe { &*(webview as *const NSView) };
@@ -57,8 +93,8 @@ pub fn attach(
         event.as_ptr()
     });
     let mask = NSEventMask::MouseMoved | NSEventMask::LeftMouseDragged | NSEventMask::ScrollWheel;
-    // The monitor lives for the whole app (it stays, idle, after its window closes).
-    std::mem::forget(unsafe { NSEvent::addLocalMonitorForEventsMatchingMask_handler(mask, &handler) });
+    // SAFETY: the handler returns the event it was given, as AppKit requires.
+    let monitor = unsafe { NSEvent::addLocalMonitorForEventsMatchingMask_handler(mask, &handler) };
 
     // After entering or leaving fullscreen, the web page can lose focus
     // while the web view stays first responder, and the shortcuts stop
@@ -70,12 +106,12 @@ pub fn attach(
         win.performSelector_withObject_afterDelay(sel!(makeFirstResponder:), Some(&web), 0.35);
     });
     let center = NSNotificationCenter::defaultCenter();
-    for name in unsafe { [NSWindowDidEnterFullScreenNotification, NSWindowDidExitFullScreenNotification] } {
-        // The observers live for the whole app.
-        std::mem::forget(unsafe { center.addObserverForName_object_queue_usingBlock(Some(name), Some(window), None, &refocus) });
-    }
+    let observers = unsafe { [NSWindowDidEnterFullScreenNotification, NSWindowDidExitFullScreenNotification] }
+        .into_iter()
+        .map(|name| unsafe { center.addObserverForName_object_queue_usingBlock(Some(name), Some(window), None, &refocus) })
+        .collect();
 
-    Ok(Retained::into_raw(video) as *mut c_void)
+    Ok(Surface { video, monitor, observers })
 }
 
 /// Hides the cursor until the mouse moves (used while video plays).

@@ -12,6 +12,8 @@ pub struct Roster {
     labels: Vec<String>,
     /// The player window that last had the focus.
     focused: Option<String>,
+    /// Open player windows, least recently focused first.
+    used: Vec<String>,
     /// The number the next new window's label gets.
     issued: u32,
 }
@@ -24,6 +26,7 @@ impl Roster {
         self.issued += 1;
         let label = if self.issued == 1 { MAIN.to_string() } else { format!("player-{}", self.issued) };
         self.labels.push(label.clone());
+        self.used.push(label.clone());
         label
     }
 
@@ -40,6 +43,8 @@ impl Roster {
     pub fn focus(&mut self, label: &str) {
         if self.contains(label) {
             self.focused = Some(label.to_string());
+            self.used.retain(|l| l != label);
+            self.used.push(label.to_string());
         }
     }
 
@@ -48,6 +53,7 @@ impl Roster {
     pub fn close(&mut self, label: &str) -> bool {
         let before = self.labels.len();
         self.labels.retain(|l| l != label);
+        self.used.retain(|l| l != label);
         if self.focused.as_deref() == Some(label) {
             self.focused = None;
         }
@@ -58,6 +64,12 @@ impl Roster {
     /// last had the focus, else the newest.
     pub fn target(&self) -> Option<&str> {
         self.focused.as_deref().or_else(|| self.labels.last().map(String::as_str))
+    }
+
+    /// The open player windows, least recently used first, so that when each
+    /// one saves its position in turn the one used last has the last word.
+    pub fn least_recent_first(&self) -> &[String] {
+        &self.used
     }
 }
 
@@ -116,5 +128,31 @@ mod tests {
         w.focus(&b);
         w.close(&b);
         assert_eq!(w.target(), Some(c.as_str()));
+    }
+
+    #[test]
+    fn least_recent_first_follows_focus() {
+        let mut w = Roster::default();
+        let a = w.open();
+        let b = w.open();
+        let c = w.open();
+        assert_eq!(w.least_recent_first(), [a.clone(), b.clone(), c.clone()]);
+        w.focus(&a);
+        assert_eq!(w.least_recent_first(), [b.clone(), c.clone(), a.clone()]);
+        w.focus("settings");
+        w.close(&c);
+        assert_eq!(w.least_recent_first(), [b, a]);
+    }
+
+    #[test]
+    fn closing_twice_is_harmless() {
+        let mut w = Roster::default();
+        let a = w.open();
+        let b = w.open();
+        // Taken out when its close is asked for, then again once it's gone.
+        assert!(!w.close(&b));
+        assert!(!w.close(&b));
+        assert_eq!(w.target(), Some(a.as_str()));
+        assert!(w.close(&a));
     }
 }

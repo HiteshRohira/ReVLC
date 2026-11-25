@@ -42,8 +42,7 @@ fn left_tone() -> PathBuf {
 
 fn load(extra: &[&str]) -> Vlc {
     let args: Vec<String> = ["--no-video-title-show", "--avcodec-hw=none"].iter().chain(extra).map(|s| s.to_string()).collect();
-    let engine = Engine::load(None, &args, &[], &[]).unwrap_or_else(|e| panic!("libVLC didn't load ({}): {}", e.stage, e.message));
-    Vlc::new(engine).unwrap_or_else(|e| panic!("no media player ({}): {}", e.stage, e.message))
+    Vlc::load(None, &args, &[], &[]).unwrap_or_else(|e| panic!("libVLC didn't load ({}): {}", e.stage, e.message))
 }
 
 /// A player whose video goes to memory, like the Linux build's, which
@@ -108,7 +107,7 @@ fn filter_on() -> Filter {
 }
 
 fn apply(vlc: &Vlc, fx: &Effects) {
-    vlc.set_video_filters(&fx.video_chain());
+    vlc.set_video_filters(&video_chain(fx));
 }
 
 #[test]
@@ -134,7 +133,7 @@ fn vlc_it_rejects_a_broken_runtime() {
     let saved = vars.map(std::env::var_os);
     // SAFETY: tests run one at a time (see the module docs).
     unsafe { std::env::set_var("REVLC_VLC_DIR", &dir) };
-    let result = Engine::load(None, &[], &[], &[]);
+    let result = Vlc::load(None, &[], &[], &[]);
     for (var, value) in vars.iter().zip(&saved) {
         unsafe {
             match value {
@@ -168,6 +167,43 @@ fn vlc_it_plays_seeks_and_reports() {
     let t = vlc.time();
     std::thread::sleep(Duration::from_millis(600));
     assert_eq!(vlc.time(), t, "the clock moved while paused");
+}
+
+/// Each player window has its own player on the one libVLC instance: they
+/// play, pause and count their media apart, and ending one's events (as its
+/// window closes) leaves the other's coming.
+#[test]
+#[ignore = "needs libVLC and FFmpeg; see the module docs"]
+fn vlc_it_players_on_one_instance_play_apart() {
+    let (first, _frames) = video_player();
+    let second = first.sibling(&Settings { hardware_decoding: false, ..Settings::default() }).unwrap();
+    let second_frames: Frames = Arc::default();
+    second.set_gtk_surface(second_frames.clone());
+    let (first_tx, first_rx) = std::sync::mpsc::channel();
+    first.subscribe(first_tx);
+    let (second_tx, second_rx) = std::sync::mpsc::channel();
+    second.subscribe(second_tx);
+
+    play(&first, &pattern());
+    play(&second, &halves());
+    assert!((first.length() - 30_000).abs() < 500, "first length {}", first.length());
+    assert!((second.length() - 20_000).abs() < 500, "second length {}", second.length());
+    let _ = frame(&second_frames, Duration::from_millis(200));
+
+    second.set_pause(true);
+    wait("the second to pause", 5, || (second.state() == State::Paused).then_some(()));
+    assert_eq!(first.state(), State::Playing, "pausing one paused the other");
+    let generation = first.generation();
+    second.stop();
+    assert_eq!(first.generation(), generation, "the other player's media changed");
+    assert!(first_rx.try_iter().count() > 0 && second_rx.try_iter().count() > 0, "each player sends its own events");
+
+    second.shutdown();
+    drop(second);
+    second_rx.try_iter().for_each(drop);
+    assert!(second_rx.recv_timeout(Duration::from_secs(1)).is_err(), "a shut-down player still sends events");
+    assert!(first_rx.recv_timeout(Duration::from_secs(2)).is_ok(), "the other player stopped sending events");
+    assert_eq!(first.state(), State::Playing);
 }
 
 #[test]
@@ -292,7 +328,7 @@ fn vlc_it_pitch_filter_shifts_an_octave() {
     let mut pitch = filter_on();
     pitch.values.insert("pitch-shift".into(), 12.0);
     assert!(fx.set_filter("pitch", pitch));
-    let (l, _) = record(&left_tone(), |vlc| vlc.set_audio_filters(&fx.audio_chain(), &fx.audio_params(), true));
+    let (l, _) = record(&left_tone(), |vlc| vlc.set_audio_filters(&audio_chain(&fx), &fx.audio_params(), true));
     let shifted = frequency(&l, 48_000.0);
     assert!((shifted - 880.0).abs() < 30.0, "+12 semitones gave {shifted} Hz");
 }
@@ -530,6 +566,27 @@ fn vlc_it_switches_video_tracks() {
         (c[2] > 180.0 && c[0] < 80.0).then_some((px, w, h))
     });
     assert_eq!((w, h), (320, 180), "second track");
+
+    // Paused, the other track's picture shows without playing on.
+    vlc.set_pause(true);
+    wait("paused", 5, || (vlc.state() == State::Paused).then_some(()));
+    let _ = frame(&frames, Duration::from_millis(300));
+    let at = vlc.time();
+    vlc.set_video_track(ids[0]);
+    let (_, w, h) = wait("the first track while paused", 5, || {
+        let f = frames.lock().unwrap().take()?;
+        let px: Vec<[u8; 3]> = (0..f.height)
+            .flat_map(|y| (0..f.width as usize).map(move |x| (y, x)))
+            .map(|(y, x)| {
+                let i = (y * f.stride) as usize + x * 4;
+                [f.pixels[i + 2], f.pixels[i + 1], f.pixels[i]]
+            })
+            .collect();
+        (mean(&px)[0] > 180.0).then_some((px, f.width, f.height))
+    });
+    assert_eq!((w, h), (320, 240), "first track again");
+    assert_eq!(vlc.state(), State::Paused, "still paused");
+    assert!((vlc.time() - at).abs() < 100, "at the same time: {} then {}", at, vlc.time());
     vlc.stop();
 }
 

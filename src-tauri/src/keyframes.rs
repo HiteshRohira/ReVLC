@@ -7,9 +7,60 @@
 
 use std::io::{BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
-use std::sync::{OnceLock, mpsc};
+use std::process::{Child, Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, OnceLock, mpsc};
 use std::thread;
+
+/// Shared cancellation token that immediately terminates any active FFmpeg
+/// child processes registered on it so preview passes stop and reap promptly.
+#[derive(Default)]
+pub struct CancelToken {
+    cancelled: AtomicBool,
+    children: Mutex<Vec<Arc<Mutex<Option<Child>>>>>,
+}
+
+impl CancelToken {
+    pub fn new() -> Arc<Self> {
+        Arc::new(Self::default())
+    }
+
+    pub fn is_cancelled(&self) -> bool {
+        self.cancelled.load(Ordering::Acquire)
+    }
+
+    /// Marks the token cancelled and immediately kills every registered child
+    /// process. The owning worker still reaps each process via `Child::wait`.
+    pub fn cancel(&self) {
+        self.cancelled.store(true, Ordering::Release);
+        let children: Vec<Arc<Mutex<Option<Child>>>> = {
+            let mut guard = self.children.lock().unwrap_or_else(|e| e.into_inner());
+            std::mem::take(&mut *guard)
+        };
+        for slot in children {
+            if let Some(child) = slot.lock().unwrap_or_else(|e| e.into_inner()).as_mut() {
+                let _ = child.kill();
+            }
+        }
+    }
+
+    fn register(&self, slot: Arc<Mutex<Option<Child>>>) -> bool {
+        let mut guard = self.children.lock().unwrap_or_else(|e| e.into_inner());
+        if self.cancelled.load(Ordering::Acquire) {
+            if let Some(child) = slot.lock().unwrap_or_else(|e| e.into_inner()).as_mut() {
+                let _ = child.kill();
+            }
+            return false;
+        }
+        guard.push(slot);
+        true
+    }
+
+    fn unregister(&self, slot: &Arc<Mutex<Option<Child>>>) {
+        let mut guard = self.children.lock().unwrap_or_else(|e| e.into_inner());
+        guard.retain(|s| !Arc::ptr_eq(s, slot));
+    }
+}
 
 /// FFmpeg: the app's own, next to its program, or else one on the PATH.
 /// Looked for once. (CI builds have an empty stand-in, which doesn't count.)
@@ -71,16 +122,29 @@ impl Accel {
 /// integrated, then the CPU. Each is tried on one keyframe first: a PC
 /// without the GPU decoder fails every pass with it. On macOS, VideoToolbox
 /// picks the GPU itself.
+#[cfg(test)]
 pub fn accel(ffmpeg: &Path, video: &str, track: usize, width: u32) -> Accel {
+    let cancel = CancelToken::new();
+    accel_cancelable(ffmpeg, video, track, width, &cancel)
+}
+
+/// Like [`accel`], registering each probe child on `cancel` so switching videos
+/// kills slow GPU probes immediately instead of holding up the next run.
+pub fn accel_cancelable(ffmpeg: &Path, video: &str, track: usize, width: u32, cancel: &CancelToken) -> Accel {
+    if cancel.is_cancelled() {
+        return Accel::Cpu;
+    }
     if cfg!(target_os = "macos") {
         return Accel::Copy("videotoolbox");
     }
     let nvidia = cfg!(windows) || nvidia_driver();
     let nodes = if cfg!(windows) { Vec::new() } else { vaapi_nodes() };
-    first_working(candidates(cfg!(windows), nvidia, nodes), |a| decodes(ffmpeg, video, track, a, width))
+    first_working(candidates(cfg!(windows), nvidia, nodes), |a| {
+        !cancel.is_cancelled() && decodes_cancelable(ffmpeg, video, track, a, width, cancel)
+    })
 }
 
-/// The GPU decoders to try, in order (see [`accel`]).
+/// The GPU decoders to try, in order (see [`accel_cancelable`]).
 fn candidates(windows: bool, nvidia: bool, vaapi: Vec<String>) -> Vec<Accel> {
     let mut list = Vec::new();
     if nvidia {
@@ -104,18 +168,69 @@ fn nvidia_driver() -> bool {
     Path::new("/proc/driver/nvidia/version").exists()
 }
 
-/// Whether FFmpeg can decode a keyframe of video track `track` of `video`
-/// with `accel`.
+#[cfg(test)]
 fn decodes(ffmpeg: &Path, video: &str, track: usize, accel: &Accel, width: u32) -> bool {
-    command(ffmpeg)
+    decodes_cancelable(ffmpeg, video, track, accel, width, &CancelToken::new())
+}
+
+/// Whether FFmpeg can decode a keyframe of video track `track` of `video`
+/// with `accel`, aborting immediately if `cancel` fires.
+fn decodes_cancelable(ffmpeg: &Path, video: &str, track: usize, accel: &Accel, width: u32, cancel: &CancelToken) -> bool {
+    if cancel.is_cancelled() {
+        return false;
+    }
+    let Ok(child) = command(ffmpeg)
         .args(["-hide_banner", "-nostdin", "-loglevel", "error"])
         .args(accel.args())
         .args(["-skip_frame", "nokey", "-i", video, "-map", &video_stream(track), "-frames:v", "1", "-vf", &accel.filter(width), "-f", "null", "-"])
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
-        .status()
-        .is_ok_and(|s| s.success())
+        .spawn()
+    else {
+        return false;
+    };
+    let slot = Arc::new(Mutex::new(Some(child)));
+    let registered = cancel.register(Arc::clone(&slot));
+    if !registered {
+        let mut c = slot.lock().unwrap_or_else(|e| e.into_inner()).take();
+        if let Some(mut c) = c.take() {
+            let _ = c.wait();
+        }
+        return false;
+    }
+    // Wait without holding the slot lock so `cancel()` can kill the child while blocked?
+    // Actually `Child::wait` requires `&mut Child`; instead we poll briefly or wait on a helper
+    // — wait: on a fast 1-frame probe, wait via try_wait with 5ms sleep so `cancel()` can always
+    // acquire `slot` and call `child.kill()` immediately without blocking!
+    let status = loop {
+        {
+            let mut guard = slot.lock().unwrap_or_else(|e| e.into_inner());
+            let Some(child) = guard.as_mut() else {
+                break None;
+            };
+            if cancel.is_cancelled() {
+                let _ = child.kill();
+                let res = child.wait().ok();
+                *guard = None;
+                break res;
+            }
+            match child.try_wait() {
+                Ok(Some(st)) => {
+                    *guard = None;
+                    break Some(st);
+                }
+                Ok(None) => {}
+                Err(_) => {
+                    *guard = None;
+                    break None;
+                }
+            }
+        }
+        thread::sleep(std::time::Duration::from_millis(5));
+    };
+    cancel.unregister(&slot);
+    !cancel.is_cancelled() && status.is_some_and(|s| s.success())
 }
 
 /// FFmpeg's name for the `track`th video stream, not counting cover art.
@@ -172,6 +287,7 @@ fn vaapi_order(mut nodes: Vec<(String, u16, Option<u64>)>) -> Vec<String> {
 /// Decodes the keyframes of video track `track` of `video` from `from` ms
 /// for `len` ms, `width` pixels wide, calling `frame` with each one's time in
 /// ms and its JPEG. Stops early when `frame` returns false.
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 pub fn pass(
     ffmpeg: &Path,
@@ -181,8 +297,29 @@ pub fn pass(
     from: i64,
     len: i64,
     width: u32,
+    frame: impl FnMut(i64, Vec<u8>) -> bool,
+) -> Result<(), String> {
+    let cancel = CancelToken::new();
+    pass_cancelable(ffmpeg, video, track, accel, from, len, width, &cancel, frame)
+}
+
+/// Like [`pass`], with an explicit [`CancelToken`] that kills the FFmpeg child
+/// immediately on cancellation instead of waiting for the next frame.
+#[allow(clippy::too_many_arguments)]
+pub fn pass_cancelable(
+    ffmpeg: &Path,
+    video: &str,
+    track: usize,
+    accel: &Accel,
+    from: i64,
+    len: i64,
+    width: u32,
+    cancel: &CancelToken,
     mut frame: impl FnMut(i64, Vec<u8>) -> bool,
 ) -> Result<(), String> {
+    if cancel.is_cancelled() {
+        return Ok(());
+    }
     let secs = |ms: i64| format!("{:.3}", ms as f64 / 1000.0);
     let mut child = command(ffmpeg)
         // `info`, for showinfo's line per frame.
@@ -200,8 +337,11 @@ pub fn pass(
     lower_priority(child.id());
     let (Some(mut out), Some(err)) = (child.stdout.take(), child.stderr.take()) else {
         let _ = child.kill();
+        let _ = child.wait();
         return Err("no pipes to ffmpeg".into());
     };
+    let slot = Arc::new(Mutex::new(Some(child)));
+    let registered = cancel.register(Arc::clone(&slot));
     // Frame times come on stderr, in the same order as the JPEGs on stdout.
     let (tx, times) = mpsc::channel();
     let reader = thread::spawn(move || {
@@ -213,34 +353,57 @@ pub fn pass(
             }
         }
     });
-    let (mut buf, mut chunk, mut stopped, mut failed) = (Vec::new(), vec![0u8; 1 << 16], false, None);
-    'read: loop {
-        let n = match out.read(&mut chunk) {
-            Ok(0) => break,
-            Ok(n) => n,
-            Err(e) => {
-                failed = Some(e.to_string());
+    let (mut buf, mut chunk, mut stopped, mut failed) = (Vec::new(), vec![0u8; 1 << 16], !registered, None);
+    if !stopped {
+        'read: loop {
+            if cancel.is_cancelled() {
+                stopped = true;
                 break;
             }
-        };
-        buf.extend_from_slice(&chunk[..n]);
-        while let Some(jpeg) = take_jpeg(&mut buf) {
-            let Ok(at) = times.recv() else { break 'read };
-            if !frame(at, jpeg) {
-                stopped = true;
-                break 'read;
+            let n = match out.read(&mut chunk) {
+                Ok(0) => break,
+                Ok(n) => n,
+                Err(e) => {
+                    if cancel.is_cancelled() {
+                        stopped = true;
+                    } else {
+                        failed = Some(e.to_string());
+                    }
+                    break;
+                }
+            };
+            buf.extend_from_slice(&chunk[..n]);
+            while let Some(jpeg) = take_jpeg(&mut buf) {
+                if cancel.is_cancelled() {
+                    stopped = true;
+                    break 'read;
+                }
+                let Ok(at) = times.recv() else { break 'read };
+                if !frame(at, jpeg) {
+                    stopped = true;
+                    break 'read;
+                }
             }
         }
     }
-    if stopped || failed.is_some() {
-        let _ = child.kill();
+    cancel.unregister(&slot);
+    // Take ownership of `Child` before `wait()` so `cancel()` can never race
+    // with reaping or kill a recycled PID.
+    let mut child = slot.lock().unwrap_or_else(|e| e.into_inner()).take();
+    if let Some(c) = child.as_mut()
+        && (stopped || failed.is_some() || cancel.is_cancelled())
+    {
+        let _ = c.kill();
     }
     drop(out);
-    let status = child.wait().map_err(|e| e.to_string())?;
+    let status = match child {
+        Some(mut c) => c.wait().map_err(|e| e.to_string())?,
+        None => return Ok(()),
+    };
     let _ = reader.join();
     match failed {
         Some(e) => Err(e),
-        None if stopped || status.success() => Ok(()),
+        None if stopped || cancel.is_cancelled() || status.success() => Ok(()),
         None => Err(format!("ffmpeg: {status}")),
     }
 }
@@ -384,6 +547,35 @@ mod tests {
         let line = "[Parsed_showinfo_1 @ 0x5d] n:   3 pts:  31250 pts_time:31.25   duration:   1001 fmt:nv12";
         assert_eq!(pts_ms(line), Some(31_250));
         assert_eq!(pts_ms("frame=  10 fps=0.0"), None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cancel_token_kills_and_reaps_child_promptly() {
+        let token = CancelToken::new();
+        let child = Command::new("/bin/sleep").arg("30").stdout(Stdio::null()).stderr(Stdio::null()).spawn().unwrap();
+        let slot = Arc::new(Mutex::new(Some(child)));
+        assert!(token.register(Arc::clone(&slot)));
+        let started = std::time::Instant::now();
+        token.cancel();
+        let mut child = slot.lock().unwrap().take().unwrap();
+        let status = child.wait().unwrap();
+        assert!(!status.success(), "killed child must not succeed");
+        assert!(started.elapsed() < std::time::Duration::from_secs(2), "took {:?}", started.elapsed());
+        // Registering after cancel immediately kills the child.
+        let child2 = Command::new("/bin/sleep").arg("30").spawn().unwrap();
+        let slot2 = Arc::new(Mutex::new(Some(child2)));
+        assert!(!token.register(Arc::clone(&slot2)));
+        let mut child2 = slot2.lock().unwrap().take().unwrap();
+        let _ = child2.wait();
+    }
+
+    #[test]
+    fn accel_cancelable_returns_cpu_immediately_when_already_cancelled() {
+        let token = CancelToken::new();
+        token.cancel();
+        let picked = accel_cancelable(Path::new("nonexistent-ffmpeg"), "video.mp4", 0, 320, &token);
+        assert!(matches!(picked, Accel::Cpu));
     }
 }
 

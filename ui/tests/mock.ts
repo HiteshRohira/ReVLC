@@ -225,7 +225,7 @@ const handlers: Record<string, (args: Json) => unknown> = {
   update_state: () => ({ status: "idle", version: "", progress: null, byUser: false }),
   disc_list: () => [],
   capture_devices: () => ({ video: [], audio: [] }),
-  scrub_prepare: () => null,
+  scrub_prepare: () => (window.__mock.scrubPrepare ? window.__mock.scrubPrepare() : null),
   toggle_pause: () => setState({ state: state.state === "playing" ? "paused" : "playing" }),
   seek_by: (a) => setState({ time: Math.max(0, (state.time as number) + (a.deltaMs as number)) }),
   seek: (a) => setState({ time: a.ms }),
@@ -262,7 +262,7 @@ mockIPC(
     inFlight[cmd]--;
     if (cmd === "plugin:window|set_title") windowTitle = (args as Json).value as string;
     if (cmd in failing) throw failing[cmd];
-    if (cmd in handlers) return handlers[cmd]((args ?? {}) as Json);
+    if (cmd in handlers) return await handlers[cmd]((args ?? {}) as Json);
     // Window, webview and dialog plugin calls: nothing to do here.
     if (cmd.startsWith("plugin:")) return null;
     if (NO_ANSWER.has(cmd)) return null;
@@ -281,8 +281,11 @@ declare global {
       delays: Record<string, number[]>;
       maxInFlight: Record<string, number>;
       windowTitle(): string;
+      scrubPrepare: null | (() => Promise<Json | null> | Json | null);
       emit: typeof push;
       setState: typeof setState;
+      /** Settings changed elsewhere (the Settings window), as the app announces it. */
+      setSettings(patch: Json): Promise<void>;
       callsTo(cmd: string): unknown[];
     };
   }
@@ -295,7 +298,12 @@ window.__mock = {
   delays,
   maxInFlight,
   windowTitle: () => windowTitle,
+  scrubPrepare: null,
   emit: push,
   setState,
+  setSettings: (patch) => {
+    settings = { ...settings, ...patch };
+    return push("settings://changed", settings);
+  },
   callsTo: (cmd) => calls.filter((c) => c.cmd === cmd).map((c) => c.args),
 };

@@ -1,5 +1,6 @@
 import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import { listenHere as listen } from "./events";
+import { settings } from "./settings.svelte";
 
 export type PlayState = "idle" | "opening" | "buffering" | "playing" | "paused" | "stopped" | "ended" | "error";
 export type Repeat = "off" | "all" | "one";
@@ -355,7 +356,7 @@ export interface Notice {
   text: string;
 }
 
-export const SUBTITLE_EXTENSIONS = ["srt", "ass", "ssa", "vtt", "sub", "idx", "sup", "smi", "ttml"];
+export const SUBTITLE_EXTENSIONS = ["srt", "ass", "ssa", "vtt", "sub", "idx", "sup", "smi", "ttml", "mks"];
 export const ASPECT_RATIOS = [null, "16:9", "4:3", "1:1", "16:10", "2.21:1", "2.35:1", "2.39:1", "5:4"];
 export const CROPS = [null, "16:9", "4:3", "1:1", "16:10", "2.21:1", "2.35:1", "2.39:1", "5:4"];
 export const SPEEDS = [0.25, 0.5, 0.75, 1, 1.25, 1.5, 1.75, 2, 3, 4];
@@ -414,6 +415,12 @@ class Player {
     sleepAfterItem: false,
   });
   tracks = $state<Tracks>({ audio: [], audioCurrent: -1, video: [], videoCurrent: -1, subtitles: [], subtitleCurrent: -1, teletext: false, teletextOn: false });
+  /** Set for a moment after picking another video track: libVLC drops its
+   *  video output while it switches, which shouldn't flash the audio screen. */
+  switchingVideo = $state(false);
+  #switchTimer?: ReturnType<typeof setTimeout>;
+  /** Whether to show the picture rather than the audio screen. */
+  showsVideo = $derived(this.state.hasVideo || (this.switchingVideo && this.state.state !== "stopped"));
   effects = $state<Effects>(structuredClone(DEFAULT_EFFECTS));
   /** `--fullscreen` was given on the command line. */
   startFullscreen = $state(false);
@@ -445,7 +452,9 @@ class Player {
   notices = $state<Notice[]>([]);
   aspect = $state<string | null>(null);
   crop = $state<string | null>(null);
-  deinterlace = $state(false);
+  /** The player's own deinterlace choice; `null` until it's toggled, while Settings decides. */
+  deinterlaceChoice = $state<boolean | null>(null);
+  deinterlace = $derived(this.deinterlaceChoice ?? settings.value?.deinterlace === 1);
 
   active = $derived(ACTIVE.includes(this.state.state));
   playing = $derived(this.state.state === "playing" || this.state.state === "buffering" || this.state.state === "opening");
@@ -475,7 +484,15 @@ class Player {
       listen<Bookmark[]>("player://bookmarks", (e) => (this.bookmarks = e.payload)),
       listen<{ run: number; k: number }>("player://scrub", (e) => {
         const s = this.scrub;
-        if (!s || s.run !== e.payload.run) return;
+        if (!s || s.run !== e.payload.run) {
+          // Buffer frames arriving while `scrub_prepare`'s invoke promise is still in flight.
+          if (this.#scrubPreparing) {
+            const list = this.#scrubPending.get(e.payload.run) ?? [];
+            list.push(e.payload.k);
+            this.#scrubPending.set(e.payload.run, list);
+          }
+          return;
+        }
         // A frame made again (it repeated its neighbour) keeps its file name.
         if (s.ready.has(e.payload.k)) this.scrubVersion++;
         else this.scrub = { ...s, ready: new Set(s.ready).add(e.payload.k) };
@@ -509,19 +526,42 @@ class Player {
     await Promise.all([this.loadHistory(), this.loadLibrary()]);
   }
 
+  #scrubEpoch = 0;
+  #scrubPreparing = false;
+  #scrubPending = new Map<number, number[]>();
+
   /** Starts making seek bar preview frames for what's playing (none when off or not a local video). */
   async prepareScrub() {
+    const epoch = ++this.#scrubEpoch;
     this.scrub = null;
+    this.#scrubPreparing = true;
+    this.#scrubPending.clear();
     try {
       const info = await invoke<{ run: number; prefix: string; step: number; ready: number[] } | null>("scrub_prepare");
-      this.scrub = info && { ...info, ready: new Set(info.ready) };
+      if (epoch !== this.#scrubEpoch) return;
+      this.#scrubPreparing = false;
+      if (!info) {
+        this.#scrubPending.clear();
+        return;
+      }
+      const ready = new Set(info.ready);
+      for (const k of this.#scrubPending.get(info.run) ?? []) ready.add(k);
+      this.#scrubPending.clear();
+      this.scrub = { ...info, ready };
     } catch {
+      if (epoch === this.#scrubEpoch) {
+        this.#scrubPreparing = false;
+        this.#scrubPending.clear();
+      }
       // No previews; the seek bar works without them.
     }
   }
 
   /** Stops making preview frames and forgets them, until the next prepareScrub. */
   cancelScrub() {
+    this.#scrubEpoch++;
+    this.#scrubPreparing = false;
+    this.#scrubPending.clear();
     this.scrub = null;
     invoke("scrub_cancel").catch(() => {});
   }
@@ -703,7 +743,12 @@ class Player {
   }
 
   setAudioTrack = (id: number) => this.#call("set_audio_track", { id });
-  setVideoTrack = (id: number) => this.#call("set_video_track", { id });
+  setVideoTrack = (id: number) => {
+    clearTimeout(this.#switchTimer);
+    this.switchingVideo = id >= 0 && this.showsVideo;
+    if (this.switchingVideo) this.#switchTimer = setTimeout(() => (this.switchingVideo = false), 2000);
+    return this.#call("set_video_track", { id });
+  };
   setSubtitleTrack = (id: number) => this.#call("set_subtitle_track", { id });
   addSubtitle = (uri: string) => this.#call("add_subtitle", { uri });
 
@@ -726,10 +771,12 @@ class Player {
     this.notify("osd", `Crop: ${geometry ?? "None"}`);
     return this.#call("set_crop", { geometry });
   }
+  /** Turns deinterlacing on, with Settings' method (Blend when that's Automatic, as Settings does), or off. */
   setDeinterlace(on: boolean) {
-    this.deinterlace = on;
+    this.deinterlaceChoice = on;
     this.notify("osd", `Deinterlace ${on ? "on" : "off"}`);
-    return this.#call("set_deinterlace", { mode: on ? "yadif" : null });
+    const mode = settings.value?.deinterlaceMode ?? "auto";
+    return this.#call("set_deinterlace", { mode: on ? (mode === "auto" ? "blend" : mode) : null });
   }
 
   snapshot = () => this.#call("take_snapshot");
@@ -892,9 +939,14 @@ export function trackName(name: string) {
   return name === "Disable" ? "Off" : name;
 }
 
-/** URL for a thumbnail file in the app cache. */
+/** URL for a thumbnail file in the app cache, or a custom-protocol preview URL. */
 export function thumbUrl(path: string | null, version = 0) {
-  return path ? `${convertFileSrc(path)}?v=${version}` : null;
+  if (!path) return null;
+  if (path.startsWith("scrub://") || path.startsWith("http://") || path.startsWith("https://")) {
+    const sep = path.includes("?") ? "&" : "?";
+    return `${path}${sep}v=${version}`;
+  }
+  return `${convertFileSrc(path)}?v=${version}`;
 }
 
 /** True for placeholder chapter names like "Chapter 01". */

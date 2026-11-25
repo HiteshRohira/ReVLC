@@ -25,7 +25,6 @@
     "targets": [
       "nsis"
     ],
-    "externalBin": ["binaries/ffmpeg"],
     "fileAssociations": [],
     "windows": {
       "nsis": {

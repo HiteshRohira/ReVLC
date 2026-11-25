@@ -2,7 +2,7 @@
 
 A modern, lightweight media player built on libVLC.
 
-**[revlc.vercel.app](https://revlc.vercel.app)** · [Download the alpha](https://github.com/HiteshRohira/ReVLC/releases/tag/v0.2.11-alpha)
+**[revlc.vercel.app](https://revlc.vercel.app)** · [Download the alpha](https://github.com/HiteshRohira/ReVLC/releases/tag/v0.2.12-alpha)
 
 ReVLC aims for full VLC feature parity with a cleaner, faster UI. It is early:
 see the [feature parity checklist](docs/parity.md) for what works today and
@@ -112,7 +112,7 @@ Download the experimental x64 `.deb` from [Releases](../../releases) for
 Linux Mint 22.x or Ubuntu 24.04, and install it:
 
 ```sh
-sudo apt install ./ReVLC-0.2.11-alpha-amd64.deb
+sudo apt install ./ReVLC-0.2.12-alpha-amd64.deb
 ```
 
 APT installs libVLC 3 and its plugins from your distribution. Launch ReVLC
@@ -138,10 +138,11 @@ npm ci
 npm run build:app
 ```
 
-FFmpeg makes the seek bar previews: it decodes a whole video's keyframes in
-one pass, on the GPU through VA-API where it can. Without it ReVLC falls back
-to libVLC, which is several times slower. (The macOS and Windows packages
-bundle FFmpeg, decoding with VideoToolbox and D3D11VA: `scripts/prepare-ffmpeg.sh`.)
+Seek bar previews use native OS hardware decoders on macOS (VideoToolbox) and
+Windows (Media Foundation + D3D11VA) with an in-memory LRU cache — no FFmpeg
+sidecar is bundled. On Linux, ReVLC uses the distribution's `ffmpeg` package
+(decoding keyframes on the GPU through VA-API or NVDEC where available) and
+falls back to libVLC if it isn't installed.
 
 Use Rust stable and Node 22+. The package is written to
 `src-tauri/target/release/bundle/deb/`; no updater signing key is needed.

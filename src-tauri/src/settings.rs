@@ -6,8 +6,6 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::vlc::ConfigValue;
-
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Resume {
@@ -219,52 +217,6 @@ impl Settings {
     pub fn snapshot_dir(&self, desktop: Option<PathBuf>) -> Option<PathBuf> {
         if self.snapshot_path.is_empty() { desktop } else { Some(PathBuf::from(&self.snapshot_path)) }
     }
-
-    /// The VLC options these settings control, as (name, value) pairs.
-    pub fn vlc_config(&self, system_languages: &[String]) -> Vec<(&'static str, ConfigValue)> {
-        use ConfigValue::*;
-        let sub_language = self.subtitle_language.clone().unwrap_or_else(|| system_languages.join(","));
-        vec![
-            ("play-and-stop", Bool(self.stop_after_each)),
-            ("video", Bool(self.video)),
-            ("deinterlace", Int(self.deinterlace)),
-            ("deinterlace-mode", Str(self.deinterlace_mode.clone())),
-            ("snapshot-prefix", Str(self.snapshot_prefix.clone())),
-            ("snapshot-format", Str(self.snapshot_format.clone())),
-            ("snapshot-sequential", Bool(self.snapshot_sequential)),
-            ("audio", Bool(self.audio)),
-            ("audio-language", Str(self.audio_language.clone())),
-            ("audio-time-stretch", Bool(self.time_stretch)),
-            ("audio-replay-gain-mode", Str(self.replay_gain.clone())),
-            ("spdif", Bool(self.spdif)),
-            ("sub-language", Str(sub_language)),
-            ("sub-autodetect-file", Bool(self.sub_autodetect)),
-            ("sub-autodetect-fuzzy", Int(self.sub_autodetect_fuzzy)),
-            ("subsdec-encoding", Str(self.sub_encoding.clone())),
-            ("freetype-font", Str(self.font.clone())),
-            ("freetype-rel-fontsize", Int(self.font_size)),
-            ("freetype-color", Int(self.font_color)),
-            ("freetype-opacity", Int(self.font_opacity)),
-            ("freetype-bold", Bool(self.bold)),
-            ("freetype-outline-thickness", Int(self.outline_thickness)),
-            ("freetype-outline-color", Int(self.outline_color)),
-            ("freetype-background-opacity", Int(self.background_opacity)),
-            ("freetype-background-color", Int(self.background_color)),
-            ("freetype-shadow-opacity", Int(self.shadow_opacity)),
-            ("sub-margin", Int(self.sub_margin)),
-            ("video-title-show", Bool(self.show_title)),
-            ("video-title-timeout", Int(self.title_timeout)),
-            ("video-title-position", Int(self.title_position)),
-            if cfg!(target_os = "macos") {
-                ("videotoolbox", Bool(self.hardware_decoding))
-            } else {
-                ("avcodec-hw", Str(if self.hardware_decoding { "any" } else { "none" }.into()))
-            },
-            ("file-caching", Int(self.file_caching)),
-            ("network-caching", Int(self.network_caching)),
-            ("avcodec-skiploopfilter", Int(self.skip_loop_filter)),
-        ]
-    }
 }
 
 fn file(data_dir: &Path) -> PathBuf {
@@ -284,15 +236,5 @@ mod tests {
         assert_eq!(s.wheel, Wheel::Volume);
         let s: Settings = serde_json::from_str(r#"{"wheel": "seek"}"#).unwrap();
         assert_eq!(s.wheel, Wheel::Seek);
-    }
-
-    #[test]
-    fn system_languages_unless_overridden() {
-        let mut s = Settings::default();
-        let langs = vec!["en".to_string(), "hi".to_string()];
-        let lang = |s: &Settings| s.vlc_config(&langs).into_iter().find(|(k, _)| *k == "sub-language").unwrap().1;
-        assert_eq!(lang(&s), ConfigValue::Str("en,hi".into()));
-        s.subtitle_language = Some("fr".into());
-        assert_eq!(lang(&s), ConfigValue::Str("fr".into()));
     }
 }

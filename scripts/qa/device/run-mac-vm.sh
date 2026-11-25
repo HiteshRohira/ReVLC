@@ -69,7 +69,7 @@ vssh 'rm -rf ~/qa && mkdir -p ~/qa/scripts'
 vssh 'cat > ~/qa/ReVLC.dmg' < "$dmg"
 tar -C "$ROOT" -czf - scripts/qa | vssh 'tar -C ~/qa -xzf -'
 vssh 'set -e; m=$(mktemp -d); hdiutil attach -nobrowse -readonly -mountpoint "$m" ~/qa/ReVLC.dmg >/dev/null;
-      rm -rf /Applications/ReVLC.app; cp -R "$m/ReVLC.app" /Applications/; hdiutil detach "$m" -quiet;
+      rm -rf /Applications/ReVLC.app; cp -a "$m/ReVLC.app" /Applications/; hdiutil detach "$m" -quiet;
       defaults read /Applications/ReVLC.app/Contents/Info.plist CFBundleShortVersionString' | tee "$run/version.txt"
 
 # Cua's daemon, in the logged-in session, with the grants made by hand.
@@ -78,7 +78,11 @@ cua_up=""
 for _ in {1..30}; do vssh '~/.local/bin/cua-driver status' >/dev/null 2>&1 && { cua_up=1; break; }; sleep 2; done
 [[ -n "$cua_up" ]] || { echo "Cua Driver's daemon didn't start in the VM." >&2; exit 1; }
 
-args="--no-video --out ~/qa/run --ffmpeg /Applications/ReVLC.app/Contents/MacOS/ffmpeg --bundle /Applications/ReVLC.app --installer ~/qa/ReVLC.dmg"
+vm_ffmpeg="$(vssh 'if [ -f /Applications/ReVLC.app/Contents/MacOS/ffmpeg ] && [ -x /Applications/ReVLC.app/Contents/MacOS/ffmpeg ]; then echo /Applications/ReVLC.app/Contents/MacOS/ffmpeg; else PATH=/opt/homebrew/bin:/usr/local/bin:$PATH command -v ffmpeg || true; fi')"
+[[ -n "$vm_ffmpeg" ]] || { echo "No ffmpeg found in the VM (install ffmpeg in the base VM to make test media)" >&2; exit 1; }
+printf -v vm_ffmpeg_q '%q' "$vm_ffmpeg"
+
+args="--no-video --out ~/qa/run --ffmpeg $vm_ffmpeg_q --bundle /Applications/ReVLC.app --installer ~/qa/ReVLC.dmg"
 args="$args --media-cache ~/qa/media"
 [[ -n "$only" ]] && args="$args --only $only"
 [[ -n "$quick" ]] && args="$args --quick"

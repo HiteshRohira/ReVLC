@@ -51,11 +51,11 @@ if [[ -n "$dmg" ]]; then
   mount="$(mktemp -d)"
   hdiutil attach -nobrowse -readonly -mountpoint "$mount" "$dmg" >/dev/null
   trap 'hdiutil detach "$mount" -quiet || true' EXIT
-  cp -R "$mount/ReVLC.app" "$run/ReVLC.app"
+  cp -a "$mount/ReVLC.app" "$run/ReVLC.app"
   hdiutil detach "$mount" -quiet
   trap - EXIT
 else
-  cp -R "$app" "$run/ReVLC.app"
+  cp -a "$app" "$run/ReVLC.app"
 fi
 # Launched directly by the suite, so Gatekeeper's first-launch check doesn't
 # apply; that one stays a manual release check.
@@ -77,7 +77,15 @@ cleanup() {
 }
 trap cleanup EXIT
 
-args=(--out "$run" --ffmpeg "$run/ReVLC.app/Contents/MacOS/ffmpeg" --bundle "$run/ReVLC.app")
+ffmpeg="${REVLC_TEST_FFMPEG:-}"
+[[ -f "$ffmpeg" && -x "$ffmpeg" ]] || ffmpeg="$run/ReVLC.app/Contents/MacOS/ffmpeg"
+[[ -f "$ffmpeg" && -x "$ffmpeg" ]] || ffmpeg="$(PATH="/opt/homebrew/bin:/usr/local/bin:$PATH" command -v ffmpeg || true)"
+[[ -f "$ffmpeg" && -x "$ffmpeg" ]] && "$ffmpeg" -hide_banner -version >/dev/null 2>&1 || {
+  echo "No working ffmpeg binary found (set REVLC_TEST_FFMPEG or install ffmpeg on PATH to make test media)" >&2
+  exit 1
+}
+
+args=(--out "$run" --ffmpeg "$ffmpeg" --bundle "$run/ReVLC.app")
 [[ -n "$only" ]] && args+=(--only "$only")
 [[ -n "$quick" ]] && args+=(--quick)
 [[ -n "$dmg" ]] && args+=(--installer "$dmg")

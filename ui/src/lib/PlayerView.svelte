@@ -79,7 +79,7 @@
   onclick={(e) => e.target === e.currentTarget && player.closeStrip?.()}
   ondblclick={(e) => e.target === e.currentTarget && onfullscreen()}
 >
-  {#if !s.hasVideo}
+  {#if !player.showsVideo}
     <div class="audio">
       {#if !spinner}
         <Music2 size={56} strokeWidth={1.5} />
