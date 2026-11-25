@@ -3679,11 +3679,19 @@ fn only_subtitles(uris: &[String]) -> bool {
 /// the one used last), or, with "Open each video in a new window" on and
 /// that window busy, in a new one. A window picked while idle is marked as
 /// taken until its open starts, so a second open meanwhile doesn't pick it too.
+/// Subtitles on their own go to the video they're for: this window's, else
+/// the one in the window used last that has one.
 fn route_open(shared: &Shared, here: Option<Arc<Session>>, uris: &[String]) -> Option<Arc<Session>> {
     let _routing = shared.routing.lock().unwrap_or_else(|e| e.into_inner());
     let target = here.filter(|s| !s.is_closing()).or_else(|| shared.target_session())?;
-    // Subtitles go into what's playing, wherever that is.
-    let new_window = cfg!(target_os = "macos") && shared.settings().open_in_new_window && !only_subtitles(uris);
+    if only_subtitles(uris) {
+        if target.current_uri().is_some() {
+            return Some(target);
+        }
+        let with_video = shared.sessions().into_iter().rev().find(|s| !s.is_closing() && s.current_uri().is_some());
+        return Some(with_video.unwrap_or(target));
+    }
+    let new_window = cfg!(target_os = "macos") && shared.settings().open_in_new_window;
     if new_window && target.is_busy() {
         return None;
     }
@@ -4366,7 +4374,13 @@ mod tests {
         let elsewhere = route_open(&shared, Some(session.clone()), std::slice::from_ref(&video));
         assert_eq!(elsewhere.is_none(), cfg!(target_os = "macos"), "a video goes to a new window (macOS only)");
         // A video and its subtitles stay together, in the new window.
-        assert_eq!(route_open(&shared, Some(session), &[video, srt]).is_none(), cfg!(target_os = "macos"));
+        assert_eq!(route_open(&shared, Some(session.clone()), &[video, srt.clone()]).is_none(), cfg!(target_os = "macos"));
+        // From Finder, the window used last may have nothing open: they go
+        // to the video in another window instead.
+        let idle = test_window(&shared, Arc::new(engine::mock::MockEngine::default()));
+        shared.registry().windows.focus(&idle.label);
+        let routed = route_open(&shared, None, std::slice::from_ref(&srt));
+        assert!(routed.is_some_and(|s| s.label == session.label));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
