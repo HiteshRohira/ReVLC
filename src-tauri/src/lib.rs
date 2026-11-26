@@ -160,9 +160,8 @@ struct Shared {
     /// The windows showing the network view. Discovery is shared, so it
     /// stops only once none is.
     network_users: Mutex<HashSet<String>>,
-    /// When files last came in from another copy of ReVLC (or the command
-    /// line), and the window they went to. See [`open_handed_over`].
-    last_launch: Mutex<Option<(Instant, String)>>,
+    /// Files other copies of ReVLC handed over, waiting to be opened in turn.
+    hand_overs: Mutex<Option<mpsc::Sender<HandOver>>>,
 }
 
 /// The open player windows, and the session each one plays with.
@@ -254,9 +253,10 @@ struct LibraryScan {
 /// seconds while thumbnails are made; new files show up after this.
 const LIBRARY_SCAN_TTL: Duration = Duration::from_secs(30);
 
-/// Files macOS hands over before `setup` has made the player: on a cold
-/// launch from Finder, the open event can come first. `setup` plays them.
-/// Only touched on the main thread.
+/// Files handed over before `setup` has made the player: on a cold launch
+/// from Finder the open event can come first, and elsewhere another copy of
+/// ReVLC can hand its files over early. `setup` plays them. Only touched on
+/// the main thread.
 static EARLY_OPENS: Mutex<Vec<String>> = Mutex::new(Vec::new());
 
 /// What was opened before the UI was ready, to play once it is.
@@ -840,6 +840,15 @@ impl Session {
     /// [`Core::add`], giving each new item the libVLC `options` (from the
     /// command line, like ":start-time=30").
     fn add_with_options(&self, uris: Vec<String>, play: bool, options: &[String]) -> Result<(), String> {
+        // However this ends, a routed open no longer holds the window: once
+        // it plays (or waits for the video view) the window is busy instead.
+        struct Unclaim<'a>(&'a AtomicBool);
+        impl Drop for Unclaim<'_> {
+            fn drop(&mut self) {
+                self.0.store(false, Ordering::Release);
+            }
+        }
+        let _unclaim = Unclaim(&self.claimed);
         let Opened { mut items, subtitles, folders, failed } = opened(uris);
         // A folder joins the library even if nothing in it, or in the rest, can play.
         for folder in folders {
@@ -857,10 +866,7 @@ impl Session {
         for item in &mut items {
             item.options.extend(options.iter().cloned());
         }
-        let result = self.add_with_subtitles(items, subtitles, play);
-        // Playing (or queued until the video view exists): busy either way.
-        self.claimed.store(false, Ordering::Release);
-        result
+        self.add_with_subtitles(items, subtitles, play)
     }
 
     fn add_items(&self, items: Vec<Item>, play: bool) -> Result<(), String> {
@@ -985,14 +991,14 @@ impl Shared {
         self.registry().sessions.get(label).cloned()
     }
 
-    /// Every open player's session, least recently used first.
+    /// Every open player's session, least recently used first. Windows
+    /// that are closing come first: they've left the roster but may still
+    /// have a player, and the windows still open were used after them.
     fn sessions(&self) -> Vec<Arc<Session>> {
         let registry = self.registry();
-        let mut sessions: Vec<_> =
-            registry.windows.least_recent_first().iter().filter_map(|l| registry.sessions.get(l)).cloned().collect();
-        // Closing windows have left the roster but may still have a player.
-        sessions.extend(registry.sessions.iter().filter(|(l, _)| !registry.windows.contains(l)).map(|(_, s)| s.clone()));
-        sessions
+        let closing = registry.sessions.iter().filter(|(l, _)| !registry.windows.contains(l)).map(|(_, s)| s.clone());
+        let open = registry.windows.least_recent_first().iter().filter_map(|l| registry.sessions.get(l)).cloned();
+        closing.chain(open).collect()
     }
 
     /// The session of the window that menu actions and opened files go to:
@@ -3668,17 +3674,19 @@ fn only_subtitles(uris: &[String]) -> bool {
 /// the one used last), or, with "Open each video in a new window" on and
 /// that window busy, in a new one. A window picked while idle is marked as
 /// taken until its open starts, so a second open meanwhile doesn't pick it too.
-/// Subtitles on their own go to the video they're for: this window's, else
-/// the one in the window used last that has one.
+/// Subtitles on their own go to the video they're for: this window's if it
+/// shows one, else the one in the window used last that does; failing that,
+/// whatever has a file open, in the same order.
 fn route_open(shared: &Shared, here: Option<Arc<Session>>, uris: &[String]) -> Option<Arc<Session>> {
     let _routing = shared.routing.lock().unwrap_or_else(|e| e.into_inner());
     let target = here.filter(|s| !s.is_closing()).or_else(|| shared.target_session())?;
     if only_subtitles(uris) {
-        if target.current_uri().is_some() {
-            return Some(target);
-        }
-        let with_video = shared.sessions().into_iter().rev().find(|s| !s.is_closing() && s.current_uri().is_some());
-        return Some(with_video.unwrap_or(target));
+        let others = shared.sessions().into_iter().rev().filter(|s| !s.is_closing() && s.label != target.label);
+        let candidates: Vec<_> = std::iter::once(target.clone()).chain(others).collect();
+        let opened = |s: &&Arc<Session>| s.current_uri().is_some();
+        let showing = candidates.iter().filter(opened).find(|s| s.engine.has_video());
+        let opened = candidates.iter().find(opened);
+        return Some(showing.or(opened).cloned().unwrap_or(target));
     }
     let new_window = shared.settings().open_in_new_window;
     if new_window && target.is_busy() {
@@ -3697,35 +3705,57 @@ fn open_routed(app: &AppHandle, shared: &Arc<Shared>, here: Option<Arc<Session>>
     }
 }
 
-/// How soon after one hand-over the next counts as part of the same
-/// selection. Explorer starts a copy of ReVLC for each file selected, and each
-/// hands its file over a moment after the last.
-const LAUNCH_BATCH: Duration = Duration::from_secs(1);
-
-/// The window files handed over at `now` join: the one the last hand-over
-/// went to, if that was moments ago and it's still open.
-fn batch_target(shared: &Shared, last: Option<&(Instant, String)>, now: Instant) -> Option<Arc<Session>> {
-    let (at, label) = last?;
-    if now.saturating_duration_since(*at) > LAUNCH_BATCH {
-        return None;
-    }
-    shared.session(label).filter(|s| !s.is_closing())
+/// Files another copy of ReVLC handed over, with their libVLC options.
+#[cfg_attr(target_os = "macos", allow(dead_code))]
+struct HandOver {
+    files: Vec<String>,
+    options: Vec<String>,
 }
 
-/// Plays files another copy of ReVLC handed over. Files opened together
-/// (several selected in Explorer, each in its own copy) go into one window
-/// as a playlist, rather than each taking a window of its own. Blocks, so
-/// not on the main thread.
+/// Queues files another copy of ReVLC handed over, to open in the order
+/// they arrived, off the main thread (creating a window can block it).
 #[cfg_attr(target_os = "macos", allow(dead_code))]
-fn open_handed_over(app: &AppHandle, shared: &Arc<Shared>, uris: Vec<String>, options: Vec<String>) -> Res {
-    // Held throughout, so hand-overs arriving together are handled in turn.
-    let mut last = shared.last_launch.lock().unwrap_or_else(|e| e.into_inner());
-    let session = match batch_target(shared, last.as_ref(), Instant::now()) {
-        Some(session) => session.add_with_options(uris, false, &options).map(|()| session)?,
-        None => open_routed(app, shared, None, uris, options)?,
+fn hand_over(app: &AppHandle, shared: &Arc<Shared>, files: Vec<String>, options: Vec<String>) {
+    let hand_over = HandOver { files, options };
+    let mut queue = shared.hand_overs.lock().unwrap_or_else(|e| e.into_inner());
+    let hand_over = match queue.as_ref() {
+        Some(tx) => match tx.send(hand_over) {
+            Ok(()) => return,
+            // The worker is gone: start another.
+            Err(mpsc::SendError(h)) => h,
+        },
+        None => hand_over,
     };
-    *last = Some((Instant::now(), session.label.clone()));
-    Ok(())
+    let (tx, rx) = mpsc::channel::<HandOver>();
+    let _ = tx.send(hand_over);
+    *queue = Some(tx);
+    let (app, shared) = (app.clone(), shared.clone());
+    thread::spawn(move || {
+        for hand_over in rx {
+            match open_handed_over(&app, &shared, hand_over) {
+                // Shows the window they went to, which may be a new one.
+                Ok(session) => {
+                    if let Some(window) = app.get_webview_window(&session.label) {
+                        let _ = window.unminimize();
+                        let _ = window.set_focus();
+                    }
+                }
+                Err(e) => match shared.target_session() {
+                    Some(session) => session.notice("error", e),
+                    None => eprintln!("revlc: could not open the file: {e}"),
+                },
+            }
+        }
+    });
+}
+
+/// Plays files another copy of ReVLC handed over, where [`route_open`]
+/// says. Explorer starts a copy for each file selected, so with "Open each
+/// video in a new window" on, each selected video gets a window, as VLC
+/// does. Blocks, so not on the main thread.
+#[cfg_attr(target_os = "macos", allow(dead_code))]
+fn open_handed_over(app: &AppHandle, shared: &Arc<Shared>, hand_over: HandOver) -> Result<Arc<Session>, String> {
+    open_routed(app, shared, None, hand_over.files, hand_over.options)
 }
 
 fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
@@ -3792,7 +3822,7 @@ fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
         registry: Mutex::default(),
         routing: Mutex::default(),
         network_users: Mutex::default(),
-        last_launch: Mutex::default(),
+        hand_overs: Mutex::default(),
         data_dir,
     });
 
@@ -3818,12 +3848,7 @@ fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     // The first window gets the command line: its files, then any Finder
     // opened before now.
     let launch = Launch { files: cli.files, media_options: cli.media_options, fullscreen: cli.fullscreen, play_and_exit: cli.play_and_exit };
-    let opened = !launch.files.is_empty();
     let session = open_player(&app_handle, &shared, launch)?;
-    // Files handed over by copies started along with this one join these.
-    if opened {
-        *shared.last_launch.lock().unwrap_or_else(|e| e.into_inner()) = Some((Instant::now(), session.label.clone()));
-    }
     if !cli.ignored.is_empty() {
         session.notice("error", format!("Ignored command-line options: {}", cli.ignored.join(" ")));
     }
@@ -3911,27 +3936,25 @@ pub fn run() {
     // [`open_handed_over`] says.
     #[cfg(any(windows, target_os = "linux"))]
     let builder = builder.plugin(tauri_plugin_single_instance::init(|app, args, cwd| {
-        if let Some(window) = target_label(app).and_then(|label| app.get_webview_window(&label)) {
-            let _ = window.unminimize();
-            let _ = window.set_focus();
-        }
         // libVLC has started, so only the files and their start times count.
         let mut cli = cli::parse(args.into_iter().skip(1));
         cli.resolve_paths(Path::new(&cwd));
         if cli.files.is_empty() {
+            // Started again with nothing to open: show the window used last.
+            if let Some(window) = target_label(app).and_then(|label| app.get_webview_window(&label)) {
+                let _ = window.unminimize();
+                let _ = window.set_focus();
+            }
             return;
         }
-        if let Some(shared) = shared_of(app) {
-            let app = app.clone();
-            // Off the main thread, which creating a window can block.
-            thread::spawn(move || {
-                if let Err(e) = open_handed_over(&app, &shared, cli.files, cli.media_options) {
-                    match shared.target_session() {
-                        Some(session) => session.notice("error", e),
-                        None => eprintln!("revlc: could not open the file: {e}"),
-                    }
+        match app.try_state::<Players>() {
+            Some(players) => {
+                if let Ok(shared) = players.0.clone() {
+                    hand_over(app, &shared, cli.files, cli.media_options);
                 }
-            });
+            }
+            // Before there is a window, `setup` plays them.
+            None => EARLY_OPENS.lock().unwrap_or_else(|e| e.into_inner()).extend(cli.files),
         }
     }));
     let app = match builder
@@ -3974,6 +3997,11 @@ pub fn run() {
             }
             match event {
                 WindowEvent::Focused(true) => shared.registry().windows.focus(window.label()),
+                // Already closing (its close button clicked again): that
+                // close stops the player before the window goes.
+                WindowEvent::CloseRequested { api, .. } if !shared.registry().windows.contains(window.label()) => {
+                    api.prevent_close();
+                }
                 // With others open, stop this window's player before it goes.
                 WindowEvent::CloseRequested { api, .. } if shared.registry().windows.len() > 1 => {
                     api.prevent_close();
@@ -4322,7 +4350,7 @@ mod tests {
             registry: Mutex::default(),
             routing: Mutex::default(),
             network_users: Mutex::default(),
-            last_launch: Mutex::default(),
+            hand_overs: Mutex::default(),
         });
         (shared, mock, ui, dir)
     }
@@ -4421,21 +4449,42 @@ mod tests {
     }
 
     #[test]
-    fn files_handed_over_together_share_a_window() {
-        let (shared, mock, _, dir) = test_shared("handed-over");
+    fn a_failed_open_leaves_the_window_free() {
+        let (shared, mock, _, dir) = test_shared("route-failed");
         shared.settings().open_in_new_window = true;
-        let first = test_window(&shared, mock);
-        let at = Instant::now();
-        let last = (at, first.label.clone());
-        // The next file from the same Explorer selection joins the first one's window...
-        let joined = batch_target(&shared, Some(&last), at + Duration::from_millis(300));
-        assert!(joined.is_some_and(|s| s.label == first.label));
-        // ...but one opened later is routed on its own.
-        assert!(batch_target(&shared, Some(&last), at + LAUNCH_BATCH + Duration::from_millis(1)).is_none());
-        assert!(batch_target(&shared, None, at).is_none());
-        // Nor does a file join a window that's closing.
-        first.begin_close("closed");
-        assert!(batch_target(&shared, Some(&last), at).is_none());
+        let idle = test_window(&shared, mock);
+        let missing = vec![dir.join("missing.m3u").to_string_lossy().into_owned()];
+        let routed = route_open(&shared, None, &missing).expect("the idle window takes it");
+        assert!(routed.add_with_options(missing, true, &[]).is_err());
+        // Nothing opened, so the next video still goes to the idle window.
+        let next = vec![dir.join("b.mp4").to_string_lossy().into_owned()];
+        assert!(route_open(&shared, None, &next).is_some_and(|s| s.label == idle.label));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn subtitles_go_to_the_window_showing_video() {
+        let (shared, _, _, dir) = test_shared("route-subs-video");
+        let (film, _, _) = playing_window(&shared, &dir, "film.mp4", 60_000);
+        // Music plays in the window used last.
+        let (music, music_mock, _) = playing_window(&shared, &dir, "song.mp3", 10_000);
+        music_mock.has_video.store(false, Ordering::Release);
+        shared.registry().windows.focus(&music.label);
+        let srt = vec![dir.join("film.srt").to_string_lossy().into_owned()];
+        assert!(route_open(&shared, Some(music.clone()), &srt).is_some_and(|s| s.label == film.label));
+        assert!(route_open(&shared, None, &srt).is_some_and(|s| s.label == film.label));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_window_closing_saves_before_the_ones_still_open() {
+        let (shared, _, _, dir) = test_shared("close-order");
+        let (closing, _, _) = playing_window(&shared, &dir, "film.mp4", 52_000);
+        let (open, _, _) = playing_window(&shared, &dir, "film.mp4", 80_000);
+        shared.registry().windows.focus(&closing.label);
+        leave_roster(&shared, &closing.label);
+        let order: Vec<_> = shared.sessions().iter().map(|s| s.label.clone()).collect();
+        assert_eq!(order, vec![closing.label.clone(), open.label.clone()]);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -4782,7 +4831,7 @@ mod tests {
 
         // Zero files created in `scrub_dir` and zero leftover temp files in temp_dir for this run.
         assert!(!core.scrub_dir.exists(), "scrub_fill must never touch cache/scrub on disk");
-        let prefix = format!("revlc-scrub-{}-{run}-", std::process::id());
+        let prefix = format!("revlc-scrub-{}-{}-{run}-", std::process::id(), core.label);
         let leftovers: Vec<_> = std::fs::read_dir(std::env::temp_dir())
             .unwrap()
             .filter_map(|e| e.ok())

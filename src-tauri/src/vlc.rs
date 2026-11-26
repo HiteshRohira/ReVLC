@@ -549,6 +549,10 @@ pub struct VlcEngine {
     /// instance's options and a decoder reads it when it starts, so it's put
     /// back there before this player can start one.
     teletext_transparent: AtomicBool,
+    /// What the video callbacks draw with (see [`VlcEngine::set_gtk_surface`]),
+    /// freed once the player is released.
+    #[cfg(any(target_os = "linux", test))]
+    gtk_output: AtomicPtr<GtkOutput>,
 }
 
 // libVLC's media player API is thread-safe.
@@ -670,6 +674,8 @@ impl VlcEngine {
                 teletext_page: Mutex::default(),
                 // VLC's default (vbi-opaque off).
                 teletext_transparent: AtomicBool::new(true),
+                #[cfg(any(target_os = "linux", test))]
+                gtk_output: AtomicPtr::new(std::ptr::null_mut()),
             })
         }
     }
@@ -947,8 +953,8 @@ impl VlcEngine {
 
     #[cfg(any(target_os = "linux", test))]
     pub fn set_gtk_surface(&self, frames: std::sync::Arc<std::sync::Mutex<Option<PresentedFrame>>>) {
-        // The main player and its callbacks live until process exit, like
-        // the event subscription. Attach once, before media can be opened.
+        // Attach once, before media can be opened. The output lives as long
+        // as the player: it's freed after libVLC releases it (see `Drop`).
         let visible = Some(VideoSizes {
             mp: self.mp,
             get_media: self.api.libvlc_media_player_get_media,
@@ -957,6 +963,8 @@ impl VlcEngine {
             media_release: self.api.libvlc_media_release,
         });
         let output = Box::into_raw(Box::new(GtkOutput { frame: std::cell::UnsafeCell::new(None), frames, visible }));
+        let old = self.gtk_output.swap(output, Ordering::AcqRel);
+        assert!(old.is_null(), "a player's video output is set once");
         unsafe {
             (self.api.libvlc_video_set_callbacks)(self.mp, gtk_lock, None, Some(gtk_display), output.cast());
             (self.api.libvlc_video_set_format_callbacks)(self.mp, gtk_format, None);
@@ -2035,6 +2043,14 @@ impl Drop for VlcEngine {
             let sub = *self.subscription.get_mut();
             if !sub.is_null() {
                 drop(Box::from_raw(sub));
+            }
+            // Its video thread has stopped, so nothing draws with it now.
+            #[cfg(any(target_os = "linux", test))]
+            {
+                let output = *self.gtk_output.get_mut();
+                if !output.is_null() {
+                    drop(Box::from_raw(output));
+                }
             }
         }
     }

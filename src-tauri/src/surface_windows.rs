@@ -7,17 +7,21 @@ use std::sync::Once;
 use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, RECT, WPARAM};
 use windows_sys::Win32::Graphics::Gdi::{BLACK_BRUSH, GetStockObject, HBRUSH};
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
-use windows_sys::Win32::UI::Shell::{DefSubclassProc, SetWindowSubclass};
+use windows_sys::Win32::UI::Shell::{DefSubclassProc, RemoveWindowSubclass, SetWindowSubclass};
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, GetClientRect, HWND_BOTTOM, RegisterClassW, SWP_NOACTIVATE, SetWindowPos,
-    WM_SIZE, WNDCLASSW, WS_CHILD, WS_DISABLED, WS_VISIBLE,
+    CreateWindowExW, DefWindowProcW, DestroyWindow, GetClientRect, HWND_BOTTOM, RegisterClassW, SWP_NOACTIVATE,
+    SetWindowPos, WM_NCDESTROY, WM_SIZE, WNDCLASSW, WS_CHILD, WS_DISABLED, WS_VISIBLE,
 };
 
-/// Keeps the video window the size of the main window's client area.
-unsafe extern "system" fn parent_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM, _id: usize, video: usize) -> LRESULT {
+/// Keeps the video window the size of its player window's client area.
+unsafe extern "system" fn parent_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM, id: usize, video: usize) -> LRESULT {
     unsafe {
         if msg == WM_SIZE {
             fit(hwnd, video as HWND);
+        }
+        // Player windows now close while the app runs: unhook before it goes.
+        if msg == WM_NCDESTROY {
+            RemoveWindowSubclass(hwnd, Some(parent_proc), id);
         }
         DefSubclassProc(hwnd, msg, wp, lp)
     }
@@ -71,6 +75,7 @@ pub fn attach(parent: *mut c_void) -> Result<*mut c_void, String> {
         }
         fit(parent, video);
         if SetWindowSubclass(parent, Some(parent_proc), 1, video as usize) == 0 {
+            DestroyWindow(video);
             return Err("could not follow the window's size".into());
         }
         Ok(video)
