@@ -3776,6 +3776,19 @@ fn open_handed_over(app: &AppHandle, shared: &Arc<Shared>, hand_over: HandOver) 
     open_routed(app, shared, None, hand_over.files, hand_over.options)
 }
 
+/// Saves the audio device under the id the audio output now uses (see
+/// [`VlcEngine::audio_device_id`]), so Settings shows the one in use.
+fn carry_over_audio_device(vlc: &VlcEngine, mut settings: Settings, data_dir: &Path) -> Settings {
+    let id = vlc.audio_device_id(&settings.audio_device);
+    if id != settings.audio_device {
+        settings.audio_device = id;
+        if let Err(e) = settings.save(data_dir) {
+            eprintln!("revlc: could not save the audio device: {e}");
+        }
+    }
+    settings
+}
+
 fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     main_window(app)?;
     updater::start(app.handle());
@@ -3800,6 +3813,10 @@ fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
         app.set_menu(menu::build(app.handle(), &keys)?)?;
     }
     let engine = VlcEngine::load_with_settings(resource_dir.as_deref(), &args, &cli.vlc_args, &settings, &languages);
+    let settings = match &engine {
+        Ok(vlc) => carry_over_audio_device(vlc, settings, &data_dir),
+        Err(_) => settings,
+    };
     telemetry::start(&data_dir, settings.analytics, engine.as_ref().map_or("unavailable", |v| v.version()));
     let engine: Arc<dyn Engine> = match engine {
         Ok(vlc) => Arc::new(vlc),
