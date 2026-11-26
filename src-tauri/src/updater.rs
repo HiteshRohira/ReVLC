@@ -17,7 +17,6 @@ use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager};
 use tauri_plugin_updater::{Update, UpdaterExt};
 
-use crate::Player;
 
 const FIRST_CHECK: Duration = Duration::from_secs(10);
 const CHECK_EVERY: Duration = Duration::from_secs(6 * 60 * 60);
@@ -90,7 +89,7 @@ impl Updater {
 }
 
 fn auto_update(app: &AppHandle) -> bool {
-    app.try_state::<Player>().and_then(|p| p.core().ok().map(|core| core.settings().auto_update)).unwrap_or(true)
+    crate::shared_of(app).is_none_or(|shared| shared.settings().auto_update)
 }
 
 /// Starts the periodic background check.
@@ -214,7 +213,7 @@ pub async fn install(app: &AppHandle, by_user: bool) {
 }
 
 fn notice(app: &AppHandle, kind: &'static str, text: String) {
-    let _ = app.emit_to("main", "player://notice", crate::Notice { kind, text });
+    crate::notify(app, crate::Notice { kind, text });
 }
 
 #[tauri::command]
@@ -239,12 +238,12 @@ pub async fn update_restart(app: AppHandle) {
     // for the event thread, which can be waiting for the main thread.
     let player = app.clone();
     let _ = tauri::async_runtime::spawn_blocking(move || {
-        if let Some(player) = player.try_state::<Player>()
-            && let Ok(core) = player.core()
-        {
-            core.stop();
+        if let Some(shared) = crate::shared_of(&player) {
+            for session in shared.sessions() {
+                session.stop();
+            }
             // The Windows installer ends the app without the usual exit.
-            let _ = core.write_history(true);
+            let _ = shared.write_history(true);
         }
     })
     .await;

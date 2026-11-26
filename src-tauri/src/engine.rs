@@ -282,6 +282,12 @@ pub trait Engine: Send + Sync {
     fn generation(&self) -> u64;
     /// Subscribes `tx` to engine events.
     fn subscribe(&self, tx: Sender<EngineEvent>);
+    /// Stops playback and ends the event stream, so its reader finishes.
+    /// The player is released once the last reference to it goes.
+    fn shutdown(&self);
+    /// Another player on the same engine (each player window has its own),
+    /// with `settings` applied.
+    fn new_player(&self, settings: &crate::settings::Settings) -> Result<std::sync::Arc<dyn Engine>, LoadError>;
 
     #[cfg(target_os = "macos")]
     fn set_nsview(&self, view: *mut c_void);
@@ -412,6 +418,9 @@ pub mod mock {
         pub thumbnail_fail_at: Mutex<Option<i64>>,
         pub parse_calls: Mutex<Vec<String>>,
         pub tx: Mutex<Option<Sender<EngineEvent>>>,
+        /// The players made with [`Engine::new_player`].
+        pub players: Mutex<Vec<std::sync::Arc<MockEngine>>>,
+        pub discovery_stops: AtomicU64,
     }
 
     impl Default for MockEngine {
@@ -453,6 +462,8 @@ pub mod mock {
                 thumbnail_fail_at: Mutex::new(None),
                 parse_calls: Mutex::new(Vec::new()),
                 tx: Mutex::new(None),
+                players: Mutex::new(Vec::new()),
+                discovery_stops: AtomicU64::new(0),
             }
         }
     }
@@ -486,6 +497,15 @@ pub mod mock {
         }
         fn subscribe(&self, tx: Sender<EngineEvent>) {
             *self.tx.lock().unwrap() = Some(tx);
+        }
+        fn shutdown(&self) {
+            self.stop();
+            *self.tx.lock().unwrap() = None;
+        }
+        fn new_player(&self, _settings: &crate::settings::Settings) -> Result<std::sync::Arc<dyn Engine>, LoadError> {
+            let player = std::sync::Arc::new(MockEngine::default());
+            self.players.lock().unwrap().push(player.clone());
+            Ok(player)
         }
         #[cfg(target_os = "macos")]
         fn set_nsview(&self, _view: *mut c_void) {}
@@ -674,7 +694,9 @@ pub mod mock {
             Ok(Vec::new())
         }
         fn discovery_start(&self) {}
-        fn discovery_stop(&self) {}
+        fn discovery_stop(&self) {
+            self.discovery_stops.fetch_add(1, Ordering::AcqRel);
+        }
         fn discovered(&self) -> Vec<Found> {
             Vec::new()
         }

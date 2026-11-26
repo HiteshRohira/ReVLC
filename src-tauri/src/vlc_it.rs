@@ -169,6 +169,43 @@ fn vlc_it_plays_seeks_and_reports() {
     assert_eq!(vlc.time(), t, "the clock moved while paused");
 }
 
+/// Each player window has its own player on the one libVLC instance: they
+/// play, pause and count their media apart, and ending one's events (as its
+/// window closes) leaves the other's coming.
+#[test]
+#[ignore = "needs libVLC and FFmpeg; see the module docs"]
+fn vlc_it_players_on_one_instance_play_apart() {
+    let (first, _frames) = video_player();
+    let second = first.sibling(&Settings { hardware_decoding: false, ..Settings::default() }).unwrap();
+    let second_frames: Frames = Arc::default();
+    second.set_gtk_surface(second_frames.clone());
+    let (first_tx, first_rx) = std::sync::mpsc::channel();
+    first.subscribe(first_tx);
+    let (second_tx, second_rx) = std::sync::mpsc::channel();
+    second.subscribe(second_tx);
+
+    play(&first, &pattern());
+    play(&second, &halves());
+    assert!((first.length() - 30_000).abs() < 500, "first length {}", first.length());
+    assert!((second.length() - 20_000).abs() < 500, "second length {}", second.length());
+    let _ = frame(&second_frames, Duration::from_millis(200));
+
+    second.set_pause(true);
+    wait("the second to pause", 5, || (second.state() == State::Paused).then_some(()));
+    assert_eq!(first.state(), State::Playing, "pausing one paused the other");
+    let generation = first.generation();
+    second.stop();
+    assert_eq!(first.generation(), generation, "the other player's media changed");
+    assert!(first_rx.try_iter().count() > 0 && second_rx.try_iter().count() > 0, "each player sends its own events");
+
+    second.shutdown();
+    drop(second);
+    second_rx.try_iter().for_each(drop);
+    assert!(second_rx.recv_timeout(Duration::from_secs(1)).is_err(), "a shut-down player still sends events");
+    assert!(first_rx.recv_timeout(Duration::from_secs(2)).is_ok(), "the other player stopped sending events");
+    assert_eq!(first.state(), State::Playing);
+}
+
 #[test]
 #[ignore = "needs libVLC and FFmpeg; see the module docs"]
 fn vlc_it_invert_and_sepia_reach_the_picture() {

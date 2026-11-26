@@ -142,6 +142,8 @@ pub fn build<R: Runtime>(app: &AppHandle<R>, keys: &HashMap<String, String>) -> 
         "File",
         true,
         &[
+            &item("newWindow", "New Window")?,
+            &sep()?,
             &item("open", "Open…")?,
             &item("openFolder", "Add Folder…")?,
             &item("openUrl", "Open Network Stream…")?,

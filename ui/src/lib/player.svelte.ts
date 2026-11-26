@@ -1,5 +1,5 @@
 import { convertFileSrc, invoke } from "@tauri-apps/api/core";
-import { listen } from "@tauri-apps/api/event";
+import { listenHere as listen } from "./events";
 import { settings } from "./settings.svelte";
 
 export type PlayState = "idle" | "opening" | "buffering" | "playing" | "paused" | "stopped" | "ended" | "error";

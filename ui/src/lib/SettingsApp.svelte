@@ -46,7 +46,7 @@
 
   // Keys reset by each tab's "Restore defaults".
   const TAB_KEYS: Record<Exclude<Tab, "shortcuts">, (keyof Settings)[]> = {
-    general: ["resume", "stopAfterEach", "pauseWhenMinimized", "seekbarChapters", "seekbarPreview", "wheel", "autoUpdate", "analytics"],
+    general: ["resume", "stopAfterEach", "pauseWhenMinimized", "openInNewWindow", "seekbarChapters", "seekbarPreview", "wheel", "autoUpdate", "analytics"],
     video: ["video", "startFullscreen", "alwaysOnTop", "deinterlace", "deinterlaceMode", "snapshotPath", "snapshotPrefix", "snapshotFormat", "snapshotSequential"],
     audio: ["audio", "audioDevice", "audioLanguage", "timeStretch", "replayGain", "spdif"],
     subtitles: ["subtitleLanguage", "subAutodetect", "subAutodetectFuzzy", "subEncoding", "font", "fontSize", "fontColor", "fontOpacity", "bold", "outlineThickness", "outlineColor", "backgroundOpacity", "backgroundColor", "shadowOpacity", "subMargin", "showTitle", "titleTimeout", "titlePosition"],
@@ -228,6 +228,12 @@
         <Row label="Share usage statistics"
           help="Your app version and computer type, and how quickly videos start and seek. No personal information, never what you watch.">
           {@render toggle("analytics")}
+        </Row>
+      </div>
+      <h3>Windows</h3>
+      <div class="group">
+        <Row label="Open each video in a new window" help="When a window is already playing a video, opening another one starts it in a new window instead of replacing it.">
+          {@render toggle("openInNewWindow")}
         </Row>
       </div>
     {:else if tab === "video"}

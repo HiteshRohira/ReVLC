@@ -19,6 +19,7 @@ mod playlists;
 mod preview;
 mod quality;
 mod radio;
+mod roster;
 mod scrub;
 mod settings;
 mod store;
@@ -69,19 +70,27 @@ use playlist::{Item, Playlist, Repeat, SortKey};
 use playlist_file::file_uri;
 use playlists::{Playlists, Saved};
 use radio::{Favorites, Station};
+use roster::Roster;
 use settings::{Resume, Settings};
 use vlc::VlcEngine;
 
-/// UI event sink abstracted from Tauri's `AppHandle` so `Core` can be tested
-/// directly with a mock `Engine`.
+/// UI event sink abstracted from Tauri's `AppHandle` so a [`Session`] can be
+/// tested directly with a mock `Engine`.
 trait UiEvents: Send + Sync {
+    /// Sends an event to every window.
     fn emit_json(&self, event: &str, payload: serde_json::Value);
+    /// Sends an event to the window `label` only.
+    fn emit_to_json(&self, label: &str, event: &str, payload: serde_json::Value);
     fn exit(&self, code: i32);
 }
 
 impl UiEvents for AppHandle {
     fn emit_json(&self, event: &str, payload: serde_json::Value) {
         let _ = self.emit(event, payload);
+    }
+
+    fn emit_to_json(&self, label: &str, event: &str, payload: serde_json::Value) {
+        let _ = self.emit_to(label, event, payload);
     }
 
     fn exit(&self, code: i32) {
@@ -99,25 +108,20 @@ struct ScrubActive {
     focus_in_flight: AtomicUsize,
 }
 
-struct Core {
+/// State shared by every player window: the settings, history, library,
+/// bookmarks and thumbnails, plus the engine and the windows.
+struct Shared {
+    /// For work that isn't any window's playback: thumbnails, metadata,
+    /// audio devices, network discovery. Each window has its own player.
     engine: Arc<dyn Engine>,
-    playlist: Mutex<Playlist>,
     ui: Arc<dyn UiEvents>,
-    /// Set once the video view exists; opens before that are queued so
-    /// libVLC never falls back to its own window.
-    ready: AtomicBool,
-    pending: Mutex<Pending>,
     history: Mutex<History>,
-    /// What to do once the current item starts playing.
-    resume: Mutex<Option<PendingSeek>>,
     settings: Mutex<Settings>,
     data_dir: PathBuf,
     /// The user's preferred languages, for the default subtitle language.
     languages: Vec<String>,
     /// Installed font families (read once; AppKit needs the main thread).
     fonts: Vec<String>,
-    /// Distinguishes the user's snapshots from thumbnail captures.
-    user_snapshot: AtomicBool,
     library: Mutex<Library>,
     thumbs: Thumbnails,
     /// Parallel pure-Rust metadata scanner (decoupled from thumbnail frame grabs).
@@ -128,6 +132,67 @@ struct Core {
     embedded_art_dir: PathBuf,
     /// Temporary scratch directory for libVLC thumbnail fallback (cleaned on startup).
     scrub_dir: PathBuf,
+    /// Bounds concurrent scrub pass workers across rapid track/video changes
+    /// and across windows.
+    scrub_passes_active: Arc<(Mutex<usize>, Condvar)>,
+    meta: Mutex<MetaCache>,
+    bookmarks: Mutex<Bookmarks>,
+    /// The playlists the user saved.
+    playlists: Mutex<Playlists>,
+    /// Saved network servers.
+    servers: Mutex<Servers>,
+    /// Favourite radio stations.
+    radio: Mutex<Favorites>,
+    /// The last library scan, reused for a little while.
+    library_scan: Mutex<Option<LibraryScan>>,
+    /// Wakes the thread that writes the history (see [`Shared::save_history`]).
+    history_saves: mpsc::Sender<()>,
+    /// Held while writing the history, so writes land in order.
+    history_write: Mutex<()>,
+    /// Held while applying a settings change, so changes apply in order, and
+    /// while a new player is set up, so it can't miss one.
+    settings_change: Mutex<()>,
+    /// The player windows and their sessions.
+    registry: Mutex<Registry>,
+    /// Held while choosing which window an opened video plays in, so two
+    /// opens arriving together can't both pick the same idle window.
+    routing: Mutex<()>,
+    /// The windows showing the network view. Discovery is shared, so it
+    /// stops only once none is.
+    network_users: Mutex<HashSet<String>>,
+    /// Files other copies of ReVLC handed over, waiting to be opened in turn.
+    hand_overs: Mutex<Option<mpsc::Sender<HandOver>>>,
+}
+
+/// The open player windows, and the session each one plays with.
+#[derive(Default)]
+struct Registry {
+    windows: Roster,
+    sessions: HashMap<String, Arc<Session>>,
+}
+
+/// One player window's state: its own player and queue. Everything
+/// app-wide is reached through [`Shared`] (a `Session` derefs to it).
+struct Session {
+    shared: Arc<Shared>,
+    /// The window's label, which events for it are addressed to.
+    label: String,
+    /// This window's player.
+    engine: Arc<dyn Engine>,
+    playlist: Mutex<Playlist>,
+    /// Set once the video view exists; opens before that are queued so
+    /// libVLC never falls back to its own window.
+    ready: AtomicBool,
+    pending: Mutex<Pending>,
+    /// Set once the window is closing: nothing more may start playing in it.
+    closing: AtomicBool,
+    /// Set while an open routed here hasn't started playing yet, so another
+    /// open doesn't take this window for an idle one meanwhile.
+    claimed: AtomicBool,
+    /// What to do once the current item starts playing.
+    resume: Mutex<Option<PendingSeek>>,
+    /// Distinguishes the user's snapshots from thumbnail captures.
+    user_snapshot: AtomicBool,
     /// Serializes `scrub_prepare` and `scrub_cancel` so two concurrent calls can
     /// never share a run ID or cancel token.
     scrub_lock: Mutex<()>,
@@ -141,20 +206,10 @@ struct Core {
     scrub_cancel_token: Mutex<Arc<keyframes::CancelToken>>,
     /// Active FFmpeg scrub run metadata so `scrub_focus` can prioritize hovered slots.
     scrub_active: Mutex<Option<Arc<ScrubActive>>>,
-    /// Bounds concurrent scrub pass workers across rapid track/video changes.
-    scrub_passes_active: Arc<(Mutex<usize>, Condvar)>,
     /// The current run's preview frames still to make, which the pointer
     /// reorders. Each run has its own queue, so a worker from an ended run
     /// can never take (and make, from the wrong video) a later run's work.
     scrub_jobs: Mutex<Arc<Mutex<VecDeque<ScrubJob>>>>,
-    meta: Mutex<MetaCache>,
-    bookmarks: Mutex<Bookmarks>,
-    /// The playlists the user saved.
-    playlists: Mutex<Playlists>,
-    /// Saved network servers.
-    servers: Mutex<Servers>,
-    /// Favourite radio stations.
-    radio: Mutex<Favorites>,
     /// A–B loop points in ms.
     ab_loop: Mutex<(Option<i64>, Option<i64>)>,
     sleep: Mutex<SleepTimer>,
@@ -170,23 +225,22 @@ struct Core {
     /// What the UI is told before it's listening, handed over with its
     /// first snapshot. `None` once it has been.
     early: Mutex<Option<Early>>,
-    /// The last library scan, reused for a little while.
-    library_scan: Mutex<Option<LibraryScan>>,
     /// Playback quality measurements, for analytics.
     quality: Mutex<quality::Quality>,
-    /// Wakes the thread that writes the history (see [`Core::save_history`]).
-    history_saves: mpsc::Sender<()>,
-    /// Held while writing the history, so writes land in order.
-    history_write: Mutex<()>,
-    /// Held while applying a settings change, so changes apply in order.
-    settings_change: Mutex<()>,
     /// Equaliser, stereo mode, video effects and zoom; they stay on from
     /// one item to the next.
     effects: Mutex<Effects>,
-    /// `--fullscreen`: video goes fullscreen when it starts, this session.
+    /// `--fullscreen`: video goes fullscreen when it starts (first window only).
     start_fullscreen: bool,
-    /// `--play-and-exit`: quit when the queue has played to its end.
+    /// `--play-and-exit`: quit when the queue has played to its end (first window only).
     play_and_exit: bool,
+}
+
+impl std::ops::Deref for Session {
+    type Target = Shared;
+    fn deref(&self) -> &Shared {
+        &self.shared
+    }
 }
 
 struct LibraryScan {
@@ -203,6 +257,14 @@ const LIBRARY_SCAN_TTL: Duration = Duration::from_secs(30);
 /// launch from Finder, the open event can come first. `setup` plays them.
 /// Only touched on the main thread.
 static EARLY_OPENS: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
+/// What other copies of ReVLC hand over before `setup` has made the first
+/// window (WebView2 handles messages while it starts), in the order they
+/// came; `None` once `setup` has passed them on. Callbacks may run on
+/// another thread (D-Bus on Linux), so checking and adding happen under
+/// the lock that `setup` empties it under.
+#[cfg(any(windows, target_os = "linux"))]
+static EARLY_HAND_OVERS: Mutex<Option<Vec<HandOver>>> = Mutex::new(Some(Vec::new()));
 
 /// What was opened before the UI was ready, to play once it is.
 #[derive(Default)]
@@ -309,12 +371,40 @@ struct LibraryList {
     music: Vec<Song>,
 }
 
-/// libVLC may be missing, in which case every command reports the error.
-struct Player(Result<Arc<Core>, String>);
+/// The app-wide state, in Tauri's managed state. libVLC may be missing, in
+/// which case every command reports the error.
+struct Players(Result<Arc<Shared>, String>);
+
+/// What a command works with: the shared state, and the session of the
+/// window that called it (none for Settings). Resolved from the calling
+/// window's label, so a command acts on its own window's player.
+struct Player {
+    shared: Result<Arc<Shared>, String>,
+    session: Option<Arc<Session>>,
+}
 
 impl Player {
-    fn core(&self) -> Result<&Arc<Core>, String> {
-        self.0.as_ref().map_err(Clone::clone)
+    /// The calling window's session.
+    fn core(&self) -> Result<&Arc<Session>, String> {
+        match (&self.shared, &self.session) {
+            (Err(e), _) => Err(e.clone()),
+            (_, Some(session)) => Ok(session),
+            (_, None) => Err("this window has no player".into()),
+        }
+    }
+
+    /// The app-wide state, which every window (Settings too) can use.
+    fn shared(&self) -> Result<&Arc<Shared>, String> {
+        self.shared.as_ref().map_err(Clone::clone)
+    }
+}
+
+impl<'de, R: tauri::Runtime> tauri::ipc::CommandArg<'de, R> for Player {
+    fn from_command(command: tauri::ipc::CommandItem<'de, R>) -> Result<Self, tauri::ipc::InvokeError> {
+        let webview = command.message.webview();
+        let shared = webview.try_state::<Players>().map(|p| p.0.clone()).unwrap_or_else(|| Err("ReVLC is still starting".into()));
+        let session = shared.as_ref().ok().and_then(|s| s.session(webview.label()));
+        Ok(Player { shared, session })
     }
 }
 
@@ -380,64 +470,56 @@ struct Snapshot {
     early: Early,
 }
 
-impl Core {
+impl Session {
+    /// Sends an event to this window only.
     fn emit<T: Serialize>(&self, event: &str, payload: T) {
         if let Ok(value) = serde_json::to_value(payload) {
-            self.ui.emit_json(event, value);
+            self.ui.emit_to_json(&self.label, event, value);
         }
+    }
+
+    /// Whether something is playing, paused or loading in this window, or
+    /// is about to: an open routed here that hasn't started yet counts.
+    fn is_busy(&self) -> bool {
+        let state = self.engine.state();
+        matches!(state, State::Playing | State::Paused | State::Opening | State::Buffering)
+            // Just opened: libVLC reports Opening only once its input starts.
+            || (state == State::Idle && self.playlist().current.is_some())
+            || self.claimed.load(Ordering::Acquire)
+            || !self.pending.lock().unwrap_or_else(|e| e.into_inner()).items.is_empty()
+    }
+
+    /// This window has left the network view.
+    fn leave_network(&self) {
+        self.stop_network_for(&self.label);
+    }
+
+    /// Whether this window is closing, so nothing more may start in it.
+    fn is_closing(&self) -> bool {
+        self.closing.load(Ordering::Acquire)
+    }
+
+    /// Marks the window as closing and records where it got to. Safe on the
+    /// main thread (it doesn't wait for the transition lock or for libVLC),
+    /// so it can run before the app quits when this was the last window.
+    fn begin_close(&self, why: &'static str) {
+        self.closing.store(true, Ordering::Release);
+        self.save_progress(false);
+        self.quality().close(why);
+    }
+
+    /// Ends the window's player: stops it, its previews and its sleep timer,
+    /// and its event thread. Waits for libVLC, so not on the main thread.
+    fn shutdown(self: &Arc<Self>) {
+        self.closing.store(true, Ordering::Release);
+        self.set_sleep_timer(None, false);
+        let _transition = self.transition();
+        self.scrub_cancel();
+        self.engine.shutdown();
     }
 
     fn playlist(&self) -> MutexGuard<'_, Playlist> {
         self.playlist.lock().unwrap_or_else(|e| e.into_inner())
-    }
-
-    fn history(&self) -> MutexGuard<'_, History> {
-        self.history.lock().unwrap_or_else(|e| e.into_inner())
-    }
-
-    /// Writes the history if it changed (and, unless `force`, the last
-    /// write was a while ago). The history isn't locked during the write.
-    fn write_history(&self, force: bool) -> Res {
-        let _writing = self.history_write.lock().unwrap_or_else(|e| e.into_inner());
-        let Some((file, entries)) = self.history().unsaved(force) else { return Ok(()) };
-        store::write_json(&file, &entries, false).inspect_err(|e| {
-            eprintln!("revlc: {e}");
-            self.history().save_failed();
-        })
-    }
-
-    /// Writes the history soon, from its own thread: for callers holding
-    /// the transition lock, which shouldn't wait for the disk.
-    fn save_history(&self) {
-        let _ = self.history_saves.send(());
-    }
-
-    fn settings(&self) -> MutexGuard<'_, Settings> {
-        self.settings.lock().unwrap_or_else(|e| e.into_inner())
-    }
-
-    /// Saves and applies new settings, reopening the current video if a
-    /// change only takes effect when a video starts.
-    fn set_settings(self: &Arc<Self>, settings: Settings) -> Res {
-        let _changing = self.settings_change.lock().unwrap_or_else(|e| e.into_inner());
-        let previous = self.settings().clone();
-        if previous == settings {
-            return Ok(());
-        }
-        // Saved first: if that fails, nothing has changed.
-        settings.save(&self.data_dir)?;
-        if previous.seekbar_preview && !settings.seekbar_preview {
-            self.scrub_cancel();
-        }
-        let engine_changed = self.engine.apply_settings(&settings, Some(&previous), &self.languages);
-        telemetry::set_enabled(settings.analytics);
-        *self.settings() = settings.clone();
-        self.emit("settings://changed", settings);
-        if engine_changed {
-            let reload = self.clone();
-            thread::spawn(move || reload.reload());
-        }
-        Ok(())
     }
 
     fn transition(&self) -> MutexGuard<'_, ()> {
@@ -455,6 +537,9 @@ impl Core {
         }
         let (state, generation) = {
             let _transition = self.transition();
+            if self.is_closing() {
+                return;
+            }
             let Some(item) = self.current_item() else { return };
             let state = self.engine.state();
             if !matches!(state, State::Playing | State::Paused) {
@@ -502,6 +587,512 @@ impl Core {
     /// Tells the quality measurements about a seek the user asked for.
     fn seeking(&self, target: i64, kind: &'static str) {
         self.quality().seek_requested(&*self.engine, self.engine.time(), target, kind);
+    }
+
+    /// Queues a "continue watching" thumbnail at the current position.
+    fn queue_resume_thumbnail(&self, uri: &str) {
+        let (time, length) = (self.engine.time(), self.engine.length());
+        if length > 0 && self.engine.has_video() {
+            let out = self.history().thumb_path(uri);
+            let kind = JobKind::Frame(time as f64 / length as f64);
+            self.queue_thumbnails(vec![ThumbJob { uri: uri.to_string(), out, kind }], false);
+        }
+    }
+
+    fn current_item(&self) -> Option<Item> {
+        let playlist = self.playlist();
+        playlist.current.and_then(|i| playlist.items.get(i)).cloned()
+    }
+
+    fn current_uri(&self) -> Option<String> {
+        self.current_item().map(|it| it.uri)
+    }
+
+    /// The current item's title, for messages.
+    fn current_title(&self) -> String {
+        self.current_item().map_or_else(|| "this media".into(), |it| it.title)
+    }
+
+    /// Records the current position, and grabs a thumbnail if there's video.
+    fn save_progress(&self, thumbnail: bool) {
+        let Some(uri) = self.current_uri() else { return };
+        let started = match self.engine.state() {
+            State::Playing | State::Paused => true,
+            // Still loading, or buffering after a seek: only once it has a position.
+            State::Opening | State::Buffering => self.engine.time() > 0,
+            _ => false,
+        };
+        if !started || !in_history(&uri) {
+            return;
+        }
+        if thumbnail {
+            self.queue_resume_thumbnail(&uri);
+        }
+        self.history().update(&uri, self.engine.time(), self.engine.length());
+        self.save_history();
+    }
+
+    fn emit_chapters(&self) {
+        self.emit("player://chapters", self.engine.chapters());
+        self.emit("player://titles", self.engine.titles());
+    }
+
+    fn current_bookmarks(&self) -> Vec<Bookmark> {
+        self.current_uri().map(|uri| self.bookmarks().list(&uri)).unwrap_or_default()
+    }
+
+    fn emit_bookmarks(&self) {
+        self.emit("player://bookmarks", self.current_bookmarks());
+    }
+
+    fn ab_loop(&self) -> MutexGuard<'_, (Option<i64>, Option<i64>)> {
+        self.ab_loop.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    fn sleep(&self) -> MutexGuard<'_, SleepTimer> {
+        self.sleep.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Pauses after `minutes`, or stops after the current item, or (with
+    /// neither) cancels the timer.
+    fn set_sleep_timer(self: &Arc<Self>, minutes: Option<u32>, after_item: bool) {
+        let generation = {
+            let mut sleep = self.sleep();
+            sleep.generation += 1;
+            sleep.at = minutes.map(|m| unix_ms() + m as u64 * 60_000);
+            sleep.after_item = after_item && minutes.is_none();
+            sleep.generation
+        };
+        if let Some(m) = minutes {
+            let core = self.clone();
+            thread::spawn(move || {
+                let deadline = Instant::now() + Duration::from_secs(m as u64 * 60);
+                while Instant::now() < deadline {
+                    thread::sleep(Duration::from_millis(500));
+                    if core.sleep().generation != generation {
+                        return;
+                    }
+                }
+                *core.sleep() = SleepTimer { generation: generation + 1, ..Default::default() };
+                if matches!(core.engine.state(), State::Playing | State::Buffering | State::Opening) {
+                    core.engine.set_pause(true);
+                    core.notice("info", "Sleep timer: playback paused");
+                }
+                core.emit_state();
+            });
+        }
+        self.emit_state();
+    }
+
+    fn state(&self) -> PlayerState {
+        let e = &*self.engine;
+        let (loop_a, loop_b) = *self.ab_loop();
+        let (sleep_at, sleep_after_item) = {
+            let sleep = self.sleep();
+            (sleep.at, sleep.after_item)
+        };
+        PlayerState {
+            state: e.state(),
+            time: e.time(),
+            length: e.length(),
+            seekable: e.seekable(),
+            has_video: e.has_video(),
+            rate: e.rate(),
+            volume: e.volume(),
+            muted: e.muted(),
+            buffering: e.buffering(),
+            audio_delay: e.audio_delay(),
+            subtitle_delay: e.subtitle_delay(),
+            title: e.title(),
+            chapter: e.chapter(),
+            loop_a,
+            loop_b,
+            sleep_at,
+            sleep_after_item,
+        }
+    }
+
+    fn tracks(&self) -> Tracks {
+        self.engine.tracks()
+    }
+
+    fn emit_state(&self) {
+        self.emit("player://state", self.state());
+    }
+
+    fn emit_tracks(&self) {
+        self.emit("player://tracks", self.tracks());
+    }
+
+    fn effects(&self) -> MutexGuard<'_, Effects> {
+        self.effects.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Changes the effects with `change`, and tells the UI.
+    fn update_effects(&self, change: impl FnOnce(&mut Effects)) -> Effects {
+        let effects = {
+            let mut effects = self.effects();
+            change(&mut effects);
+            effects.clone()
+        };
+        self.emit("player://effects", effects.clone());
+        effects
+    }
+
+    fn emit_playlist(&self) {
+        let playlist = self.playlist().clone();
+        self.emit("player://playlist", playlist);
+    }
+
+    fn notice(&self, kind: &'static str, text: impl Into<String>) {
+        let notice = Notice { kind, text: text.into() };
+        match self.early().as_mut() {
+            Some(early) => early.notices.push(notice),
+            None => self.emit("player://notice", notice),
+        }
+    }
+
+    fn offer_resume(&self, ms: i64) {
+        let Some(uri) = self.current_uri() else { return };
+        let offer = ResumeOffer { uri, ms };
+        match self.early().as_mut() {
+            Some(early) => early.resume = Some(offer),
+            None => self.emit("player://resume-prompt", offer),
+        }
+    }
+
+    fn early(&self) -> MutexGuard<'_, Option<Early>> {
+        self.early.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    fn play_index(&self, index: usize) -> Result<(), String> {
+        let _transition = self.transition();
+        self.play_index_locked(index)
+    }
+
+    /// [`Core::play_index`], with the transition lock already held.
+    fn play_index_locked(&self, index: usize) -> Result<(), String> {
+        if self.is_closing() {
+            return Err("this window is closing".into());
+        }
+        self.save_progress(true);
+        let item = {
+            let mut playlist = self.playlist();
+            let item = playlist.items.get(index).ok_or("no such playlist item")?.clone();
+            playlist.current = Some(index);
+            item
+        };
+        let (uri, title) = (&item.uri, &item.title);
+        *self.ab_loop() = (None, None);
+        *self.resume.lock().unwrap_or_else(|e| e.into_inner()) = None;
+        if in_history(uri) {
+            // A start time from the command line says where to start.
+            if !item.options.iter().any(|o| o.starts_with(":start-time=")) {
+                self.set_resume(uri);
+            }
+            self.history().touch(uri, title);
+            self.save_history();
+        }
+        self.emit_playlist();
+        self.emit_bookmarks();
+        self.subtitles().clear();
+        let result = self.engine.open(uri, &item.options, item.trusted);
+        let resume_ms = match *self.resume.lock().unwrap_or_else(|e| e.into_inner()) {
+            Some(PendingSeek::Seek { ms, .. }) => Some(ms),
+            _ => None,
+        };
+        let open = {
+            let settings = self.settings();
+            quality::Open {
+                uri,
+                resume_ms,
+                hardware_decoding: settings.hardware_decoding,
+                file_caching: settings.file_caching,
+                network_caching: settings.network_caching,
+            }
+        };
+        self.quality().opened(open, self.engine.generation(), result.as_ref().err().map(String::as_str));
+        result
+    }
+
+    /// What to do about `uri`'s resume point once it starts playing.
+    fn set_resume(&self, uri: &str) {
+        let point = self.history().resume_point(uri);
+        let pending = match (self.settings().resume, point) {
+            (Resume::Always, Some(ms)) => Some(PendingSeek::Seek { ms, announce: true }),
+            (Resume::Ask, Some(ms)) => Some(PendingSeek::Ask(ms)),
+            _ => None,
+        };
+        *self.resume.lock().unwrap_or_else(|e| e.into_inner()) = pending;
+    }
+
+    /// Stops playback, remembering where we were.
+    fn stop(&self) {
+        let _transition = self.transition();
+        self.stop_locked();
+    }
+
+    fn stop_locked(&self) {
+        self.scrub_cancel();
+        self.save_progress(true);
+        self.quality().close("stopped");
+        self.engine.stop();
+        self.emit_state();
+    }
+
+    /// Adds paths or URLs to the playlist, optionally starting the first
+    /// new item. Folders add their media (and join the library); playlist
+    /// files add their entries.
+    fn add(&self, uris: Vec<String>, play: bool) -> Result<(), String> {
+        self.add_with_options(uris, play, &[])
+    }
+
+    /// [`Core::add`], giving each new item the libVLC `options` (from the
+    /// command line, like ":start-time=30").
+    fn add_with_options(&self, uris: Vec<String>, play: bool, options: &[String]) -> Result<(), String> {
+        let Opened { mut items, subtitles, folders, failed } = opened(uris);
+        // A folder joins the library even if nothing in it, or in the rest, can play.
+        for folder in folders {
+            if let Err(e) = self.library().add(&folder) {
+                self.notice("error", e);
+            }
+        }
+        // Nothing at all could be opened: that's the caller's error to show.
+        if items.is_empty() && subtitles.is_empty() && !failed.is_empty() {
+            return Err(failed.join("; "));
+        }
+        for e in failed {
+            self.notice("error", e);
+        }
+        for item in &mut items {
+            item.options.extend(options.iter().cloned());
+        }
+        self.add_with_subtitles(items, subtitles, play)
+    }
+
+    /// Plays `uris` in this window, which [`route_open`] picked and marked
+    /// as taken. However the open ends, it no longer holds the window: once
+    /// it plays (or waits for the video view) the window is busy instead.
+    fn add_routed(&self, uris: Vec<String>, options: &[String]) -> Result<(), String> {
+        let result = self.add_with_options(uris, true, options);
+        self.claimed.store(false, Ordering::Release);
+        result
+    }
+
+    fn add_items(&self, items: Vec<Item>, play: bool) -> Result<(), String> {
+        self.add_with_subtitles(items, Vec::new(), play)
+    }
+
+    /// Like VLC, subtitle files go into what's playing, or into the video
+    /// opened along with them.
+    fn add_with_subtitles(&self, items: Vec<Item>, subtitles: Vec<String>, play: bool) -> Result<(), String> {
+        // Opened just as the window was closed: it has nowhere to play.
+        if self.is_closing() {
+            return Ok(());
+        }
+        {
+            // Checked under the lock `mark_ready` takes, so nothing can land
+            // in `pending` after it has been emptied.
+            let mut pending = self.pending.lock().unwrap_or_else(|e| e.into_inner());
+            if !self.ready.load(Ordering::Acquire) {
+                pending.items.extend(items);
+                pending.subtitles.extend(subtitles);
+                return Ok(());
+            }
+        }
+        // libVLC looks for subtitles when it opens a video, so only one
+        // opened with it here can already have them.
+        let opened_now = !items.is_empty() && play;
+        if !items.is_empty() {
+            let first = self.playlist().add(items);
+            self.emit_playlist();
+            if play {
+                self.play_index(first)?;
+            }
+        }
+        let (autodetect, fuzzy) = {
+            let settings = self.settings();
+            (settings.sub_autodetect, settings.sub_autodetect_fuzzy)
+        };
+        for uri in subtitles {
+            let Some(video) = self.current_uri() else {
+                self.notice("error", "Open a video first, then its subtitles");
+                break;
+            };
+            // libVLC loads it with the video already; adding it lists it twice.
+            if !(opened_now && autodetect && vlc_autodetects(Path::new(&video), Path::new(&uri), fuzzy)) {
+                self.add_subtitle(file_uri(&uri))?;
+            }
+            self.notice("osd", "Subtitles added");
+        }
+        Ok(())
+    }
+
+    fn mark_ready(&self) {
+        if self.is_closing() {
+            return;
+        }
+        let damaged = self.history().damaged.take();
+        if let Some(aside) = damaged {
+            self.notice("error", format!("Your history couldn't be read, so it starts empty. The old file is kept at {}", aside.display()));
+        }
+        let pending = {
+            let mut pending = self.pending.lock().unwrap_or_else(|e| e.into_inner());
+            self.ready.store(true, Ordering::Release);
+            // Busy while its files go from waiting to playing, too.
+            if !pending.items.is_empty() {
+                self.claimed.store(true, Ordering::Release);
+            }
+            std::mem::take(&mut *pending)
+        };
+        let waited = !pending.items.is_empty();
+        if let Err(e) = self.add_with_subtitles(pending.items, pending.subtitles, true) {
+            self.notice("error", e);
+        }
+        if waited {
+            self.claimed.store(false, Ordering::Release);
+        }
+    }
+
+    /// Replaces the current item (a playlist URL) with what it lists, and
+    /// plays the first. Transition lock held.
+    fn expand_current(&self, subitems: Vec<(String, Option<String>)>) -> Res {
+        let Some(index) = self.playlist().current else { return Ok(()) };
+        let uri = self.current_uri().unwrap_or_default();
+        let items = subitems
+            .into_iter()
+            .map(|(mrl, title)| {
+                // Without a title of its own, libVLC reports the location.
+                let title = title.filter(|t| *t != mrl && !t.contains("://"));
+                let mut item = Item::new(playlist_file::file_uri_path(&mrl).unwrap_or(mrl));
+                item.title = title.unwrap_or(item.title);
+                item
+            })
+            .collect();
+        self.playlist().replace(index, items);
+        // Its entries get their own history; the list itself wasn't watched.
+        self.history().remove(&uri);
+        self.save_history();
+        self.play_index_locked(index)
+    }
+
+    /// Moves to the next item; `auto` means the current one just finished.
+    fn advance(&self, auto: bool) -> Result<(), String> {
+        let _transition = self.transition();
+        self.advance_locked(auto)
+    }
+
+    fn advance_locked(&self, auto: bool) -> Result<(), String> {
+        let next = self.playlist().next_index(auto);
+        match next {
+            Some(i) => self.play_index_locked(i),
+            None if auto => Ok(()),
+            None => Err("end of playlist".into()),
+        }
+    }
+}
+
+impl Shared {
+    /// Sends an event to every window.
+    fn emit<T: Serialize>(&self, event: &str, payload: T) {
+        if let Ok(value) = serde_json::to_value(payload) {
+            self.ui.emit_json(event, value);
+        }
+    }
+
+    fn registry(&self) -> MutexGuard<'_, Registry> {
+        self.registry.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// The session of the player window `label`.
+    fn session(&self, label: &str) -> Option<Arc<Session>> {
+        self.registry().sessions.get(label).cloned()
+    }
+
+    /// Every open player's session, least recently used first. Windows
+    /// that are closing come first: they've left the roster but may still
+    /// have a player, and the windows still open were used after them.
+    fn sessions(&self) -> Vec<Arc<Session>> {
+        let registry = self.registry();
+        let closing = registry.sessions.iter().filter(|(l, _)| !registry.windows.contains(l)).map(|(_, s)| s.clone());
+        let open = registry.windows.least_recent_first().iter().filter_map(|l| registry.sessions.get(l)).cloned();
+        closing.chain(open).collect()
+    }
+
+    /// The session of the window that menu actions and opened files go to:
+    /// the focused player window, else the newest. Never one that's closing.
+    fn target_session(&self) -> Option<Arc<Session>> {
+        let registry = self.registry();
+        registry.windows.target().and_then(|label| registry.sessions.get(label)).filter(|s| !s.is_closing()).cloned()
+    }
+
+    /// Notes that window `label` no longer shows the network view, and stops
+    /// discovery once no window does.
+    fn stop_network_for(&self, label: &str) {
+        let mut users = self.network_users.lock().unwrap_or_else(|e| e.into_inner());
+        if users.remove(label) && users.is_empty() {
+            self.engine.discovery_stop();
+        }
+    }
+
+    /// Whether any window is playing, so thumbnail decoding can wait.
+    fn any_playing(&self) -> bool {
+        self.sessions().iter().any(|s| s.engine.state() == State::Playing)
+    }
+
+    fn history(&self) -> MutexGuard<'_, History> {
+        self.history.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Writes the history if it changed (and, unless `force`, the last
+    /// write was a while ago). The history isn't locked during the write.
+    fn write_history(&self, force: bool) -> Res {
+        let _writing = self.history_write.lock().unwrap_or_else(|e| e.into_inner());
+        let Some((file, entries)) = self.history().unsaved(force) else { return Ok(()) };
+        store::write_json(&file, &entries, false).inspect_err(|e| {
+            eprintln!("revlc: {e}");
+            self.history().save_failed();
+        })
+    }
+
+    /// Writes the history soon, from its own thread: for callers holding
+    /// the transition lock, which shouldn't wait for the disk.
+    fn save_history(&self) {
+        let _ = self.history_saves.send(());
+    }
+
+    fn settings(&self) -> MutexGuard<'_, Settings> {
+        self.settings.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Saves and applies new settings to every window, reopening the
+    /// current videos if a change only takes effect when a video starts.
+    fn set_settings(&self, settings: Settings) -> Res {
+        let _changing = self.settings_change.lock().unwrap_or_else(|e| e.into_inner());
+        let previous = self.settings().clone();
+        if previous == settings {
+            return Ok(());
+        }
+        // Saved first: if that fails, nothing has changed.
+        settings.save(&self.data_dir)?;
+        let sessions = self.sessions();
+        if previous.seekbar_preview && !settings.seekbar_preview {
+            sessions.iter().for_each(|s| s.scrub_cancel());
+        }
+        // The engine's options are shared, so any player sets them; each
+        // player keeps its own copy of a few, so every one is told.
+        self.engine.apply_settings(&settings, Some(&previous), &self.languages);
+        let reopen: Vec<_> = sessions
+            .into_iter()
+            .filter(|s| s.engine.apply_settings(&settings, Some(&previous), &self.languages))
+            .collect();
+        telemetry::set_enabled(settings.analytics);
+        *self.settings() = settings.clone();
+        self.emit("settings://changed", settings);
+        for session in reopen {
+            thread::spawn(move || session.reload());
+        }
+        Ok(())
     }
 
     fn library(&self) -> MutexGuard<'_, Library> {
@@ -745,54 +1336,6 @@ impl Core {
         self.thumbs.wake.notify_one();
     }
 
-    /// Queues a "continue watching" thumbnail at the current position.
-    fn queue_resume_thumbnail(&self, uri: &str) {
-        let (time, length) = (self.engine.time(), self.engine.length());
-        if length > 0 && self.engine.has_video() {
-            let out = self.history().thumb_path(uri);
-            let kind = JobKind::Frame(time as f64 / length as f64);
-            self.queue_thumbnails(vec![ThumbJob { uri: uri.to_string(), out, kind }], false);
-        }
-    }
-
-    fn current_item(&self) -> Option<Item> {
-        let playlist = self.playlist();
-        playlist.current.and_then(|i| playlist.items.get(i)).cloned()
-    }
-
-    fn current_uri(&self) -> Option<String> {
-        self.current_item().map(|it| it.uri)
-    }
-
-    /// The current item's title, for messages.
-    fn current_title(&self) -> String {
-        self.current_item().map_or_else(|| "this media".into(), |it| it.title)
-    }
-
-    /// Records the current position, and grabs a thumbnail if there's video.
-    fn save_progress(&self, thumbnail: bool) {
-        let Some(uri) = self.current_uri() else { return };
-        let started = match self.engine.state() {
-            State::Playing | State::Paused => true,
-            // Still loading, or buffering after a seek: only once it has a position.
-            State::Opening | State::Buffering => self.engine.time() > 0,
-            _ => false,
-        };
-        if !started || !in_history(&uri) {
-            return;
-        }
-        if thumbnail {
-            self.queue_resume_thumbnail(&uri);
-        }
-        self.history().update(&uri, self.engine.time(), self.engine.length());
-        self.save_history();
-    }
-
-    fn emit_chapters(&self) {
-        self.emit("player://chapters", self.engine.chapters());
-        self.emit("player://titles", self.engine.titles());
-    }
-
     fn bookmarks(&self) -> MutexGuard<'_, Bookmarks> {
         self.bookmarks.lock().unwrap_or_else(|e| e.into_inner())
     }
@@ -807,344 +1350,6 @@ impl Core {
 
     fn radio(&self) -> MutexGuard<'_, Favorites> {
         self.radio.lock().unwrap_or_else(|e| e.into_inner())
-    }
-
-    fn current_bookmarks(&self) -> Vec<Bookmark> {
-        self.current_uri().map(|uri| self.bookmarks().list(&uri)).unwrap_or_default()
-    }
-
-    fn emit_bookmarks(&self) {
-        self.emit("player://bookmarks", self.current_bookmarks());
-    }
-
-    fn ab_loop(&self) -> MutexGuard<'_, (Option<i64>, Option<i64>)> {
-        self.ab_loop.lock().unwrap_or_else(|e| e.into_inner())
-    }
-
-    fn sleep(&self) -> MutexGuard<'_, SleepTimer> {
-        self.sleep.lock().unwrap_or_else(|e| e.into_inner())
-    }
-
-    /// Pauses after `minutes`, or stops after the current item, or (with
-    /// neither) cancels the timer.
-    fn set_sleep_timer(self: &Arc<Self>, minutes: Option<u32>, after_item: bool) {
-        let generation = {
-            let mut sleep = self.sleep();
-            sleep.generation += 1;
-            sleep.at = minutes.map(|m| unix_ms() + m as u64 * 60_000);
-            sleep.after_item = after_item && minutes.is_none();
-            sleep.generation
-        };
-        if let Some(m) = minutes {
-            let core = self.clone();
-            thread::spawn(move || {
-                let deadline = Instant::now() + Duration::from_secs(m as u64 * 60);
-                while Instant::now() < deadline {
-                    thread::sleep(Duration::from_millis(500));
-                    if core.sleep().generation != generation {
-                        return;
-                    }
-                }
-                *core.sleep() = SleepTimer { generation: generation + 1, ..Default::default() };
-                if matches!(core.engine.state(), State::Playing | State::Buffering | State::Opening) {
-                    core.engine.set_pause(true);
-                    core.notice("info", "Sleep timer: playback paused");
-                }
-                core.emit_state();
-            });
-        }
-        self.emit_state();
-    }
-
-    fn state(&self) -> PlayerState {
-        let e = &*self.engine;
-        let (loop_a, loop_b) = *self.ab_loop();
-        let (sleep_at, sleep_after_item) = {
-            let sleep = self.sleep();
-            (sleep.at, sleep.after_item)
-        };
-        PlayerState {
-            state: e.state(),
-            time: e.time(),
-            length: e.length(),
-            seekable: e.seekable(),
-            has_video: e.has_video(),
-            rate: e.rate(),
-            volume: e.volume(),
-            muted: e.muted(),
-            buffering: e.buffering(),
-            audio_delay: e.audio_delay(),
-            subtitle_delay: e.subtitle_delay(),
-            title: e.title(),
-            chapter: e.chapter(),
-            loop_a,
-            loop_b,
-            sleep_at,
-            sleep_after_item,
-        }
-    }
-
-    fn tracks(&self) -> Tracks {
-        self.engine.tracks()
-    }
-
-    fn emit_state(&self) {
-        self.emit("player://state", self.state());
-    }
-
-    fn emit_tracks(&self) {
-        self.emit("player://tracks", self.tracks());
-    }
-
-    fn effects(&self) -> MutexGuard<'_, Effects> {
-        self.effects.lock().unwrap_or_else(|e| e.into_inner())
-    }
-
-    /// Changes the effects with `change`, and tells the UI.
-    fn update_effects(&self, change: impl FnOnce(&mut Effects)) -> Effects {
-        let effects = {
-            let mut effects = self.effects();
-            change(&mut effects);
-            effects.clone()
-        };
-        self.emit("player://effects", effects.clone());
-        effects
-    }
-
-    fn emit_playlist(&self) {
-        let playlist = self.playlist().clone();
-        self.emit("player://playlist", playlist);
-    }
-
-    fn notice(&self, kind: &'static str, text: impl Into<String>) {
-        let notice = Notice { kind, text: text.into() };
-        match self.early().as_mut() {
-            Some(early) => early.notices.push(notice),
-            None => self.emit("player://notice", notice),
-        }
-    }
-
-    fn offer_resume(&self, ms: i64) {
-        let Some(uri) = self.current_uri() else { return };
-        let offer = ResumeOffer { uri, ms };
-        match self.early().as_mut() {
-            Some(early) => early.resume = Some(offer),
-            None => self.emit("player://resume-prompt", offer),
-        }
-    }
-
-    fn early(&self) -> MutexGuard<'_, Option<Early>> {
-        self.early.lock().unwrap_or_else(|e| e.into_inner())
-    }
-
-    fn play_index(&self, index: usize) -> Result<(), String> {
-        let _transition = self.transition();
-        self.play_index_locked(index)
-    }
-
-    /// [`Core::play_index`], with the transition lock already held.
-    fn play_index_locked(&self, index: usize) -> Result<(), String> {
-        self.save_progress(true);
-        let item = {
-            let mut playlist = self.playlist();
-            let item = playlist.items.get(index).ok_or("no such playlist item")?.clone();
-            playlist.current = Some(index);
-            item
-        };
-        let (uri, title) = (&item.uri, &item.title);
-        *self.ab_loop() = (None, None);
-        *self.resume.lock().unwrap_or_else(|e| e.into_inner()) = None;
-        if in_history(uri) {
-            // A start time from the command line says where to start.
-            if !item.options.iter().any(|o| o.starts_with(":start-time=")) {
-                self.set_resume(uri);
-            }
-            self.history().touch(uri, title);
-            self.save_history();
-        }
-        self.emit_playlist();
-        self.emit_bookmarks();
-        self.subtitles().clear();
-        let result = self.engine.open(uri, &item.options, item.trusted);
-        let resume_ms = match *self.resume.lock().unwrap_or_else(|e| e.into_inner()) {
-            Some(PendingSeek::Seek { ms, .. }) => Some(ms),
-            _ => None,
-        };
-        let open = {
-            let settings = self.settings();
-            quality::Open {
-                uri,
-                resume_ms,
-                hardware_decoding: settings.hardware_decoding,
-                file_caching: settings.file_caching,
-                network_caching: settings.network_caching,
-            }
-        };
-        self.quality().opened(open, self.engine.generation(), result.as_ref().err().map(String::as_str));
-        result
-    }
-
-    /// What to do about `uri`'s resume point once it starts playing.
-    fn set_resume(&self, uri: &str) {
-        let point = self.history().resume_point(uri);
-        let pending = match (self.settings().resume, point) {
-            (Resume::Always, Some(ms)) => Some(PendingSeek::Seek { ms, announce: true }),
-            (Resume::Ask, Some(ms)) => Some(PendingSeek::Ask(ms)),
-            _ => None,
-        };
-        *self.resume.lock().unwrap_or_else(|e| e.into_inner()) = pending;
-    }
-
-    /// Stops playback, remembering where we were.
-    fn stop(&self) {
-        let _transition = self.transition();
-        self.stop_locked();
-    }
-
-    fn stop_locked(&self) {
-        self.scrub_cancel();
-        self.save_progress(true);
-        self.quality().close("stopped");
-        self.engine.stop();
-        self.emit_state();
-    }
-
-    /// Adds paths or URLs to the playlist, optionally starting the first
-    /// new item. Folders add their media (and join the library); playlist
-    /// files add their entries.
-    fn add(&self, uris: Vec<String>, play: bool) -> Result<(), String> {
-        self.add_with_options(uris, play, &[])
-    }
-
-    /// [`Core::add`], giving each new item the libVLC `options` (from the
-    /// command line, like ":start-time=30").
-    fn add_with_options(&self, uris: Vec<String>, play: bool, options: &[String]) -> Result<(), String> {
-        let Opened { mut items, subtitles, folders, failed } = opened(uris);
-        // A folder joins the library even if nothing in it, or in the rest, can play.
-        for folder in folders {
-            if let Err(e) = self.library().add(&folder) {
-                self.notice("error", e);
-            }
-        }
-        // Nothing at all could be opened: that's the caller's error to show.
-        if items.is_empty() && subtitles.is_empty() && !failed.is_empty() {
-            return Err(failed.join("; "));
-        }
-        for e in failed {
-            self.notice("error", e);
-        }
-        for item in &mut items {
-            item.options.extend(options.iter().cloned());
-        }
-        self.add_with_subtitles(items, subtitles, play)
-    }
-
-    /// Plays files the system handed us on the main thread, from another
-    /// thread (see the comment above `open`).
-    fn add_from_main(self: &Arc<Self>, uris: Vec<String>, options: Vec<String>) {
-        let core = self.clone();
-        thread::spawn(move || {
-            if let Err(e) = core.add_with_options(uris, true, &options) {
-                core.notice("error", e);
-            }
-        });
-    }
-
-    fn add_items(&self, items: Vec<Item>, play: bool) -> Result<(), String> {
-        self.add_with_subtitles(items, Vec::new(), play)
-    }
-
-    /// Like VLC, subtitle files go into what's playing, or into the video
-    /// opened along with them.
-    fn add_with_subtitles(&self, items: Vec<Item>, subtitles: Vec<String>, play: bool) -> Result<(), String> {
-        {
-            // Checked under the lock `mark_ready` takes, so nothing can land
-            // in `pending` after it has been emptied.
-            let mut pending = self.pending.lock().unwrap_or_else(|e| e.into_inner());
-            if !self.ready.load(Ordering::Acquire) {
-                pending.items.extend(items);
-                pending.subtitles.extend(subtitles);
-                return Ok(());
-            }
-        }
-        // libVLC looks for subtitles when it opens a video, so only one
-        // opened with it here can already have them.
-        let opened_now = !items.is_empty() && play;
-        if !items.is_empty() {
-            let first = self.playlist().add(items);
-            self.emit_playlist();
-            if play {
-                self.play_index(first)?;
-            }
-        }
-        let (autodetect, fuzzy) = {
-            let settings = self.settings();
-            (settings.sub_autodetect, settings.sub_autodetect_fuzzy)
-        };
-        for uri in subtitles {
-            let Some(video) = self.current_uri() else {
-                self.notice("error", "Open a video first, then its subtitles");
-                break;
-            };
-            // libVLC loads it with the video already; adding it lists it twice.
-            if !(opened_now && autodetect && vlc_autodetects(Path::new(&video), Path::new(&uri), fuzzy)) {
-                self.add_subtitle(file_uri(&uri))?;
-            }
-            self.notice("osd", "Subtitles added");
-        }
-        Ok(())
-    }
-
-    fn mark_ready(&self) {
-        let damaged = self.history().damaged.take();
-        if let Some(aside) = damaged {
-            self.notice("error", format!("Your history couldn't be read, so it starts empty. The old file is kept at {}", aside.display()));
-        }
-        let pending = {
-            let mut pending = self.pending.lock().unwrap_or_else(|e| e.into_inner());
-            self.ready.store(true, Ordering::Release);
-            std::mem::take(&mut *pending)
-        };
-        if let Err(e) = self.add_with_subtitles(pending.items, pending.subtitles, true) {
-            self.notice("error", e);
-        }
-    }
-
-    /// Replaces the current item (a playlist URL) with what it lists, and
-    /// plays the first. Transition lock held.
-    fn expand_current(&self, subitems: Vec<(String, Option<String>)>) -> Res {
-        let Some(index) = self.playlist().current else { return Ok(()) };
-        let uri = self.current_uri().unwrap_or_default();
-        let items = subitems
-            .into_iter()
-            .map(|(mrl, title)| {
-                // Without a title of its own, libVLC reports the location.
-                let title = title.filter(|t| *t != mrl && !t.contains("://"));
-                let mut item = Item::new(playlist_file::file_uri_path(&mrl).unwrap_or(mrl));
-                item.title = title.unwrap_or(item.title);
-                item
-            })
-            .collect();
-        self.playlist().replace(index, items);
-        // Its entries get their own history; the list itself wasn't watched.
-        self.history().remove(&uri);
-        self.save_history();
-        self.play_index_locked(index)
-    }
-
-    /// Moves to the next item; `auto` means the current one just finished.
-    fn advance(&self, auto: bool) -> Result<(), String> {
-        let _transition = self.transition();
-        self.advance_locked(auto)
-    }
-
-    fn advance_locked(&self, auto: bool) -> Result<(), String> {
-        let next = self.playlist().next_index(auto);
-        match next {
-            Some(i) => self.play_index_locked(i),
-            None if auto => Ok(()),
-            None => Err("end of playlist".into()),
-        }
     }
 }
 
@@ -1196,7 +1401,7 @@ fn opened(uris: Vec<String>) -> Opened {
 /// Parallel library metadata worker: parses MP4, Matroska/WebM, and audio
 /// files in pure Rust (milliseconds, zero decoder spawn) and falls back to
 /// `Engine::parse` only for exotic container formats.
-fn scan_metadata_worker(core: Arc<Core>) {
+fn scan_metadata_worker(core: Arc<Shared>) {
     const EMIT_INTERVAL: Duration = Duration::from_millis(250);
     let file_sig = |p: &Path| -> Option<(u64, u128)> {
         let m = std::fs::metadata(p).ok()?;
@@ -1288,12 +1493,12 @@ fn metadata_with_fallback(rust: Option<engine::MediaMeta>, vlc: impl FnOnce() ->
 /// Generates library thumbnails one at a time. Video frames wait while
 /// video plays so decoding never competes with playback; artwork goes
 /// ahead of them meanwhile.
-fn make_thumbnails(core: Arc<Core>) {
+fn make_thumbnails(core: Arc<Shared>) {
     loop {
         let job = {
             let mut queue = core.thumbs.queue.lock().unwrap_or_else(|e| e.into_inner());
             loop {
-                let playing = core.engine.state() == State::Playing;
+                let playing = core.any_playing();
                 let next = queue.iter().position(|j| !playing || !matches!(j.kind, JobKind::Frame(_)));
                 if let Some(job) = next.and_then(|i| queue.remove(i)) {
                     break job;
@@ -1326,7 +1531,7 @@ fn make_thumbnails(core: Arc<Core>) {
 
 /// Turns engine events into UI events. Time updates are throttled so the
 /// web view isn't woken more than a few times a second.
-fn pump_events(core: Arc<Core>, rx: Receiver<EngineEvent>) {
+fn pump_events(core: Arc<Session>, rx: Receiver<EngineEvent>) {
     const TIME_INTERVAL: Duration = Duration::from_millis(250);
     const PROGRESS_INTERVAL: Duration = Duration::from_secs(5);
 
@@ -1348,6 +1553,8 @@ fn pump_events(core: Arc<Core>, rx: Receiver<EngineEvent>) {
     // The media the queue moved on to by itself. Failures only add up while
     // it does: whatever the user starts next begins a fresh count.
     let mut chained = None;
+    // The media whose reported title has been looked at.
+    let mut titled = None;
     while let Ok(first) = rx.recv() {
         // Let bursts of events (e.g. opening a file) arrive, then handle them together.
         thread::sleep(Duration::from_millis(20));
@@ -1494,9 +1701,17 @@ fn pump_events(core: Arc<Core>, rx: Receiver<EngineEvent>) {
         if [EventKind::Playing, EventKind::LengthChanged, EventKind::MediaChanged, EventKind::TitleChanged].iter().any(|&e| has(e)) {
             core.emit_chapters();
         }
-        if has(EventKind::Playing)
-            && let Some(title) = core.engine.media_title()
-        {
+        // The title the engine reports for what's open, once it has one. It
+        // can come after the start of playback, and when depends on timing,
+        // so it's looked for until found: otherwise two windows playing the
+        // same file could end up with different titles.
+        let wants_title = has(EventKind::Playing)
+            || ([EventKind::LengthChanged, EventKind::MediaChanged, EventKind::TitleChanged, EventKind::TimeChanged]
+                .iter()
+                .any(|&e| has(e))
+                && titled != Some(generation));
+        if wants_title && let Some(title) = core.engine.media_title() {
+            titled = Some(generation);
             let mut playlist = core.playlist();
             let changed = match playlist.current.and_then(|i| playlist.items.get_mut(i)) {
                 Some(item) if item.title != title => {
@@ -1546,7 +1761,7 @@ fn format_time(ms: i64) -> String {
 }
 
 #[tauri::command]
-async fn snapshot(player: tauri::State<'_, Player>) -> Result<Snapshot, String> {
+async fn snapshot(player: Player) -> Result<Snapshot, String> {
     if let Err(e) = player.core() {
         return Ok(Snapshot {
             state: None,
@@ -1629,7 +1844,7 @@ struct ScrubJob {
     exact: bool,
 }
 
-impl Core {
+impl Session {
     /// What previews are made from, if they can be. See [`ScrubSource`].
     fn scrub_source(&self) -> Option<ScrubSource> {
         let uri = self.current_uri()?;
@@ -1915,9 +2130,11 @@ impl Core {
                         return;
                     }
                     let Some(job) = grid.queue.lock().unwrap_or_else(|e| e.into_inner()).pop_front() else { return };
+                    // Runs are numbered per window, so the window is in the name too.
                     let tmp = std::env::temp_dir().join(format!(
-                        "revlc-scrub-{}-{}-{}-{worker_id}.jpg",
+                        "revlc-scrub-{}-{}-{}-{}-{worker_id}.jpg",
                         std::process::id(),
+                        core.label,
                         grid.run,
                         job.k
                     ));
@@ -2035,19 +2252,19 @@ impl Core {
 }
 
 #[tauri::command]
-async fn scrub_prepare(player: tauri::State<'_, Player>) -> Result<Option<ScrubInfo>, String> {
+async fn scrub_prepare(player: Player) -> Result<Option<ScrubInfo>, String> {
     let core = player.core()?.clone();
     tauri::async_runtime::spawn_blocking(move || core.scrub_prepare()).await.map_err(|e| e.to_string())
 }
 
 #[tauri::command]
-fn scrub_cancel(player: tauri::State<'_, Player>) -> Res {
+fn scrub_cancel(player: Player) -> Res {
     player.core()?.scrub_cancel();
     Ok(())
 }
 
 #[tauri::command]
-fn scrub_focus(player: tauri::State<'_, Player>, from: i64, to: i64) -> Res {
+fn scrub_focus(player: Player, from: i64, to: i64) -> Res {
     player.core()?.scrub_focus(from, to);
     Ok(())
 }
@@ -2065,21 +2282,29 @@ fn background_priority() {
 // the main thread to close the previous video.
 
 #[tauri::command]
-async fn open(player: tauri::State<'_, Player>, uris: Vec<String>, play: bool) -> Res {
-    off_main(player, move |core| core.add(uris, play)).await?
+async fn open(app: AppHandle, player: Player, uris: Vec<String>, play: bool) -> Res {
+    if !play {
+        return off_main(player, move |core| core.add(uris, false)).await?;
+    }
+    // With "Open each video in a new window", a video that would replace
+    // what's playing starts in a new window instead.
+    let (shared, here) = (player.shared()?.clone(), player.core()?.clone());
+    tauri::async_runtime::spawn_blocking(move || open_routed(&app, &shared, Some(here), uris, Vec::new()).map(|_| ()))
+        .await
+        .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
-async fn play_index(player: tauri::State<'_, Player>, index: usize) -> Res {
+async fn play_index(player: Player, index: usize) -> Res {
     off_main(player, move |core| core.play_index(index)).await?
 }
 
 #[tauri::command]
-async fn toggle_pause(player: tauri::State<'_, Player>) -> Res {
+async fn toggle_pause(player: Player) -> Res {
     off_main(player, toggle_pause_now).await?
 }
 
-fn toggle_pause_now(core: &Core) -> Res {
+fn toggle_pause_now(core: &Session) -> Res {
     match core.engine.state() {
         State::Playing | State::Buffering | State::Opening => core.engine.set_pause(true),
         State::Paused => core.engine.set_pause(false),
@@ -2097,23 +2322,29 @@ fn toggle_pause_now(core: &Core) -> Res {
 }
 
 #[tauri::command]
-async fn stop(player: tauri::State<'_, Player>) -> Res {
-    off_main(player, Core::stop).await
+async fn stop(player: Player) -> Res {
+    off_main(player, Session::stop).await
 }
 
 /// Runs `work` on a background thread: Tauri runs synchronous commands on
 /// the main thread, where disk access would freeze the window.
-async fn off_main<T: Send + 'static>(player: tauri::State<'_, Player>, work: impl FnOnce(&Core) -> T + Send + 'static) -> Result<T, String> {
+async fn off_main<T: Send + 'static>(player: Player, work: impl FnOnce(&Session) -> T + Send + 'static) -> Result<T, String> {
     let core = player.core()?.clone();
     tauri::async_runtime::spawn_blocking(move || work(&core)).await.map_err(|e| e.to_string())
 }
 
-#[tauri::command]
-async fn history_list(player: tauri::State<'_, Player>) -> Result<Vec<UiEntry>, String> {
-    off_main(player, history_entries).await
+/// [`off_main`] for work on the app-wide state, which Settings can do too.
+async fn off_shared<T: Send + 'static>(player: Player, work: impl FnOnce(&Shared) -> T + Send + 'static) -> Result<T, String> {
+    let shared = player.shared()?.clone();
+    tauri::async_runtime::spawn_blocking(move || work(&shared)).await.map_err(|e| e.to_string())
 }
 
-fn history_entries(core: &Core) -> Vec<UiEntry> {
+#[tauri::command]
+async fn history_list(player: Player) -> Result<Vec<UiEntry>, String> {
+    off_shared(player, history_entries).await
+}
+
+fn history_entries(core: &Shared) -> Vec<UiEntry> {
     let list = core.history().list();
     // Fill in thumbnails that are missing, e.g. because the app quit first.
     let missing: Vec<_> = list
@@ -2130,9 +2361,9 @@ fn history_entries(core: &Core) -> Vec<UiEntry> {
 }
 
 #[tauri::command]
-async fn settings_get(player: tauri::State<'_, Player>) -> Result<SettingsInfo, String> {
+async fn settings_get(player: Player) -> Result<SettingsInfo, String> {
     // Listing audio devices can be slow.
-    off_main(player, |core| SettingsInfo {
+    off_shared(player, |core| SettingsInfo {
         settings: core.settings().clone(),
         defaults: Settings::default(),
         system_languages: core.languages.clone(),
@@ -2145,14 +2376,13 @@ async fn settings_get(player: tauri::State<'_, Player>) -> Result<SettingsInfo, 
 /// Saves new settings, applies them, and reopens the current video if a
 /// change only takes effect when a video starts.
 #[tauri::command]
-async fn settings_set(player: tauri::State<'_, Player>, settings: Settings) -> Res {
-    let core = player.core()?.clone();
-    tauri::async_runtime::spawn_blocking(move || core.set_settings(settings)).await.map_err(|e| e.to_string())?
+async fn settings_set(player: Player, settings: Settings) -> Res {
+    off_shared(player, move |core| core.set_settings(settings)).await?
 }
 
 /// Seeks to a resume point the user accepted.
 #[tauri::command]
-fn resume_at(player: tauri::State<Player>, ms: i64) -> Res {
+fn resume_at(player: Player, ms: i64) -> Res {
     let core = player.core()?;
     core.seeking(ms, "resume");
     core.engine.set_time(ms);
@@ -2203,6 +2433,20 @@ fn run_app_item(app: &AppHandle, id: &str) -> bool {
                 // Explorer can't open a \\?\ path.
                 open_externally(dunce::simplified(&folder.unwrap_or(dir)));
             }
+        }
+        "newWindow" => {
+            // Off the main thread, which creating a window can block.
+            let app = app.clone();
+            thread::spawn(move || {
+                if let Some(shared) = shared_of(&app)
+                    && let Err(e) = open_player(&app, &shared, Launch::default())
+                {
+                    eprintln!("revlc: could not open a new window: {e}");
+                    if let Some(session) = shared.target_session() {
+                        session.notice("error", format!("Could not open a new window: {e}"));
+                    }
+                }
+            });
         }
         "quit" => app.exit(0),
         _ => return false,
@@ -2299,14 +2543,14 @@ fn font_families() -> Vec<String> {
 }
 
 #[tauri::command]
-async fn library_list(player: tauri::State<'_, Player>) -> Result<LibraryList, String> {
-    off_main(player, Core::library_list).await
+async fn library_list(player: Player) -> Result<LibraryList, String> {
+    off_shared(player, Shared::library_list).await
 }
 
 /// Lists the library from a fresh scan, picking up new files.
 #[tauri::command]
-async fn library_rescan(player: tauri::State<'_, Player>) -> Result<LibraryList, String> {
-    off_main(player, |core| {
+async fn library_rescan(player: Player) -> Result<LibraryList, String> {
+    off_shared(player, |core| {
         core.rescan_library();
         core.library_list()
     })
@@ -2314,8 +2558,8 @@ async fn library_rescan(player: tauri::State<'_, Player>) -> Result<LibraryList,
 }
 
 #[tauri::command]
-async fn library_add(player: tauri::State<'_, Player>, path: String) -> Result<LibraryList, String> {
-    off_main(player, move |core| {
+async fn library_add(player: Player, path: String) -> Result<LibraryList, String> {
+    off_shared(player, move |core| {
         core.library().add(&path)?;
         Ok(core.library_list())
     })
@@ -2323,8 +2567,8 @@ async fn library_add(player: tauri::State<'_, Player>, path: String) -> Result<L
 }
 
 #[tauri::command]
-async fn library_remove(player: tauri::State<'_, Player>, path: String) -> Result<LibraryList, String> {
-    off_main(player, move |core| {
+async fn library_remove(player: Player, path: String) -> Result<LibraryList, String> {
+    off_shared(player, move |core| {
         core.library().remove(&path)?;
         Ok(core.library_list())
     })
@@ -2332,8 +2576,8 @@ async fn library_remove(player: tauri::State<'_, Player>, path: String) -> Resul
 }
 
 #[tauri::command]
-async fn history_remove(player: tauri::State<'_, Player>, uri: String) -> Res {
-    off_main(player, move |core| {
+async fn history_remove(player: Player, uri: String) -> Res {
+    off_shared(player, move |core| {
         core.history().remove(&uri);
         core.write_history(true)
     })
@@ -2341,7 +2585,7 @@ async fn history_remove(player: tauri::State<'_, Player>, uri: String) -> Res {
 }
 
 #[tauri::command]
-fn seek(player: tauri::State<Player>, ms: i64) -> Res {
+fn seek(player: Player, ms: i64) -> Res {
     let core = player.core()?;
     core.seeking(ms, "jump");
     core.engine.set_time(ms);
@@ -2350,7 +2594,7 @@ fn seek(player: tauri::State<Player>, ms: i64) -> Res {
 }
 
 #[tauri::command]
-fn seek_by(player: tauri::State<Player>, delta_ms: i64) -> Res {
+fn seek_by(player: Player, delta_ms: i64) -> Res {
     let core = player.core()?;
     let target = core.engine.time() + delta_ms;
     let length = core.engine.length();
@@ -2362,16 +2606,16 @@ fn seek_by(player: tauri::State<Player>, delta_ms: i64) -> Res {
 }
 
 #[tauri::command]
-async fn next(player: tauri::State<'_, Player>) -> Res {
+async fn next(player: Player) -> Res {
     off_main(player, |core| core.advance(false)).await?
 }
 
 #[tauri::command]
-async fn previous(player: tauri::State<'_, Player>) -> Res {
+async fn previous(player: Player) -> Res {
     off_main(player, previous_now).await?
 }
 
-fn previous_now(core: &Core) -> Res {
+fn previous_now(core: &Session) -> Res {
     // Like most players: restart the current item unless we're near its start.
     if core.engine.time() > 3000 {
         core.engine.set_time(0);
@@ -2385,7 +2629,7 @@ fn previous_now(core: &Core) -> Res {
 }
 
 #[tauri::command]
-fn next_frame(player: tauri::State<Player>) -> Res {
+fn next_frame(player: Player) -> Res {
     let core = player.core()?;
     core.engine.next_frame();
     core.emit_state();
@@ -2393,7 +2637,7 @@ fn next_frame(player: tauri::State<Player>) -> Res {
 }
 
 #[tauri::command]
-fn set_volume(player: tauri::State<Player>, volume: i32) -> Res {
+fn set_volume(player: Player, volume: i32) -> Res {
     let core = player.core()?;
     core.engine.set_volume(volume);
     if volume > 0 && core.engine.muted() {
@@ -2404,7 +2648,7 @@ fn set_volume(player: tauri::State<Player>, volume: i32) -> Res {
 }
 
 #[tauri::command]
-fn set_muted(player: tauri::State<Player>, muted: bool) -> Res {
+fn set_muted(player: Player, muted: bool) -> Res {
     let core = player.core()?;
     core.engine.set_muted(muted);
     core.emit_state();
@@ -2412,7 +2656,7 @@ fn set_muted(player: tauri::State<Player>, muted: bool) -> Res {
 }
 
 #[tauri::command]
-fn set_rate(player: tauri::State<Player>, rate: f32) -> Res {
+fn set_rate(player: Player, rate: f32) -> Res {
     let core = player.core()?;
     core.engine.set_rate(rate);
     core.emit_state();
@@ -2420,7 +2664,7 @@ fn set_rate(player: tauri::State<Player>, rate: f32) -> Res {
 }
 
 #[tauri::command]
-fn set_audio_track(player: tauri::State<Player>, id: i32) -> Res {
+fn set_audio_track(player: Player, id: i32) -> Res {
     let core = player.core()?;
     core.engine.set_audio_track(id);
     core.emit_tracks();
@@ -2428,7 +2672,7 @@ fn set_audio_track(player: tauri::State<Player>, id: i32) -> Res {
 }
 
 #[tauri::command]
-fn set_subtitle_track(player: tauri::State<Player>, id: i32) -> Res {
+fn set_subtitle_track(player: Player, id: i32) -> Res {
     let core = player.core()?;
     core.engine.set_subtitle_track(id);
     core.emit_tracks();
@@ -2436,14 +2680,14 @@ fn set_subtitle_track(player: tauri::State<Player>, id: i32) -> Res {
 }
 
 #[tauri::command]
-fn add_subtitle(player: tauri::State<Player>, uri: String) -> Res {
+fn add_subtitle(player: Player, uri: String) -> Res {
     let core = player.core()?;
     let uri = if uri.contains("://") { uri } else { file_uri(&uri) };
     core.add_subtitle(uri)
 }
 
 #[tauri::command]
-fn set_audio_delay(player: tauri::State<Player>, ms: i64) -> Res {
+fn set_audio_delay(player: Player, ms: i64) -> Res {
     let core = player.core()?;
     core.engine.set_audio_delay(ms);
     core.emit_state();
@@ -2451,7 +2695,7 @@ fn set_audio_delay(player: tauri::State<Player>, ms: i64) -> Res {
 }
 
 #[tauri::command]
-fn set_subtitle_delay(player: tauri::State<Player>, ms: i64) -> Res {
+fn set_subtitle_delay(player: Player, ms: i64) -> Res {
     let core = player.core()?;
     core.engine.set_subtitle_delay(ms);
     core.emit_state();
@@ -2459,25 +2703,25 @@ fn set_subtitle_delay(player: tauri::State<Player>, ms: i64) -> Res {
 }
 
 #[tauri::command]
-fn set_aspect_ratio(player: tauri::State<Player>, ratio: Option<String>) -> Res {
+fn set_aspect_ratio(player: Player, ratio: Option<String>) -> Res {
     player.core()?.engine.set_aspect_ratio(ratio.as_deref());
     Ok(())
 }
 
 #[tauri::command]
-fn set_crop(player: tauri::State<Player>, geometry: Option<String>) -> Res {
+fn set_crop(player: Player, geometry: Option<String>) -> Res {
     player.core()?.engine.set_crop(geometry.as_deref());
     Ok(())
 }
 
 #[tauri::command]
-fn set_deinterlace(player: tauri::State<Player>, mode: Option<String>) -> Res {
+fn set_deinterlace(player: Player, mode: Option<String>) -> Res {
     player.core()?.engine.set_deinterlace(mode.as_deref());
     Ok(())
 }
 
 #[tauri::command]
-fn set_video_track(player: tauri::State<Player>, id: i32) -> Res {
+fn set_video_track(player: Player, id: i32) -> Res {
     let core = player.core()?;
     core.engine.set_video_track(id);
     core.emit_tracks();
@@ -2485,7 +2729,7 @@ fn set_video_track(player: tauri::State<Player>, id: i32) -> Res {
 }
 
 #[tauri::command]
-fn set_stereo_mode(player: tauri::State<Player>, mode: StereoMode) -> Res {
+fn set_stereo_mode(player: Player, mode: StereoMode) -> Res {
     let core = player.core()?;
     // Kept even with nothing playing; it's applied when playback starts.
     core.engine.set_stereo_mode(mode);
@@ -2494,18 +2738,18 @@ fn set_stereo_mode(player: tauri::State<Player>, mode: StereoMode) -> Res {
 }
 
 #[tauri::command]
-fn equalizer_info(player: tauri::State<Player>) -> Result<EqualizerInfo, String> {
+fn equalizer_info(player: Player) -> Result<EqualizerInfo, String> {
     Ok(player.core()?.engine.equalizer_info())
 }
 
-fn apply_equalizer(core: &Core, eq: Equalizer) {
+fn apply_equalizer(core: &Session, eq: Equalizer) {
     let effects = core.update_effects(|e| e.equalizer = eq);
     core.engine.apply_equalizer(&effects);
 }
 
 /// Loads one of the engine's presets and turns the equaliser on.
 #[tauri::command]
-fn set_equalizer_preset(player: tauri::State<Player>, index: u32) -> Res {
+fn set_equalizer_preset(player: Player, index: u32) -> Res {
     let core = player.core()?;
     let (preamp, bands) = core.engine.equalizer_preset(index).ok_or("no such preset")?;
     let band_count = core.engine.equalizer_info().bands.len();
@@ -2517,7 +2761,7 @@ fn set_equalizer_preset(player: tauri::State<Player>, index: u32) -> Res {
 /// Sets the equaliser from the UI's values. Once they no longer match the
 /// preset they came from, it counts as a custom setting.
 #[tauri::command]
-fn set_equalizer(player: tauri::State<Player>, equalizer: Equalizer) -> Res {
+fn set_equalizer(player: Player, equalizer: Equalizer) -> Res {
     let core = player.core()?;
     let band_count = core.engine.equalizer_info().bands.len();
     let mut eq = equalizer.normalized(band_count);
@@ -2531,7 +2775,7 @@ fn set_equalizer(player: tauri::State<Player>, equalizer: Equalizer) -> Res {
 }
 
 #[tauri::command]
-fn set_adjust(player: tauri::State<Player>, adjust: Adjust) -> Res {
+fn set_adjust(player: Player, adjust: Adjust) -> Res {
     let core = player.core()?;
     let adjust = adjust.normalized();
     let effects = core.update_effects(|e| e.adjust = adjust);
@@ -2553,7 +2797,7 @@ fn filter_specs() -> FilterSpecs {
 
 /// Turns a video or audio filter on or off, or changes its settings.
 #[tauri::command]
-fn set_filter(player: tauri::State<Player>, id: String, filter: Filter) -> Res {
+fn set_filter(player: Player, id: String, filter: Filter) -> Res {
     let core = player.core()?;
     let audio = effects::AUDIO_FILTERS.iter().any(|s| s.id == id);
     let (prev, next) = {
@@ -2574,7 +2818,7 @@ fn set_filter(player: tauri::State<Player>, id: String, filter: Filter) -> Res {
 }
 
 #[tauri::command]
-fn set_transform(player: tauri::State<Player>, transform: Transform) -> Res {
+fn set_transform(player: Player, transform: Transform) -> Res {
     let core = player.core()?;
     let effects = core.update_effects(|e| e.transform = transform);
     core.engine.apply_video_filters(&effects);
@@ -2582,7 +2826,7 @@ fn set_transform(player: tauri::State<Player>, transform: Transform) -> Res {
 }
 
 #[tauri::command]
-fn set_logo(player: tauri::State<Player>, logo: Logo) -> Res {
+fn set_logo(player: Player, logo: Logo) -> Res {
     let core = player.core()?;
     let logo = logo.normalized();
     core.engine.apply_logo(&logo);
@@ -2591,7 +2835,7 @@ fn set_logo(player: tauri::State<Player>, logo: Logo) -> Res {
 }
 
 #[tauri::command]
-fn set_marquee(player: tauri::State<Player>, marquee: Marquee) -> Res {
+fn set_marquee(player: Player, marquee: Marquee) -> Res {
     let core = player.core()?;
     let marquee = marquee.normalized();
     core.engine.apply_marquee(&marquee);
@@ -2600,7 +2844,7 @@ fn set_marquee(player: tauri::State<Player>, marquee: Marquee) -> Res {
 }
 
 #[tauri::command]
-fn set_zoom(player: tauri::State<Player>, zoom: f32) -> Res {
+fn set_zoom(player: Player, zoom: f32) -> Res {
     let core = player.core()?;
     let zoom = effects::zoom_preset(zoom);
     core.engine.set_zoom(zoom);
@@ -2610,7 +2854,7 @@ fn set_zoom(player: tauri::State<Player>, zoom: f32) -> Res {
 
 /// Shows a teletext page, sends a coloured key, or with 0 turns teletext off.
 #[tauri::command]
-fn set_teletext(player: tauri::State<Player>, page: i32) -> Res {
+fn set_teletext(player: Player, page: i32) -> Res {
     let core = player.core()?;
     core.engine.set_teletext(page);
     core.emit_tracks();
@@ -2619,7 +2863,7 @@ fn set_teletext(player: tauri::State<Player>, page: i32) -> Res {
 
 /// Teletext's background.
 #[tauri::command]
-async fn set_teletext_transparent(player: tauri::State<'_, Player>, transparent: bool) -> Res {
+async fn set_teletext_transparent(player: Player, transparent: bool) -> Res {
     off_main(player, move |core| {
         core.engine.set_teletext_transparent(transparent);
         core.update_effects(|e| e.teletext_transparent = transparent);
@@ -2629,17 +2873,17 @@ async fn set_teletext_transparent(player: tauri::State<'_, Player>, transparent:
 }
 
 #[tauri::command]
-fn media_info(player: tauri::State<Player>) -> Result<Option<MediaInfo>, String> {
+fn media_info(player: Player) -> Result<Option<MediaInfo>, String> {
     Ok(player.core()?.engine.media_info())
 }
 
 #[tauri::command]
-fn media_stats(player: tauri::State<Player>) -> Result<Option<Stats>, String> {
+fn media_stats(player: Player) -> Result<Option<Stats>, String> {
     Ok(player.core()?.engine.stats())
 }
 
 #[tauri::command]
-async fn take_snapshot(app: AppHandle, player: tauri::State<'_, Player>) -> Res {
+async fn take_snapshot(app: AppHandle, player: Player) -> Res {
     // VLC's default folder: the Desktop on macOS, Pictures on Windows.
     let default = if cfg!(target_os = "macos") { app.path().desktop_dir() } else { app.path().picture_dir() };
     let dir = player.core()?.settings().snapshot_dir(default.ok()).ok_or("no snapshot folder")?;
@@ -2751,7 +2995,7 @@ fn hide_cursor(app: AppHandle) {
 }
 
 #[tauri::command]
-async fn playlist_remove(player: tauri::State<'_, Player>, index: usize) -> Res {
+async fn playlist_remove(player: Player, index: usize) -> Res {
     off_main(player, move |core| {
         let _transition = core.transition();
         let was_current = core.playlist().remove(index);
@@ -2765,7 +3009,7 @@ async fn playlist_remove(player: tauri::State<'_, Player>, index: usize) -> Res 
 }
 
 #[tauri::command]
-fn playlist_move(player: tauri::State<Player>, from: usize, to: usize) -> Res {
+fn playlist_move(player: Player, from: usize, to: usize) -> Res {
     let core = player.core()?;
     core.playlist().move_item(from, to);
     core.emit_playlist();
@@ -2773,11 +3017,11 @@ fn playlist_move(player: tauri::State<Player>, from: usize, to: usize) -> Res {
 }
 
 #[tauri::command]
-async fn playlist_clear(player: tauri::State<'_, Player>) -> Res {
+async fn playlist_clear(player: Player) -> Res {
     off_main(player, playlist_clear_now).await
 }
 
-fn playlist_clear_now(core: &Core) {
+fn playlist_clear_now(core: &Session) {
     let _transition = core.transition();
     core.stop_locked();
     core.playlist().clear();
@@ -2785,7 +3029,7 @@ fn playlist_clear_now(core: &Core) {
 }
 
 #[tauri::command]
-fn set_repeat(player: tauri::State<Player>, repeat: Repeat) -> Res {
+fn set_repeat(player: Player, repeat: Repeat) -> Res {
     let core = player.core()?;
     core.playlist().repeat = repeat;
     core.emit_playlist();
@@ -2793,7 +3037,7 @@ fn set_repeat(player: tauri::State<Player>, repeat: Repeat) -> Res {
 }
 
 #[tauri::command]
-fn set_shuffle(player: tauri::State<Player>, shuffle: bool) -> Res {
+fn set_shuffle(player: Player, shuffle: bool) -> Res {
     let core = player.core()?;
     core.playlist().shuffle = shuffle;
     core.emit_playlist();
@@ -2801,7 +3045,7 @@ fn set_shuffle(player: tauri::State<Player>, shuffle: bool) -> Res {
 }
 
 #[tauri::command]
-fn playlist_sort(player: tauri::State<Player>, by: SortKey) -> Res {
+fn playlist_sort(player: Player, by: SortKey) -> Res {
     let core = player.core()?;
     core.playlist().sort(by);
     core.emit_playlist();
@@ -2810,7 +3054,7 @@ fn playlist_sort(player: tauri::State<Player>, by: SortKey) -> Res {
 
 /// Saves the queue as M3U, PLS or XSPF (chosen by the file's extension).
 #[tauri::command]
-fn playlist_save(player: tauri::State<Player>, path: String) -> Res {
+fn playlist_save(player: Player, path: String) -> Res {
     let core = player.core()?;
     let items = core.playlist().items.clone();
     playlist_file::write(Path::new(&path), &items)
@@ -2818,7 +3062,7 @@ fn playlist_save(player: tauri::State<Player>, path: String) -> Res {
 
 /// Sets the A–B loop points (ms); `None` clears one.
 #[tauri::command]
-fn set_ab_loop(player: tauri::State<Player>, a: Option<i64>, b: Option<i64>) -> Res {
+fn set_ab_loop(player: Player, a: Option<i64>, b: Option<i64>) -> Res {
     let core = player.core()?;
     *core.ab_loop() = match (a, b) {
         (Some(a), Some(b)) if b < a => (Some(b), Some(a)),
@@ -2829,13 +3073,13 @@ fn set_ab_loop(player: tauri::State<Player>, a: Option<i64>, b: Option<i64>) -> 
 }
 
 #[tauri::command]
-fn set_sleep_timer(player: tauri::State<Player>, minutes: Option<u32>, after_item: bool) -> Res {
+fn set_sleep_timer(player: Player, minutes: Option<u32>, after_item: bool) -> Res {
     player.core()?.set_sleep_timer(minutes, after_item);
     Ok(())
 }
 
 #[tauri::command]
-fn set_title(player: tauri::State<Player>, index: i32) -> Res {
+fn set_title(player: Player, index: i32) -> Res {
     let core = player.core()?;
     core.engine.set_title(index);
     core.emit_state();
@@ -2843,7 +3087,7 @@ fn set_title(player: tauri::State<Player>, index: i32) -> Res {
 }
 
 #[tauri::command]
-fn set_chapter(player: tauri::State<Player>, index: i32) -> Res {
+fn set_chapter(player: Player, index: i32) -> Res {
     let core = player.core()?;
     if let Some(chapter) = core.engine.chapters().get(index.max(0) as usize) {
         core.seeking(chapter.start, "chapter");
@@ -2854,14 +3098,14 @@ fn set_chapter(player: tauri::State<Player>, index: i32) -> Res {
 }
 
 #[tauri::command]
-fn navigate(player: tauri::State<Player>, action: Navigate) -> Res {
+fn navigate(player: Player, action: Navigate) -> Res {
     player.core()?.engine.navigate(action);
     Ok(())
 }
 
 /// Bookmarks the current position.
 #[tauri::command]
-fn bookmark_add(player: tauri::State<Player>, name: Option<String>) -> Res {
+fn bookmark_add(player: Player, name: Option<String>) -> Res {
     let core = player.core()?;
     let uri = core.current_uri().ok_or("Nothing is playing")?;
     let time = core.engine.time();
@@ -2872,7 +3116,7 @@ fn bookmark_add(player: tauri::State<Player>, name: Option<String>) -> Res {
 }
 
 #[tauri::command]
-fn bookmark_remove(player: tauri::State<Player>, time: i64) -> Res {
+fn bookmark_remove(player: Player, time: i64) -> Res {
     let core = player.core()?;
     let uri = core.current_uri().ok_or("Nothing is playing")?;
     core.bookmarks().remove(&uri, time)?;
@@ -2881,7 +3125,7 @@ fn bookmark_remove(player: tauri::State<Player>, time: i64) -> Res {
 }
 
 #[tauri::command]
-fn bookmark_rename(player: tauri::State<Player>, time: i64, name: String) -> Res {
+fn bookmark_rename(player: Player, time: i64, name: String) -> Res {
     let core = player.core()?;
     let uri = core.current_uri().ok_or("Nothing is playing")?;
     core.bookmarks().rename(&uri, time, &name)?;
@@ -2896,7 +3140,7 @@ fn disc_list() -> Vec<Disc> {
 
 /// Plays a disc: a mounted volume, a disc folder or a disc image.
 #[tauri::command]
-async fn open_disc(player: tauri::State<'_, Player>, kind: DiscKind, path: String, menus: bool) -> Res {
+async fn open_disc(player: Player, kind: DiscKind, path: String, menus: bool) -> Res {
     off_main(player, move |core| core.add_items(disc::items(kind, &path, menus)?, true)).await?
 }
 
@@ -2908,7 +3152,7 @@ fn capture_devices() -> Devices {
 }
 
 #[tauri::command]
-async fn open_capture(player: tauri::State<'_, Player>, capture: Capture) -> Res {
+async fn open_capture(player: Player, capture: Capture) -> Res {
     off_main(player, move |core| core.add_items(vec![capture::item(&capture)], true)).await?
 }
 
@@ -2967,13 +3211,13 @@ fn media_items(uris: Vec<String>) -> Result<Vec<Item>, String> {
 }
 
 #[tauri::command]
-async fn playlists_list(player: tauri::State<'_, Player>) -> Result<Vec<Saved>, String> {
+async fn playlists_list(player: Player) -> Result<Vec<Saved>, String> {
     off_main(player, |core| core.playlists().lists.clone()).await
 }
 
 /// Makes a playlist, empty or holding what's in the queue.
 #[tauri::command]
-async fn playlists_create(player: tauri::State<'_, Player>, name: String, from_queue: bool) -> Result<Vec<Saved>, String> {
+async fn playlists_create(player: Player, name: String, from_queue: bool) -> Result<Vec<Saved>, String> {
     off_main(player, move |core| {
         // Cameras and screens aren't something to come back to.
         let items = if from_queue { core.playlist().items.iter().filter(|i| !is_capture(&i.uri)).cloned().collect() } else { Vec::new() };
@@ -2986,7 +3230,7 @@ async fn playlists_create(player: tauri::State<'_, Player>, name: String, from_q
 
 /// Makes a playlist from an M3U, PLS or XSPF file, named after the file.
 #[tauri::command]
-async fn playlists_import(player: tauri::State<'_, Player>, path: String) -> Result<Vec<Saved>, String> {
+async fn playlists_import(player: Player, path: String) -> Result<Vec<Saved>, String> {
     off_main(player, move |core| {
         let path = Path::new(&path);
         let items = playlist_file::read(path)?;
@@ -2999,7 +3243,7 @@ async fn playlists_import(player: tauri::State<'_, Player>, path: String) -> Res
 }
 
 #[tauri::command]
-async fn playlists_rename(player: tauri::State<'_, Player>, id: String, name: String) -> Result<Vec<Saved>, String> {
+async fn playlists_rename(player: Player, id: String, name: String) -> Result<Vec<Saved>, String> {
     off_main(player, move |core| {
         let mut lists = core.playlists();
         lists.rename(&id, &name)?;
@@ -3009,7 +3253,7 @@ async fn playlists_rename(player: tauri::State<'_, Player>, id: String, name: St
 }
 
 #[tauri::command]
-async fn playlists_delete(player: tauri::State<'_, Player>, id: String) -> Result<Vec<Saved>, String> {
+async fn playlists_delete(player: Player, id: String) -> Result<Vec<Saved>, String> {
     off_main(player, move |core| {
         let mut lists = core.playlists();
         lists.delete(&id)?;
@@ -3020,7 +3264,7 @@ async fn playlists_delete(player: tauri::State<'_, Player>, id: String) -> Resul
 
 /// Adds files, folders or URLs to a saved playlist.
 #[tauri::command]
-async fn playlists_add(player: tauri::State<'_, Player>, id: String, uris: Vec<String>) -> Result<Vec<Saved>, String> {
+async fn playlists_add(player: Player, id: String, uris: Vec<String>) -> Result<Vec<Saved>, String> {
     off_main(player, move |core| {
         let items = media_items(uris)?;
         let mut lists = core.playlists();
@@ -3031,7 +3275,7 @@ async fn playlists_add(player: tauri::State<'_, Player>, id: String, uris: Vec<S
 }
 
 #[tauri::command]
-async fn playlists_remove_item(player: tauri::State<'_, Player>, id: String, index: usize, uri: String) -> Result<Vec<Saved>, String> {
+async fn playlists_remove_item(player: Player, id: String, index: usize, uri: String) -> Result<Vec<Saved>, String> {
     off_main(player, move |core| {
         let mut lists = core.playlists();
         lists.remove_item(&id, index, &uri)?;
@@ -3042,7 +3286,7 @@ async fn playlists_remove_item(player: tauri::State<'_, Player>, id: String, ind
 
 /// Plays a saved playlist from its item `index`. It takes the queue's place.
 #[tauri::command]
-async fn playlists_play(player: tauri::State<'_, Player>, id: String, index: usize) -> Res {
+async fn playlists_play(player: Player, id: String, index: usize) -> Res {
     off_main(player, move |core| {
         let items = core.playlists().items(&id)?;
         if items.is_empty() {
@@ -3077,28 +3321,30 @@ struct Places {
 /// network if that isn't running. The UI asks again every few seconds
 /// while it shows them.
 #[tauri::command]
-async fn network_places(player: tauri::State<'_, Player>) -> Result<Places, String> {
+async fn network_places(player: Player) -> Result<Places, String> {
     off_main(player, |core| {
-        core.engine.discovery_start();
-        Places { mounted: network::mounted(), servers: core.servers().list.clone(), found: core.engine.discovered() }
+        // Discovery is shared by every window: it runs while any shows the network view.
+        core.network_users.lock().unwrap_or_else(|e| e.into_inner()).insert(core.label.clone());
+        core.shared.engine.discovery_start();
+        Places { mounted: network::mounted(), servers: core.servers().list.clone(), found: core.shared.engine.discovered() }
     })
     .await
 }
 
 /// Stops looking for servers: the UI has left the network view.
 #[tauri::command]
-async fn network_leave(player: tauri::State<'_, Player>) -> Res {
-    off_main(player, |core| core.engine.discovery_stop()).await
+async fn network_leave(player: Player) -> Res {
+    off_main(player, |core| core.leave_network()).await
 }
 
 /// Lists a folder on a mounted volume or a server.
 #[tauri::command]
-async fn network_browse(player: tauri::State<'_, Player>, location: String, user: Option<String>, password: Option<String>) -> Result<Listing, String> {
+async fn network_browse(player: Player, location: String, user: Option<String>, password: Option<String>) -> Result<Listing, String> {
     off_main(player, move |core| network::browse(&*core.engine, &location, user.as_deref().unwrap_or_default(), password.as_deref().unwrap_or_default())).await?
 }
 
 #[tauri::command]
-async fn network_save(player: tauri::State<'_, Player>, url: String, name: String, user: Option<String>) -> Result<Vec<Server>, String> {
+async fn network_save(player: Player, url: String, name: String, user: Option<String>) -> Result<Vec<Server>, String> {
     off_main(player, move |core| {
         let mut servers = core.servers();
         servers.save(&url, &name, user)?;
@@ -3108,7 +3354,7 @@ async fn network_save(player: tauri::State<'_, Player>, url: String, name: Strin
 }
 
 #[tauri::command]
-async fn network_forget(player: tauri::State<'_, Player>, url: String) -> Result<Vec<Server>, String> {
+async fn network_forget(player: Player, url: String) -> Result<Vec<Server>, String> {
     off_main(player, move |core| {
         let mut servers = core.servers();
         servers.remove(&url)?;
@@ -3124,12 +3370,12 @@ async fn radio_stations(query: String, tag: String) -> Result<Vec<Station>, Stri
 }
 
 #[tauri::command]
-async fn radio_favorites(player: tauri::State<'_, Player>) -> Result<Vec<Station>, String> {
+async fn radio_favorites(player: Player) -> Result<Vec<Station>, String> {
     off_main(player, |core| core.radio().list.clone()).await
 }
 
 #[tauri::command]
-async fn radio_favorite(player: tauri::State<'_, Player>, station: Station, on: bool) -> Result<Vec<Station>, String> {
+async fn radio_favorite(player: Player, station: Station, on: bool) -> Result<Vec<Station>, String> {
     off_main(player, move |core| {
         let mut favorites = core.radio();
         favorites.set(station, on)?;
@@ -3140,7 +3386,7 @@ async fn radio_favorite(player: tauri::State<'_, Player>, station: Station, on: 
 
 /// Plays a station, under its name rather than its address.
 #[tauri::command]
-async fn radio_play(player: tauri::State<'_, Player>, station: Station) -> Res {
+async fn radio_play(player: Player, station: Station) -> Res {
     if !radio::playable(&station.url) {
         return Err("That station has no address to play".into());
     }
@@ -3180,6 +3426,356 @@ fn preferred_languages() -> Vec<String> {
     Vec::new()
 }
 
+/// The app-wide state, once `setup` has made it.
+fn shared_of(app: &AppHandle) -> Option<Arc<Shared>> {
+    app.try_state::<Players>().and_then(|p| p.0.as_ref().ok().cloned())
+}
+
+/// The label of the player window that menu actions and notices go to.
+/// Without the engine there's still the first window, showing why.
+fn target_label(app: &AppHandle) -> Option<String> {
+    match shared_of(app) {
+        Some(shared) => shared.registry().windows.target().map(String::from),
+        None => Some(roster::MAIN.to_string()),
+    }
+}
+
+/// Shows a notice in the player window that has the focus.
+fn notify(app: &AppHandle, notice: Notice) {
+    if let Some(label) = target_label(app) {
+        let _ = app.emit_to(label.as_str(), "player://notice", notice);
+    }
+}
+
+/// What the command line gave the first window.
+#[derive(Default)]
+struct Launch {
+    files: Vec<String>,
+    media_options: Vec<String>,
+    fullscreen: bool,
+    play_and_exit: bool,
+}
+
+impl Session {
+    /// A window's session, with its own `engine` player. It plays nothing
+    /// until [`Session::mark_ready`].
+    fn new(shared: Arc<Shared>, label: String, engine: Arc<dyn Engine>, launch: &Launch) -> Self {
+        Session {
+            shared,
+            label,
+            engine,
+            playlist: Mutex::default(),
+            ready: AtomicBool::new(false),
+            pending: Mutex::default(),
+            closing: AtomicBool::new(false),
+            claimed: AtomicBool::new(false),
+            resume: Mutex::default(),
+            user_snapshot: AtomicBool::new(false),
+            scrub_lock: Mutex::default(),
+            scrub_cache: Arc::new(preview::cache::ScrubCache::default()),
+            scrub_priority: Mutex::new(None),
+            scrub_run: AtomicU64::new(0),
+            scrub_cancel_token: Mutex::new(keyframes::CancelToken::new()),
+            scrub_active: Mutex::new(None),
+            scrub_jobs: Mutex::default(),
+            ab_loop: Mutex::default(),
+            sleep: Mutex::default(),
+            transition: Mutex::default(),
+            reloads: AtomicU64::new(0),
+            subtitles: Mutex::new(Vec::new()),
+            early: Mutex::new(Some(Early::default())),
+            quality: Mutex::default(),
+            effects: Mutex::default(),
+            start_fullscreen: launch.fullscreen,
+            play_and_exit: launch.play_and_exit,
+        }
+    }
+}
+
+/// Opens a player window with a player of its own. The first one is the
+/// window in `tauri.conf.json`; later ones are made here, with the same
+/// settings. Not for the main thread (window creation can block there).
+fn open_player(app: &AppHandle, shared: &Arc<Shared>, launch: Launch) -> Result<Arc<Session>, String> {
+    let label = shared.registry().windows.open();
+    let mut built = None;
+    let result = open_player_as(app, shared, &label, launch, &mut built);
+    if result.is_err() {
+        // Nothing may be left of it: neither its player nor a window
+        // with no player behind it.
+        close_player(app, shared, &label);
+        if let Some(window) = built {
+            let _ = window.destroy();
+        }
+    }
+    result
+}
+
+/// [`open_player`] for the window `label`. A window it had to make is put
+/// in `built`, so a failure after that can close it again.
+fn open_player_as(
+    app: &AppHandle,
+    shared: &Arc<Shared>,
+    label: &str,
+    launch: Launch,
+    built: &mut Option<tauri::WebviewWindow>,
+) -> Result<Arc<Session>, String> {
+    let session = {
+        // With the settings lock held, so a change can't land between reading
+        // them here and the player being registered to get changes.
+        let _changing = shared.settings_change.lock().unwrap_or_else(|e| e.into_inner());
+        let settings = shared.settings().clone();
+        let engine = shared.engine.new_player(&settings).map_err(|e| e.message)?;
+        let session = Arc::new(Session::new(shared.clone(), label.to_string(), engine, &launch));
+        // Registered before the window exists: its page asks for a snapshot as soon as it loads.
+        shared.registry().sessions.insert(label.to_string(), session.clone());
+        session
+    };
+    let (tx, rx) = mpsc::channel();
+    session.engine.subscribe(tx);
+    let pump = session.clone();
+    thread::Builder::new().name(format!("vlc-events-{label}")).spawn(move || pump_events(pump, rx)).map_err(|e| e.to_string())?;
+
+    let window = match app.get_webview_window(label) {
+        Some(window) => window,
+        None => {
+            let mut config = app.config().app.windows.iter().find(|w| w.label == roster::MAIN).cloned().ok_or("main window missing from tauri.conf")?;
+            config.label = label.to_string();
+            let window = WebviewWindowBuilder::from_config(app, &config).and_then(|b| b.build()).map_err(|e| e.to_string())?;
+            *built = Some(window.clone());
+            window
+        }
+    };
+    #[cfg(windows)]
+    quiet_webview(&window);
+    // Files passed on the command line; they wait until the video view exists.
+    if let Err(e) = session.add_with_options(launch.files, true, &launch.media_options) {
+        session.notice("error", e);
+    }
+    attach_surface(&session, &window).map_err(|e| e.to_string())?;
+    Ok(session)
+}
+
+#[cfg(target_os = "macos")]
+thread_local! {
+    /// Each player window's video view and AppKit hooks, by window label.
+    /// Main thread only: AppKit objects can't leave it.
+    static SURFACES: std::cell::RefCell<HashMap<String, surface_macos::Surface>> = std::cell::RefCell::default();
+}
+
+/// Puts the video view in `window`, for `session`'s player to draw into.
+fn attach_surface(session: &Arc<Session>, window: &tauri::WebviewWindow) -> tauri::Result<()> {
+    #[cfg(windows)]
+    let hwnd = window.hwnd()?.0 as isize;
+    let attach = session.clone();
+    window.with_webview(move |webview| {
+        #[cfg(target_os = "macos")]
+        {
+            let (ui, label) = (attach.ui.clone(), attach.label.clone());
+            let last = std::cell::Cell::new(Instant::now() - Duration::from_secs(1));
+            let on_pointer = move || {
+                // Throttled: the UI only needs to know the pointer is active.
+                if last.get().elapsed() >= Duration::from_millis(150) {
+                    last.set(Instant::now());
+                    ui.emit_to_json(&label, "native://pointer", serde_json::Value::Null);
+                }
+            };
+            match surface_macos::attach(webview.inner(), webview.ns_window(), on_pointer) {
+                Ok(surface) => {
+                    attach.engine.set_nsview(surface.view());
+                    SURFACES.with(|s| s.borrow_mut().insert(attach.label.clone(), surface));
+                }
+                Err(e) => eprintln!("revlc: could not create the video view: {e}"),
+            }
+        }
+        // The web view covers the whole window and gets every mouse event,
+        // so Windows needs no pointer monitor.
+        #[cfg(windows)]
+        {
+            let _ = webview;
+            match surface_windows::attach(hwnd as *mut std::ffi::c_void) {
+                Ok(video) => attach.engine.set_hwnd(video),
+                Err(e) => eprintln!("revlc: could not create the video window: {e}"),
+            }
+        }
+        #[cfg(target_os = "linux")]
+        {
+            let frames = Arc::new(Mutex::new(None));
+            match surface_linux::attach(&webview.inner(), frames.clone()) {
+                Ok(()) => attach.engine.set_gtk_surface(frames),
+                Err(e) => {
+                    eprintln!("revlc: could not create the video surface: {e}");
+                    return;
+                }
+            }
+        }
+        #[cfg(not(any(target_os = "macos", windows, target_os = "linux")))]
+        let _ = webview;
+        // Off the main thread, like the commands that open media.
+        thread::spawn(move || attach.mark_ready());
+    })
+}
+
+/// Forgets a player window that has closed, and ends its player. Returns
+/// whether it was the last one, which quits the app.
+///
+/// Its position is saved here, before anything else: when it's the last
+/// window the app quits next, and the quit only writes what's saved by then.
+fn close_player(app: &AppHandle, shared: &Arc<Shared>, label: &str) -> bool {
+    let (session, last) = forget_player(shared, label);
+    if let Some(session) = session {
+        let app = app.clone();
+        // Stopping waits for libVLC, and releasing the player for its video
+        // output, which may need the main thread: not from here.
+        thread::spawn(move || {
+            session.leave_network();
+            session.shutdown();
+            // Only now that nothing draws into it can the video view go.
+            #[cfg(target_os = "macos")]
+            {
+                let label = session.label.clone();
+                let _ = app.run_on_main_thread(move || drop(SURFACES.with(|s| s.borrow_mut().remove(&label))));
+            }
+            #[cfg(not(target_os = "macos"))]
+            let _ = app;
+        });
+    }
+    last
+}
+
+/// The bookkeeping half of [`close_player`]: takes window `label` out of the
+/// registry and saves where its player got to. Returns its session, to shut
+/// down, and whether it was the last window.
+fn forget_player(shared: &Shared, label: &str) -> (Option<Arc<Session>>, bool) {
+    let (session, last) = {
+        let mut registry = shared.registry();
+        (registry.sessions.remove(label), registry.windows.close(label))
+    };
+    if let Some(session) = &session {
+        session.begin_close(if last { "quit" } else { "closed" });
+    }
+    (session, last)
+}
+
+/// Closes one of several player windows: takes it out of the windows that
+/// opens and menu actions can go to, stops its player (saving the position)
+/// so libVLC isn't left drawing into a window that's gone, then closes it.
+fn close_window_gracefully(window: tauri::Window, shared: Arc<Shared>) {
+    let session = leave_roster(&shared, window.label());
+    thread::spawn(move || {
+        if let Some(session) = session {
+            session.stop();
+        }
+        let _ = window.destroy();
+    });
+}
+
+/// Takes a window that's about to close out of the roster, so opens and
+/// menu actions stop going to it, and marks its session as closing.
+fn leave_roster(shared: &Shared, label: &str) -> Option<Arc<Session>> {
+    let session = {
+        let mut registry = shared.registry();
+        registry.windows.close(label);
+        registry.sessions.get(label).cloned()
+    };
+    if let Some(session) = &session {
+        session.closing.store(true, Ordering::Release);
+    }
+    session
+}
+
+/// Whether `uris` are only subtitle files, which go to the video playing.
+fn only_subtitles(uris: &[String]) -> bool {
+    !uris.is_empty() && uris.iter().all(|u| library::is_subtitle(Path::new(u)))
+}
+
+/// Where opened media plays: in `here` (the window it was opened in, else
+/// the one used last), or, with "Open each video in a new window" on and
+/// that window busy, in a new one. A window picked while idle is marked as
+/// taken until its open starts, so a second open meanwhile doesn't pick it too.
+/// Subtitles on their own go to the video they're for: this window's if it
+/// shows one, else the one in the window used last that does; failing that,
+/// whatever has a file open, in the same order.
+fn route_open(shared: &Shared, here: Option<Arc<Session>>, uris: &[String]) -> Option<Arc<Session>> {
+    let _routing = shared.routing.lock().unwrap_or_else(|e| e.into_inner());
+    let target = here.filter(|s| !s.is_closing()).or_else(|| shared.target_session())?;
+    if only_subtitles(uris) {
+        let others = shared.sessions().into_iter().rev().filter(|s| !s.is_closing() && s.label != target.label);
+        let candidates: Vec<_> = std::iter::once(target.clone()).chain(others).collect();
+        let opened = |s: &&Arc<Session>| s.current_uri().is_some();
+        let showing = candidates.iter().filter(opened).find(|s| s.engine.has_video());
+        let opened = candidates.iter().find(opened);
+        return Some(showing.or(opened).cloned().unwrap_or(target));
+    }
+    let new_window = shared.settings().open_in_new_window;
+    if new_window && target.is_busy() {
+        return None;
+    }
+    target.claimed.store(true, Ordering::Release);
+    Some(target)
+}
+
+/// Plays `uris` where [`route_open`] says. Blocks (it may make a window),
+/// so not on the main thread.
+fn open_routed(app: &AppHandle, shared: &Arc<Shared>, here: Option<Arc<Session>>, uris: Vec<String>, options: Vec<String>) -> Result<Arc<Session>, String> {
+    match route_open(shared, here, &uris) {
+        Some(session) => session.add_routed(uris, &options).map(|()| session),
+        None => open_player(app, shared, Launch { files: uris, media_options: options, ..Launch::default() }),
+    }
+}
+
+/// Files another copy of ReVLC handed over, with their libVLC options.
+#[cfg_attr(target_os = "macos", allow(dead_code))]
+struct HandOver {
+    files: Vec<String>,
+    options: Vec<String>,
+}
+
+/// Queues files another copy of ReVLC handed over, to open in the order
+/// they arrived, off the main thread (creating a window can block it).
+#[cfg_attr(target_os = "macos", allow(dead_code))]
+fn hand_over(app: &AppHandle, shared: &Arc<Shared>, files: Vec<String>, options: Vec<String>) {
+    let hand_over = HandOver { files, options };
+    let mut queue = shared.hand_overs.lock().unwrap_or_else(|e| e.into_inner());
+    let hand_over = match queue.as_ref() {
+        Some(tx) => match tx.send(hand_over) {
+            Ok(()) => return,
+            // The worker is gone: start another.
+            Err(mpsc::SendError(h)) => h,
+        },
+        None => hand_over,
+    };
+    let (tx, rx) = mpsc::channel::<HandOver>();
+    let _ = tx.send(hand_over);
+    *queue = Some(tx);
+    let (app, shared) = (app.clone(), shared.clone());
+    thread::spawn(move || {
+        for hand_over in rx {
+            match open_handed_over(&app, &shared, hand_over) {
+                // Shows the window they went to, which may be a new one.
+                Ok(session) => {
+                    if let Some(window) = app.get_webview_window(&session.label) {
+                        let _ = window.unminimize();
+                        let _ = window.set_focus();
+                    }
+                }
+                Err(e) => match shared.target_session() {
+                    Some(session) => session.notice("error", e),
+                    None => eprintln!("revlc: could not open the file: {e}"),
+                },
+            }
+        }
+    });
+}
+
+/// Plays files another copy of ReVLC handed over, where [`route_open`]
+/// says. Explorer starts a copy for each file selected, so with "Open each
+/// video in a new window" on, each selected video gets a window, as VLC
+/// does. Blocks, so not on the main thread.
+#[cfg_attr(target_os = "macos", allow(dead_code))]
+fn open_handed_over(app: &AppHandle, shared: &Arc<Shared>, hand_over: HandOver) -> Result<Arc<Session>, String> {
+    open_routed(app, shared, None, hand_over.files, hand_over.options)
+}
+
 fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     main_window(app)?;
     updater::start(app.handle());
@@ -3196,7 +3792,7 @@ fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     // Before the engine: the menu bar (and its Settings…) is there even if
     // the engine can't start. The UI sends the real bindings once it loads;
     // start with the defaults.
-    let keys: HashMap<String, String> = [("open", "Cmd+O"), ("openFolder", "Shift+Cmd+O"), ("openUrl", "Cmd+N"), ("queue", "Cmd+L")]
+    let keys: HashMap<String, String> = [("newWindow", "Shift+Cmd+N"), ("open", "Cmd+O"), ("openFolder", "Shift+Cmd+O"), ("openUrl", "Cmd+N"), ("queue", "Cmd+L")]
         .into_iter()
         .map(|(a, k)| (a.to_string(), k.to_string()))
         .collect();
@@ -3211,88 +3807,53 @@ fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
             // Nothing can play. The message names paths, so only the stage is sent.
             telemetry::capture("engine_failed", serde_json::json!({ "stage": e.stage }));
             eprintln!("revlc: {}", e.message);
-            app.manage(Player(Err(e.message)));
+            app.manage(Players(Err(e.message)));
             return Ok(());
         }
     };
     let cache_dir = app.path().app_cache_dir()?;
     let (history_saves, history_rx) = mpsc::channel();
     let app_handle = app.handle().clone();
-    let core = Arc::new(Core {
+    let shared = Arc::new(Shared {
         engine,
-        playlist: Mutex::default(),
         ui: Arc::new(app_handle.clone()),
-        ready: AtomicBool::new(false),
-        pending: Mutex::default(),
         history: Mutex::new(History::load(data_dir.clone(), cache_dir.clone())),
-        resume: Mutex::default(),
         settings: Mutex::new(settings.clone()),
         languages,
         fonts: font_families(),
-        user_snapshot: AtomicBool::new(false),
         library: Mutex::new(Library::load(&data_dir)),
         thumbs: Thumbnails::default(),
         meta_scanner: MetaScanner::default(),
         thumbs_dir: cache_dir.join("thumbs"),
         embedded_art_dir: cache_dir.join("embedded"),
         scrub_dir: cache_dir.join("scrub"),
-        scrub_lock: Mutex::default(),
-        scrub_cache: Arc::new(preview::cache::ScrubCache::default()),
-        scrub_priority: Mutex::new(None),
-        scrub_run: AtomicU64::new(0),
-        scrub_cancel_token: Mutex::new(keyframes::CancelToken::new()),
-        scrub_active: Mutex::new(None),
         scrub_passes_active: Arc::new((Mutex::new(0), Condvar::new())),
-        scrub_jobs: Mutex::default(),
         meta: Mutex::new(MetaCache::load(&cache_dir)),
         bookmarks: Mutex::new(Bookmarks::load(&data_dir)),
         playlists: Mutex::new(Playlists::load(&data_dir)),
         servers: Mutex::new(Servers::load(&data_dir)),
         radio: Mutex::new(Favorites::load(&data_dir)),
-        ab_loop: Mutex::default(),
-        sleep: Mutex::default(),
-        transition: Mutex::default(),
-        reloads: AtomicU64::new(0),
-        subtitles: Mutex::new(Vec::new()),
-        early: Mutex::new(Some(Early::default())),
         library_scan: Mutex::default(),
-        quality: Mutex::default(),
         history_saves,
         history_write: Mutex::default(),
         settings_change: Mutex::default(),
-        effects: Mutex::default(),
-        start_fullscreen: cli.fullscreen,
-        play_and_exit: cli.play_and_exit,
+        registry: Mutex::default(),
+        routing: Mutex::default(),
+        network_users: Mutex::default(),
+        hand_overs: Mutex::default(),
         data_dir,
     });
-    if !cli.ignored.is_empty() {
-        core.notice("error", format!("Ignored command-line options: {}", cli.ignored.join(" ")));
-    }
-    if !core.engine.rejected_args().is_empty() {
-        core.notice("error", format!("libVLC didn't accept {}, so ReVLC started without them", core.engine.rejected_args().join(" ")));
-    }
-    // Files that couldn't be read were moved aside; say so, like the history's.
-    let kept = |d: &store::Damaged| d.aside.as_ref().map(|p| format!(" The old file is kept at {}", p.display())).unwrap_or_default();
-    if let Some(d) = &settings_damaged {
-        core.notice("error", format!("Your settings couldn't be read, so they're back to the defaults, with usage statistics off.{}", kept(d)));
-    }
-    if let Some(d) = core.bookmarks().damaged.take() {
-        core.notice("error", format!("Your bookmarks couldn't be read, so they start empty.{}", kept(&d)));
-    }
-    if let Some(d) = core.library().damaged.take() {
-        core.notice("error", format!("Your library folders couldn't be read, so the library starts empty.{}", kept(&d)));
-    }
 
-    let scrub_dir = core.scrub_dir.clone();
+    let scrub_dir = shared.scrub_dir.clone();
     thread::spawn(move || scrub::prune(&scrub_dir));
-    let thumbs = core.clone();
+    let thumbs = shared.clone();
     thread::Builder::new().name("thumbnails".into()).spawn(move || make_thumbnails(thumbs))?;
     let meta_workers = thread::available_parallelism().map_or(4, |n| n.get().clamp(2, 6));
     for i in 0..meta_workers {
-        let scanner = core.clone();
+        let scanner = shared.clone();
         thread::Builder::new().name(format!("meta-scan-{i}")).spawn(move || scan_metadata_worker(scanner))?;
     }
-    let saver = core.clone();
+    let saver = shared.clone();
     thread::Builder::new().name("history".into()).spawn(move || {
         while history_rx.recv().is_ok() {
             // One write covers every request that came meanwhile.
@@ -3300,74 +3861,42 @@ fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
             let _ = saver.write_history(true);
         }
     })?;
+    app.manage(Players(Ok(shared.clone())));
 
-    let (tx, rx) = mpsc::channel();
-    core.engine.subscribe(tx);
-    let pump = core.clone();
-    thread::Builder::new().name("vlc-events".into()).spawn(move || pump_events(pump, rx))?;
-
-    // Files passed on the command line, then any Finder opened before now.
-    if let Err(e) = core.add_with_options(cli.files, true, &cli.media_options) {
-        core.notice("error", e);
+    // The first window gets the command line: its files, then any Finder
+    // opened before now.
+    let launch = Launch { files: cli.files, media_options: cli.media_options, fullscreen: cli.fullscreen, play_and_exit: cli.play_and_exit };
+    let session = open_player(&app_handle, &shared, launch)?;
+    if !cli.ignored.is_empty() {
+        session.notice("error", format!("Ignored command-line options: {}", cli.ignored.join(" ")));
+    }
+    if !shared.engine.rejected_args().is_empty() {
+        session.notice("error", format!("libVLC didn't accept {}, so ReVLC started without them", shared.engine.rejected_args().join(" ")));
+    }
+    // Files that couldn't be read were moved aside; say so, like the history's.
+    let kept = |d: &store::Damaged| d.aside.as_ref().map(|p| format!(" The old file is kept at {}", p.display())).unwrap_or_default();
+    if let Some(d) = &settings_damaged {
+        session.notice("error", format!("Your settings couldn't be read, so they're back to the defaults, with usage statistics off.{}", kept(d)));
+    }
+    if let Some(d) = shared.bookmarks().damaged.take() {
+        session.notice("error", format!("Your bookmarks couldn't be read, so they start empty.{}", kept(&d)));
+    }
+    if let Some(d) = shared.library().damaged.take() {
+        session.notice("error", format!("Your library folders couldn't be read, so the library starts empty.{}", kept(&d)));
     }
     let early = std::mem::take(&mut *EARLY_OPENS.lock().unwrap_or_else(|e| e.into_inner()));
-    if let Err(e) = core.add(early, true) {
-        core.notice("error", e);
+    if let Err(e) = session.add(early, true) {
+        session.notice("error", e);
     }
-
-    let window = app.get_webview_window("main").ok_or("main window missing")?;
-    #[cfg(windows)]
-    quiet_webview(&window);
-    #[cfg(windows)]
-    let hwnd = window.hwnd()?.0 as isize;
-    let attach = core.clone();
-    let pointer_handle = app_handle;
-    window.with_webview(move |webview| {
-        #[cfg(target_os = "macos")]
-        {
-            let app = pointer_handle.clone();
-            let last = std::cell::Cell::new(Instant::now() - Duration::from_secs(1));
-            let on_pointer = move || {
-                // Throttled: the UI only needs to know the pointer is active.
-                if last.get().elapsed() >= Duration::from_millis(150) {
-                    last.set(Instant::now());
-                    let _ = app.emit("native://pointer", ());
-                }
-            };
-            match surface_macos::attach(webview.inner(), webview.ns_window(), on_pointer) {
-                Ok(view) => attach.engine.set_nsview(view),
-                Err(e) => eprintln!("revlc: could not create the video view: {e}"),
-            }
+    // Other copies' files, routed like any open now that there's a window.
+    // Queued under the lock, so a hand-over coming meanwhile goes after them.
+    #[cfg(any(windows, target_os = "linux"))]
+    {
+        let mut early = EARLY_HAND_OVERS.lock().unwrap_or_else(|e| e.into_inner());
+        for HandOver { files, options } in early.take().unwrap_or_default() {
+            hand_over(&app_handle, &shared, files, options);
         }
-        // The web view covers the whole window and gets every mouse event,
-        // so Windows needs no pointer monitor.
-        #[cfg(windows)]
-        {
-            let _ = (webview, &pointer_handle);
-            match surface_windows::attach(hwnd as *mut std::ffi::c_void) {
-                Ok(video) => attach.engine.set_hwnd(video),
-                Err(e) => eprintln!("revlc: could not create the video window: {e}"),
-            }
-        }
-        #[cfg(target_os = "linux")]
-        {
-            let _ = &pointer_handle;
-            let frames = Arc::new(Mutex::new(None));
-            match surface_linux::attach(&webview.inner(), frames.clone()) {
-                Ok(()) => attach.engine.set_gtk_surface(frames),
-                Err(e) => {
-                    eprintln!("revlc: could not create the video surface: {e}");
-                    return;
-                }
-            }
-        }
-        #[cfg(not(any(target_os = "macos", windows, target_os = "linux")))]
-        let _ = (webview, &pointer_handle);
-        // Off the main thread, like the commands that open media.
-        thread::spawn(move || attach.mark_ready());
-    })?;
-
-    app.manage(Player(Ok(core)));
+    }
     Ok(())
 }
 
@@ -3430,21 +3959,30 @@ pub fn run() {
     surface_linux::init();
     let builder = tauri::Builder::default();
     // Windows starts a new process for each file opened from Explorer; it
-    // hands its files to the running copy and exits.
+    // hands its files to the running copy and exits. They play where
+    // [`open_handed_over`] says.
     #[cfg(any(windows, target_os = "linux"))]
     let builder = builder.plugin(tauri_plugin_single_instance::init(|app, args, cwd| {
-        if let Some(window) = app.get_webview_window("main") {
-            let _ = window.unminimize();
-            let _ = window.set_focus();
-        }
         // libVLC has started, so only the files and their start times count.
         let mut cli = cli::parse(args.into_iter().skip(1));
         cli.resolve_paths(Path::new(&cwd));
         if cli.files.is_empty() {
+            // Started again with nothing to open: show the window used last.
+            if let Some(window) = target_label(app).and_then(|label| app.get_webview_window(&label)) {
+                let _ = window.unminimize();
+                let _ = window.set_focus();
+            }
             return;
         }
-        if let Some(Ok(core)) = app.try_state::<Player>().as_deref().map(Player::core) {
-            core.add_from_main(cli.files, cli.media_options);
+        {
+            let mut early = EARLY_HAND_OVERS.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some(early) = early.as_mut() {
+                early.push(HandOver { files: cli.files, options: cli.media_options });
+                return;
+            }
+        }
+        if let Some(shared) = shared_of(app) {
+            hand_over(app, &shared, cli.files, cli.media_options);
         }
     }));
     let app = match builder
@@ -3452,11 +3990,11 @@ pub fn run() {
         .plugin(tauri_plugin_updater::Builder::new().build())
         // Serves seek-bar preview JPEGs directly from the bounded in-memory LRU
         // cache without touching disk (`scrub://localhost/{nonce}-{run}/{k}.jpg`).
+        // Each window's frames are its own: the asking window's are served.
         .register_uri_scheme_protocol("scrub", |ctx, req| {
-            let cache = ctx
-                .app_handle()
-                .try_state::<Player>()
-                .and_then(|p| p.core().ok().map(|c| Arc::clone(&c.scrub_cache)));
+            let cache = shared_of(ctx.app_handle())
+                .and_then(|shared| shared.session(ctx.webview_label()))
+                .map(|session| Arc::clone(&session.scrub_cache));
             scrub_protocol_response(cache.as_deref(), req.uri().path())
         })
         // Tauri panics on a setup error, which with panic = "abort" closes
@@ -3467,11 +4005,40 @@ pub fn run() {
             }
             Ok(())
         })
-        // The player is the app: closing it quits, even with Settings open,
-        // rather than leaving playback running with no window to show it.
         .on_window_event(|window, event| {
-            if window.label() == "main" && matches!(event, WindowEvent::Destroyed) {
-                window.app_handle().exit(0);
+            let Some(shared) = shared_of(window.app_handle()) else {
+                // Without the engine there's only the first window, showing
+                // why: closing it quits, even with Settings open.
+                if window.label() == roster::MAIN && matches!(event, WindowEvent::Destroyed) {
+                    window.app_handle().exit(0);
+                }
+                return;
+            };
+            // Settings isn't a player window. One that's closing has left the
+            // roster but still has its session until it's gone.
+            let is_player = {
+                let registry = shared.registry();
+                registry.windows.contains(window.label()) || registry.sessions.contains_key(window.label())
+            };
+            if !is_player {
+                return;
+            }
+            match event {
+                WindowEvent::Focused(true) => shared.registry().windows.focus(window.label()),
+                // Already closing (its close button clicked again): that
+                // close stops the player before the window goes.
+                WindowEvent::CloseRequested { api, .. } if !shared.registry().windows.contains(window.label()) => {
+                    api.prevent_close();
+                }
+                // With others open, stop this window's player before it goes.
+                WindowEvent::CloseRequested { api, .. } if shared.registry().windows.len() > 1 => {
+                    api.prevent_close();
+                    close_window_gracefully(window.clone(), shared.clone());
+                }
+                // The last player window closing quits, even with Settings
+                // open, rather than leaving the app running with nothing to show.
+                WindowEvent::Destroyed if close_player(window.app_handle(), &shared, window.label()) => window.app_handle().exit(0),
+                _ => {}
             }
         })
         .on_menu_event(|app, event| match event.id().as_ref() {
@@ -3480,10 +4047,13 @@ pub fn run() {
                     eprintln!("revlc: could not open settings: {e}");
                 }
             }
-            // Everything else is a player action the UI knows how to run.
+            // Everything else is a player action the UI knows how to run,
+            // in the window that has the focus.
             id => {
-                if !run_app_item(app, id) {
-                    let _ = app.emit_to("main", "menu://action", id.to_string());
+                if !run_app_item(app, id)
+                    && let Some(label) = target_label(app)
+                {
+                    let _ = app.emit_to(label.as_str(), "menu://action", id.to_string());
                 }
             }
         })
@@ -3592,11 +4162,15 @@ pub fn run() {
     app.run(|handle, event| {
         // The Quit menu item ends the app without asking: only Exit comes.
         if matches!(event, RunEvent::ExitRequested { .. } | RunEvent::Exit) {
-            if let Some(Ok(core)) = handle.try_state::<Player>().as_deref().map(Player::core) {
-                core.save_progress(false);
+            if let Some(shared) = shared_of(handle) {
+                // The window used last saves last, so where two windows have
+                // the same file open, its position is the one kept.
+                for session in shared.sessions() {
+                    session.save_progress(false);
+                    session.quality().close("quit");
+                }
                 // Now, rather than on the history thread, which quitting doesn't wait for.
-                let _ = core.write_history(true);
-                core.quality().close("quit");
+                let _ = shared.write_history(true);
             }
             telemetry::flush_on_exit();
         }
@@ -3607,10 +4181,22 @@ pub fn run() {
                 .into_iter()
                 .map(|u| u.to_file_path().map(|p| p.to_string_lossy().into_owned()).unwrap_or_else(|_| u.to_string()))
                 .collect();
-            match handle.try_state::<Player>() {
-                Some(player) => {
-                    if let Ok(core) = player.core() {
-                        core.add_from_main(uris, Vec::new());
+            // Before there is a window, `setup` plays them. After that, into the
+            // window used last, or a new window if "Open each video in a new
+            // window" is on and that one is busy.
+            match handle.try_state::<Players>() {
+                Some(players) => {
+                    if let Ok(shared) = players.0.clone() {
+                        let app = handle.clone();
+                        // Off the main thread, which creating a window can block.
+                        thread::spawn(move || {
+                            if let Err(e) = open_routed(&app, &shared, None, uris, Vec::new()) {
+                                match shared.target_session() {
+                                    Some(session) => session.notice("error", e),
+                                    None => eprintln!("revlc: could not open the file: {e}"),
+                                }
+                            }
+                        });
                     }
                 }
                 None => EARLY_OPENS.lock().unwrap_or_else(|e| e.into_inner()).extend(uris),
@@ -3727,12 +4313,14 @@ mod tests {
 
     struct TestUi {
         events: Mutex<Vec<(String, serde_json::Value)>>,
+        /// The window each targeted event went to, and the event.
+        targets: Mutex<Vec<(String, String)>>,
         exited: AtomicBool,
     }
 
     impl TestUi {
         fn new() -> Arc<Self> {
-            Arc::new(Self { events: Mutex::default(), exited: AtomicBool::new(false) })
+            Arc::new(Self { events: Mutex::default(), targets: Mutex::default(), exited: AtomicBool::new(false) })
         }
 
         fn events(&self) -> Vec<(String, serde_json::Value)> {
@@ -3745,65 +4333,69 @@ mod tests {
             self.events.lock().unwrap().push((event.to_string(), payload));
         }
 
+        fn emit_to_json(&self, label: &str, event: &str, payload: serde_json::Value) {
+            self.events.lock().unwrap().push((event.to_string(), payload));
+            self.targets.lock().unwrap().push((label.to_string(), event.to_string()));
+        }
+
         fn exit(&self, _code: i32) {
             self.exited.store(true, Ordering::Release);
         }
     }
 
-    fn test_core(name: &str) -> (Arc<Core>, Arc<engine::mock::MockEngine>, Arc<TestUi>, PathBuf) {
+    /// App-wide state on a mock engine, in a fresh folder.
+    fn test_shared(name: &str) -> (Arc<Shared>, Arc<engine::mock::MockEngine>, Arc<TestUi>, PathBuf) {
         let dir = std::env::temp_dir().join(format!("revlc-core-test-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let mock = Arc::new(engine::mock::MockEngine::default());
         let ui = TestUi::new();
         let (history_saves, _rx) = mpsc::channel();
-        let core = Arc::new(Core {
+        let shared = Arc::new(Shared {
             engine: mock.clone(),
-            playlist: Mutex::default(),
             ui: ui.clone(),
-            ready: AtomicBool::new(true),
-            pending: Mutex::default(),
             history: Mutex::new(History::load(dir.clone(), dir.clone())),
-            resume: Mutex::default(),
             settings: Mutex::new(Settings { analytics: false, ..Settings::default() }),
             data_dir: dir.clone(),
             languages: vec!["en".into()],
             fonts: Vec::new(),
-            user_snapshot: AtomicBool::new(false),
             library: Mutex::new(Library::load(&dir)),
             thumbs: Thumbnails::default(),
             meta_scanner: MetaScanner::default(),
             thumbs_dir: dir.join("thumbs"),
             embedded_art_dir: dir.join("embedded"),
             scrub_dir: dir.join("scrub"),
-            scrub_lock: Mutex::default(),
-            scrub_cache: Arc::new(preview::cache::ScrubCache::default()),
-            scrub_priority: Mutex::new(None),
-            scrub_run: AtomicU64::new(0),
-            scrub_cancel_token: Mutex::new(keyframes::CancelToken::new()),
-            scrub_active: Mutex::new(None),
             scrub_passes_active: Arc::new((Mutex::new(0), Condvar::new())),
-            scrub_jobs: Mutex::default(),
             meta: Mutex::new(MetaCache::load(&dir)),
             bookmarks: Mutex::new(Bookmarks::load(&dir)),
             playlists: Mutex::new(Playlists::load(&dir)),
             servers: Mutex::new(Servers::load(&dir)),
             radio: Mutex::new(Favorites::load(&dir)),
-            ab_loop: Mutex::default(),
-            sleep: Mutex::default(),
-            transition: Mutex::default(),
-            reloads: AtomicU64::new(0),
-            subtitles: Mutex::new(Vec::new()),
-            early: Mutex::new(None),
             library_scan: Mutex::default(),
-            quality: Mutex::default(),
             history_saves,
             history_write: Mutex::default(),
             settings_change: Mutex::default(),
-            effects: Mutex::default(),
-            start_fullscreen: false,
-            play_and_exit: false,
+            registry: Mutex::default(),
+            routing: Mutex::default(),
+            network_users: Mutex::default(),
+            hand_overs: Mutex::default(),
         });
+        (shared, mock, ui, dir)
+    }
+
+    /// A ready player window on `shared`, playing with `engine`.
+    fn test_window(shared: &Arc<Shared>, engine: Arc<dyn Engine>) -> Arc<Session> {
+        let label = shared.registry().windows.open();
+        let session = Arc::new(Session::new(shared.clone(), label.clone(), engine, &Launch::default()));
+        session.ready.store(true, Ordering::Release);
+        *session.early() = None;
+        shared.registry().sessions.insert(label, session.clone());
+        session
+    }
+
+    fn test_core(name: &str) -> (Arc<Session>, Arc<engine::mock::MockEngine>, Arc<TestUi>, PathBuf) {
+        let (shared, mock, ui, dir) = test_shared(name);
+        let core = test_window(&shared, mock.clone());
         (core, mock, ui, dir)
     }
 
@@ -3816,6 +4408,214 @@ mod tests {
             thread::sleep(Duration::from_millis(5));
         }
         pred()
+    }
+
+    /// A window playing `name` (a file under `dir`) at `ms`, on its own mock player.
+    fn playing_window(shared: &Arc<Shared>, dir: &Path, name: &str, ms: i64) -> (Arc<Session>, Arc<engine::mock::MockEngine>, String) {
+        let mock = Arc::new(engine::mock::MockEngine::default());
+        let session = test_window(shared, mock.clone());
+        let uri = dir.join(name).to_string_lossy().into_owned();
+        session.add(vec![uri.clone()], true).unwrap();
+        mock.time.store(ms, Ordering::Release);
+        (session, mock, uri)
+    }
+
+    #[test]
+    fn closing_the_last_window_saves_where_it_got_to() {
+        let (shared, _, _, dir) = test_shared("close-last");
+        let (session, mock, uri) = playing_window(&shared, &dir, "film.mp4", 52_000);
+        let (closed, last) = forget_player(&shared, &session.label);
+        assert!(last, "it was the only window");
+        assert!(closed.is_some_and(|s| s.is_closing()));
+        // Saved before the app quits, which only writes what's saved by then.
+        assert!(shared.sessions().is_empty());
+        assert_eq!(shared.history().resume_point(&uri), Some(52_000));
+        assert_eq!(mock.stops.load(Ordering::Acquire), 0, "stopping waits for libVLC, so it's left to another thread");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_closing_window_starts_nothing_and_gets_no_opens() {
+        let (shared, mock, _, dir) = test_shared("closing");
+        let first = test_window(&shared, mock.clone());
+        let (second, second_mock, _) = playing_window(&shared, &dir, "a.mp4", 60_000);
+        shared.registry().windows.focus(&second.label);
+        assert!(leave_roster(&shared, &second.label).is_some());
+        // Opens and menu actions go elsewhere now.
+        assert_eq!(shared.target_session().map(|s| s.label.clone()), Some(first.label.clone()));
+        assert!(route_open(&shared, None, &[dir.join("b.mp4").to_string_lossy().into_owned()]).is_some_and(|s| s.label == first.label));
+        // An open that was already under way when it closed plays nothing.
+        let before = second_mock.opened_uris.lock().unwrap().len();
+        second.add(vec![dir.join("c.mp4").to_string_lossy().into_owned()], true).unwrap();
+        assert!(second.play_index(0).is_err());
+        assert_eq!(second_mock.opened_uris.lock().unwrap().len(), before);
+        // Its position is still saved as it goes.
+        assert!(!forget_player(&shared, &second.label).1);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn subtitles_go_to_the_video_playing_even_with_new_windows_on() {
+        let (shared, _, _, dir) = test_shared("route-subs");
+        shared.settings().open_in_new_window = true;
+        let (session, _, _) = playing_window(&shared, &dir, "film.mp4", 60_000);
+        let srt = dir.join("film.srt").to_string_lossy().into_owned();
+        let video = dir.join("other.mp4").to_string_lossy().into_owned();
+        let here = route_open(&shared, Some(session.clone()), std::slice::from_ref(&srt));
+        assert!(here.is_some_and(|s| s.label == session.label));
+        let elsewhere = route_open(&shared, Some(session.clone()), std::slice::from_ref(&video));
+        assert!(elsewhere.is_none(), "a video goes to a new window");
+        // A video and its subtitles stay together, in the new window.
+        assert!(route_open(&shared, Some(session.clone()), &[video, srt.clone()]).is_none());
+        // From Finder, the window used last may have nothing open: they go
+        // to the video in another window instead.
+        let idle = test_window(&shared, Arc::new(engine::mock::MockEngine::default()));
+        shared.registry().windows.focus(&idle.label);
+        let routed = route_open(&shared, None, std::slice::from_ref(&srt));
+        assert!(routed.is_some_and(|s| s.label == session.label));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_failed_open_leaves_the_window_free() {
+        let (shared, mock, _, dir) = test_shared("route-failed");
+        shared.settings().open_in_new_window = true;
+        let idle = test_window(&shared, mock);
+        let missing = vec![dir.join("missing.m3u").to_string_lossy().into_owned()];
+        let routed = route_open(&shared, None, &missing).expect("the idle window takes it");
+        assert!(routed.add_routed(missing, &[]).is_err());
+        // Nothing opened, so the next video still goes to the idle window.
+        let next = vec![dir.join("b.mp4").to_string_lossy().into_owned()];
+        assert!(route_open(&shared, None, &next).is_some_and(|s| s.label == idle.label));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn videos_opened_one_after_another_each_get_a_window() {
+        let (shared, mock, _, dir) = test_shared("route-in-a-row");
+        shared.settings().open_in_new_window = true;
+        let idle = test_window(&shared, mock.clone());
+        let uri = |n: &str| vec![dir.join(n).to_string_lossy().into_owned()];
+        let first = route_open(&shared, None, &uri("a.mp4")).expect("the idle window takes the first");
+        first.add_routed(uri("a.mp4"), &[]).unwrap();
+        // libVLC hasn't reported Opening yet: the window is busy all the same.
+        *mock.state.lock().unwrap() = State::Idle;
+        assert!(!idle.claimed.load(Ordering::Acquire));
+        assert!(idle.is_busy());
+        assert!(route_open(&shared, None, &uri("b.mp4")).is_none(), "the second gets a window of its own");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn subtitles_go_to_the_window_showing_video() {
+        let (shared, _, _, dir) = test_shared("route-subs-video");
+        let (film, _, _) = playing_window(&shared, &dir, "film.mp4", 60_000);
+        // Music plays in the window used last.
+        let (music, music_mock, _) = playing_window(&shared, &dir, "song.mp3", 10_000);
+        music_mock.has_video.store(false, Ordering::Release);
+        shared.registry().windows.focus(&music.label);
+        let srt = vec![dir.join("film.srt").to_string_lossy().into_owned()];
+        assert!(route_open(&shared, Some(music.clone()), &srt).is_some_and(|s| s.label == film.label));
+        assert!(route_open(&shared, None, &srt).is_some_and(|s| s.label == film.label));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_window_closing_saves_before_the_ones_still_open() {
+        let (shared, _, _, dir) = test_shared("close-order");
+        let (closing, _, _) = playing_window(&shared, &dir, "film.mp4", 52_000);
+        let (open, _, _) = playing_window(&shared, &dir, "film.mp4", 80_000);
+        shared.registry().windows.focus(&closing.label);
+        leave_roster(&shared, &closing.label);
+        let order: Vec<_> = shared.sessions().iter().map(|s| s.label.clone()).collect();
+        assert_eq!(order, vec![closing.label.clone(), open.label.clone()]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn two_opens_together_dont_share_an_idle_window() {
+        let (shared, mock, _, dir) = test_shared("route-claim");
+        shared.settings().open_in_new_window = true;
+        let idle = test_window(&shared, mock.clone());
+        let uri = |n: &str| vec![dir.join(n).to_string_lossy().into_owned()];
+        // The first takes the idle window; until it starts playing, the second can't.
+        assert!(route_open(&shared, None, &uri("a.mp4")).is_some_and(|s| s.label == idle.label));
+        assert!(route_open(&shared, None, &uri("b.mp4")).is_none());
+        // Once its open has run, it's busy playing, and the claim is gone.
+        idle.add_routed(uri("a.mp4"), &[]).unwrap();
+        assert!(!idle.claimed.load(Ordering::Acquire));
+        assert!(idle.is_busy());
+        // A window still waiting for its video view counts as busy too.
+        let waiting = test_window(&shared, Arc::new(engine::mock::MockEngine::default()));
+        waiting.ready.store(false, Ordering::Release);
+        waiting.add(uri("c.mp4"), true).unwrap();
+        assert!(waiting.is_busy());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_window_used_last_keeps_its_place_in_a_shared_file() {
+        let (shared, _, _, dir) = test_shared("same-file");
+        let (a, _, uri) = playing_window(&shared, &dir, "film.mp4", 80_000);
+        let (b, b_mock, _) = playing_window(&shared, &dir, "film.mp4", 3_000);
+        // A was used last: at quit it saves last, so its 1:20 is kept, not B's start over.
+        shared.registry().windows.focus(&b.label);
+        shared.registry().windows.focus(&a.label);
+        for session in shared.sessions() {
+            session.save_progress(false);
+        }
+        assert_eq!(shared.history().resume_point(&uri), Some(80_000));
+        // And the other way round.
+        shared.registry().windows.focus(&b.label);
+        b_mock.time.store(60_000, Ordering::Release);
+        for session in shared.sessions() {
+            session.save_progress(false);
+        }
+        assert_eq!(shared.history().resume_point(&uri), Some(60_000));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn discovery_stops_once_no_window_shows_the_network() {
+        let (shared, mock, _, dir) = test_shared("discovery");
+        let (a, b) = (test_window(&shared, mock.clone()), test_window(&shared, mock.clone()));
+        for label in [&a.label, &b.label] {
+            shared.network_users.lock().unwrap().insert(label.clone());
+        }
+        a.leave_network();
+        assert_eq!(mock.discovery_stops.load(Ordering::Acquire), 0, "the other window still shows it");
+        a.leave_network();
+        b.leave_network();
+        assert_eq!(mock.discovery_stops.load(Ordering::Acquire), 1);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn player_events_go_to_their_own_window() {
+        let (shared, _, ui, dir) = test_shared("targets");
+        let (a, _, _) = playing_window(&shared, &dir, "a.mp4", 1_000);
+        let (b, _, _) = playing_window(&shared, &dir, "b.mp4", 1_000);
+        ui.targets.lock().unwrap().clear();
+        a.emit_state();
+        b.emit_playlist();
+        assert_eq!(
+            ui.targets.lock().unwrap().as_slice(),
+            [(a.label.clone(), "player://state".to_string()), (b.label.clone(), "player://playlist".to_string())]
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_new_window_gets_its_own_player() {
+        let (shared, mock, _, dir) = test_shared("new-player");
+        let settings = shared.settings().clone();
+        let player = shared.engine.new_player(&settings).unwrap();
+        assert_eq!(mock.players.lock().unwrap().len(), 1);
+        let window = test_window(&shared, player);
+        window.add(vec![dir.join("a.mp4").to_string_lossy().into_owned()], true).unwrap();
+        assert!(mock.opened_uris.lock().unwrap().is_empty(), "the shared player plays nothing");
+        assert_eq!(mock.players.lock().unwrap()[0].opened_uris.lock().unwrap().len(), 1);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -4075,7 +4875,7 @@ mod tests {
 
         // Zero files created in `scrub_dir` and zero leftover temp files in temp_dir for this run.
         assert!(!core.scrub_dir.exists(), "scrub_fill must never touch cache/scrub on disk");
-        let prefix = format!("revlc-scrub-{}-{run}-", std::process::id());
+        let prefix = format!("revlc-scrub-{}-{}-{run}-", std::process::id(), core.label);
         let leftovers: Vec<_> = std::fs::read_dir(std::env::temp_dir())
             .unwrap()
             .filter_map(|e| e.ok())

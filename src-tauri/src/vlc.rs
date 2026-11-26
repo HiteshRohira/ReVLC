@@ -5,8 +5,9 @@
 
 use std::ffi::{CStr, CString, c_char, c_float, c_int, c_uint, c_void};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicU32, AtomicU64, Ordering};
 use std::sync::mpsc::Sender;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use libloading::Library;
@@ -498,47 +499,81 @@ pub(crate) fn audio_chain(effects: &Effects) -> String {
     eq.into_iter().chain(rest).collect::<Vec<_>>().join(":")
 }
 
-/// Percentage of the input cache filled, from the last Buffering event.
-/// Only the main player subscribes to events, so one value is enough.
-static BUFFERING: AtomicU32 = AtomicU32::new(0);
-
-/// Bumped whenever the main player gets new media, and sent with each event,
-/// so a late event from the previous media can be told apart. Bumped once
-/// the previous media has stopped: libVLC sends events from the input's
-/// thread, which stopping joins, so nothing from it can carry the new value.
-static GENERATION: AtomicU64 = AtomicU64::new(0);
-
 /// libVLC's audio output module on this platform.
 const AUDIO_MODULE: &str = if cfg!(target_os = "macos") { "auhal" } else if cfg!(windows) { "mmdevice" } else { "pulse" };
 
 pub type Vlc = VlcEngine;
 
-pub struct VlcEngine {
+/// The libVLC library and its one instance, shared by every player window
+/// (each window has its own [`VlcEngine`], a media player made from it).
+pub struct Instance {
     api: Api,
     core: CoreApi,
     inst: *mut Inst,
-    mp: *mut Player,
-    /// Hardware decoding turned off; see [`VlcEngine::play_media`].
-    software_decoding: AtomicBool,
     pub version: String,
     /// The opening frame of each file thumbnailed; `None` when it's too plain
     /// to recognise. See [`VlcEngine::thumbnail_at`].
-    openings: std::sync::Mutex<std::collections::HashMap<OpeningKey, Option<Opening>>>,
+    openings: Mutex<std::collections::HashMap<OpeningKey, Option<Opening>>>,
     /// A lock per opening frame being made, so preview workers starting
     /// together on a file wait for one instead of each decoding the same
     /// frame, without waiting on other files.
-    making_opening: std::sync::Mutex<std::collections::HashMap<OpeningKey, std::sync::Arc<std::sync::Mutex<()>>>>,
-    /// Command-line options libVLC wouldn't start with (see [`VlcEngine::load`]).
+    making_opening: Mutex<std::collections::HashMap<OpeningKey, Arc<Mutex<()>>>>,
+    /// Command-line options libVLC wouldn't start with (see [`Instance::load`]).
     pub rejected_args: Vec<String>,
     /// Running network discoveries: each one's name and its libVLC object.
-    discoverers: std::sync::Mutex<Vec<(String, usize)>>,
+    discoverers: Mutex<Vec<(String, usize)>>,
+}
+
+// libVLC's instance API is thread-safe.
+unsafe impl Send for Instance {}
+unsafe impl Sync for Instance {}
+
+/// One window's media player, made on the shared [`Instance`].
+pub struct VlcEngine {
+    instance: Arc<Instance>,
+    mp: *mut Player,
+    /// Hardware decoding turned off; see [`VlcEngine::play_media`].
+    software_decoding: AtomicBool,
+    /// Percentage of the input cache filled, from the last Buffering event.
+    buffering: Arc<AtomicU32>,
+    /// Bumped whenever this player gets new media, and sent with each event,
+    /// so a late event from the previous media can be told apart. Bumped once
+    /// the previous media has stopped: libVLC sends events from the input's
+    /// thread, which stopping joins, so nothing from it can carry the new value.
+    generation: Arc<AtomicU64>,
+    /// What the event callback reads; freed after the player (see [`Drop`]).
+    subscription: AtomicPtr<Subscription>,
     /// The teletext page last asked for, and the media generation it was for.
-    teletext_page: std::sync::Mutex<Option<(u64, i32)>>,
+    teletext_page: Mutex<Option<(u64, i32)>>,
+    /// This player's teletext background. libVLC keeps it in the shared
+    /// instance's options and a decoder reads it when it starts, so it's put
+    /// back there before this player can start one.
+    teletext_transparent: AtomicBool,
+    /// What the video callbacks draw with (see [`VlcEngine::set_gtk_surface`]),
+    /// freed once the player is released.
+    #[cfg(any(target_os = "linux", test))]
+    gtk_output: AtomicPtr<GtkOutput>,
 }
 
 // libVLC's media player API is thread-safe.
 unsafe impl Send for VlcEngine {}
 unsafe impl Sync for VlcEngine {}
+
+impl std::ops::Deref for VlcEngine {
+    type Target = Instance;
+    fn deref(&self) -> &Instance {
+        &self.instance
+    }
+}
+
+/// Where a player's events go. Emptied by [`VlcEngine::shutdown`], which ends
+/// the thread reading them, while the callback may still run until the
+/// player is released.
+struct Subscription {
+    tx: Mutex<Option<Sender<EngineEvent>>>,
+    buffering: Arc<AtomicU32>,
+    generation: Arc<AtomicU64>,
+}
 
 /// Directories where we look for libVLC: `lib/`, `plugins/` and `share/`,
 /// or on Windows VLC's own layout (the DLLs, `plugins/` and `lua/` together).
@@ -604,11 +639,86 @@ impl VlcEngine {
     ) -> Result<Self, LoadError> {
         let config = vlc_config(settings, system_languages);
         let engine = Self::load(resource_dir, extra_args, user_args, &config)?;
-        engine.set_hardware_decoding(settings.hardware_decoding);
-        // libVLC's player has its own title-display default; apply ours.
-        engine.set_title_display(settings.show_title, settings.title_position, settings.title_timeout);
+        engine.apply_player_settings(settings);
         Ok(engine)
     }
+
+    /// Loads libVLC and makes one player on it; see [`Instance::load`].
+    pub(crate) fn load(
+        resource_dir: Option<&Path>,
+        extra_args: &[String],
+        user_args: &[String],
+        config: &[(&str, ConfigValue)],
+    ) -> Result<Self, LoadError> {
+        Self::new(Instance::load(resource_dir, extra_args, user_args, config)?)
+    }
+
+    /// Creates a media player on the shared libVLC instance.
+    pub fn new(instance: Arc<Instance>) -> Result<Self, LoadError> {
+        let api = &instance.api;
+        unsafe {
+            let mp = (api.libvlc_media_player_new)(instance.inst);
+            if mp.is_null() {
+                return Err(LoadError::new("player", format!("libVLC couldn't create a media player: {}", errmsg(api))));
+            }
+            // The web UI handles all keyboard and mouse input.
+            (api.libvlc_video_set_key_input)(mp, 0);
+            (api.libvlc_video_set_mouse_input)(mp, 0);
+            Ok(Self {
+                instance,
+                mp,
+                software_decoding: AtomicBool::new(false),
+                buffering: Arc::default(),
+                generation: Arc::default(),
+                subscription: AtomicPtr::new(std::ptr::null_mut()),
+                teletext_page: Mutex::default(),
+                // VLC's default (vbi-opaque off).
+                teletext_transparent: AtomicBool::new(true),
+                #[cfg(any(target_os = "linux", test))]
+                gtk_output: AtomicPtr::new(std::ptr::null_mut()),
+            })
+        }
+    }
+
+    /// Another player on the same libVLC instance, with `settings` applied.
+    pub fn sibling(&self, settings: &Settings) -> Result<Self, LoadError> {
+        let player = Self::new(self.instance.clone())?;
+        player.apply_player_settings(settings);
+        Ok(player)
+    }
+
+    /// The settings a player keeps its own copy of, rather than reading the
+    /// instance's options.
+    fn apply_player_settings(&self, settings: &Settings) {
+        self.set_hardware_decoding(settings.hardware_decoding);
+        // libVLC's player has its own title-display default; apply ours.
+        self.set_title_display(settings.show_title, settings.title_position, settings.title_timeout);
+        if !settings.audio_device.is_empty() {
+            self.set_audio_device(&settings.audio_device);
+        }
+    }
+
+    /// Stops playback and ends the event stream, so the thread reading it
+    /// finishes. The player itself is released when this is dropped. Call
+    /// it from a thread that may wait for libVLC (not the main thread).
+    pub fn shutdown(&self) {
+        self.stop();
+        let sub = self.subscription.load(Ordering::Acquire);
+        if !sub.is_null() {
+            // SAFETY: freed only in `drop`, after the player (and so the callback) is gone.
+            *unsafe { &*sub }.tx.lock().unwrap_or_else(|e| e.into_inner()) = None;
+        }
+    }
+
+    /// Puts this player's teletext background into the instance's options,
+    /// where the next teletext decoder reads it.
+    fn put_teletext_background(&self) {
+        let transparent = self.teletext_transparent.load(Ordering::Relaxed);
+        self.set_config("vbi-opaque", &ConfigValue::Bool(!transparent));
+    }
+}
+
+impl Instance {
 
     /// `extra_args` are passed to libVLC as command-line options; so are
     /// `user_args`, unless libVLC rejects them (an unknown option makes it
@@ -621,7 +731,7 @@ impl VlcEngine {
         extra_args: &[String],
         user_args: &[String],
         config: &[(&str, ConfigValue)],
-    ) -> Result<Self, LoadError> {
+    ) -> Result<Arc<Self>, LoadError> {
         let dirs = candidate_dirs(resource_dir);
         let dir = dirs.iter().find(|d| lib_dir(d).join(lib_names().1).exists());
         if dir.is_none() && !cfg!(target_os = "linux") {
@@ -714,26 +824,16 @@ impl VlcEngine {
             (api.libvlc_set_user_agent)(inst, name.as_ptr(), agent.as_ptr());
             let (id, ver, icon) = (cstr("app.revlc"), cstr(env!("CARGO_PKG_VERSION")), cstr("revlc"));
             (api.libvlc_set_app_id)(inst, id.as_ptr(), ver.as_ptr(), icon.as_ptr());
-            let mp = (api.libvlc_media_player_new)(inst);
-            if mp.is_null() {
-                return Err(LoadError::new("player", format!("libVLC couldn't create a media player: {}", errmsg(&api))));
-            }
-            // The web UI handles all keyboard and mouse input.
-            (api.libvlc_video_set_key_input)(mp, 0);
-            (api.libvlc_video_set_mouse_input)(mp, 0);
-            Ok(Self {
+            Ok(Arc::new(Self {
                 api,
                 core,
                 inst,
-                mp,
-                software_decoding: AtomicBool::new(false),
                 version,
                 rejected_args,
                 openings: Default::default(),
                 making_opening: Default::default(),
                 discoverers: Default::default(),
-                teletext_page: Default::default(),
-            })
+            }))
         }
     }
 
@@ -756,16 +856,19 @@ impl VlcEngine {
         out
     }
 
+    /// Changes a VLC option (same names as the command line, without "--"),
+    /// for every player. Takes effect for the next video; reopen the current
+    /// one to apply now.
+    pub fn set_config(&self, name: &str, value: &ConfigValue) {
+        put_config(&self.core, self.inst, name, value);
+    }
+}
+
+impl VlcEngine {
     /// Switches the audio output; "" means the system default.
     pub fn set_audio_device(&self, id: &str) {
         let c = cstr(id);
         unsafe { (self.api.libvlc_audio_output_device_set)(self.mp, std::ptr::null(), c.as_ptr()) }
-    }
-
-    /// Changes a VLC option (same names as the command line, without "--").
-    /// Takes effect for the next video; reopen the current one to apply now.
-    pub fn set_config(&self, name: &str, value: &ConfigValue) {
-        put_config(&self.core, self.inst, name, value);
     }
 
     /// Turns hardware decoding on or off, from the next video.
@@ -805,24 +908,33 @@ impl VlcEngine {
                 // first member is `float new_cache` for Buffering and
                 // `libvlc_time_t new_time` for TimeChanged.
                 let union = (ev as *const u8).add(2 * size_of::<*const c_void>());
+                let sub = &*(data as *const Subscription);
                 if ty == event::BUFFERING {
-                    BUFFERING.store((*(union as *const c_float)).to_bits(), Ordering::Relaxed);
+                    sub.buffering.store((*(union as *const c_float)).to_bits(), Ordering::Relaxed);
                 }
-                let tx = &*(data as *const Sender<EngineEvent>);
-                let _ = tx.send(EngineEvent {
-                    kind,
-                    generation: GENERATION.load(Ordering::Acquire),
-                    at: Instant::now(),
-                    cache: f32::from_bits(BUFFERING.load(Ordering::Relaxed)),
-                    time: if ty == event::TIME_CHANGED { *(union as *const i64) } else { -1 },
-                });
+                if let Some(tx) = sub.tx.lock().unwrap_or_else(|e| e.into_inner()).as_ref() {
+                    let _ = tx.send(EngineEvent {
+                        kind,
+                        generation: sub.generation.load(Ordering::Acquire),
+                        at: Instant::now(),
+                        cache: f32::from_bits(sub.buffering.load(Ordering::Relaxed)),
+                        time: if ty == event::TIME_CHANGED { *(union as *const i64) } else { -1 },
+                    });
+                }
             }
         }
-        let data = Box::into_raw(Box::new(tx)) as *mut c_void;
+        let sub = Box::into_raw(Box::new(Subscription {
+            tx: Mutex::new(Some(tx)),
+            buffering: self.buffering.clone(),
+            generation: self.generation.clone(),
+        }));
+        // Subscribed once per player, right after it's made.
+        let previous = self.subscription.swap(sub, Ordering::AcqRel);
+        debug_assert!(previous.is_null(), "a player subscribes once");
         unsafe {
             let em = (self.api.libvlc_media_player_event_manager)(self.mp);
             for &ty in event::ALL {
-                (self.api.libvlc_event_attach)(em, ty, on_event, data);
+                (self.api.libvlc_event_attach)(em, ty, on_event, sub as *mut c_void);
             }
         }
     }
@@ -841,8 +953,8 @@ impl VlcEngine {
 
     #[cfg(any(target_os = "linux", test))]
     pub fn set_gtk_surface(&self, frames: std::sync::Arc<std::sync::Mutex<Option<PresentedFrame>>>) {
-        // The main player and its callbacks live until process exit, like
-        // the event subscription. Attach once, before media can be opened.
+        // Attach once, before media can be opened. The output lives as long
+        // as the player: it's freed after libVLC releases it (see `Drop`).
         let visible = Some(VideoSizes {
             mp: self.mp,
             get_media: self.api.libvlc_media_player_get_media,
@@ -851,6 +963,8 @@ impl VlcEngine {
             media_release: self.api.libvlc_media_release,
         });
         let output = Box::into_raw(Box::new(GtkOutput { frame: std::cell::UnsafeCell::new(None), frames, visible }));
+        let old = self.gtk_output.swap(output, Ordering::AcqRel);
+        assert!(old.is_null(), "a player's video output is set once");
         unsafe {
             (self.api.libvlc_video_set_callbacks)(self.mp, gtk_lock, None, Some(gtk_display), output.cast());
             (self.api.libvlc_video_set_format_callbacks)(self.mp, gtk_format, None);
@@ -859,14 +973,14 @@ impl VlcEngine {
 
     /// Identifies the media the player has: changes each time it opens one.
     pub fn generation(&self) -> u64 {
-        GENERATION.load(Ordering::Acquire)
+        self.generation.load(Ordering::Acquire)
     }
 
     /// Opens a local path or a URL and starts playback. `options` are
     /// per-media libVLC options such as ":network-caching=1000"; unless
     /// `trusted`, libVLC ignores the unsafe ones (use for playlist files).
     pub fn open(&self, uri: &str, options: &[String], trusted: bool) -> Result<(), String> {
-        BUFFERING.store(0, Ordering::Relaxed);
+        self.buffering.store(0, Ordering::Relaxed);
         let c = if uri.contains("://") { cstr(uri) } else { path_cstr(uri) };
         unsafe {
             let media = if uri.contains("://") {
@@ -901,7 +1015,7 @@ impl VlcEngine {
                 (self.api.libvlc_media_add_option_flag)(media, o.as_ptr(), OPTION_TRUSTED | OPTION_UNIQUE);
             }
             (self.api.libvlc_media_player_set_media)(self.mp, media);
-            GENERATION.fetch_add(1, Ordering::AcqRel);
+            self.generation.fetch_add(1, Ordering::AcqRel);
             (self.api.libvlc_media_player_play)(self.mp)
         }
     }
@@ -962,7 +1076,7 @@ impl VlcEngine {
         self.with_subitems(|subs| unsafe {
             let result = match subs.as_slice() {
                 [sub] => {
-                    BUFFERING.store(0, Ordering::Relaxed);
+                    self.buffering.store(0, Ordering::Relaxed);
                     self.play_media(*sub) == 0
                 }
                 _ => false,
@@ -981,13 +1095,13 @@ impl VlcEngine {
     pub fn stop(&self) {
         unsafe { (self.api.libvlc_media_player_stop)(self.mp) }
         // Events from what was playing no longer count.
-        GENERATION.fetch_add(1, Ordering::AcqRel);
+        self.generation.fetch_add(1, Ordering::AcqRel);
     }
 
     /// How full the input cache is, 0–100. Drops after opening and seeking,
     /// and reaches 100 once libVLC has enough data to play.
     pub fn buffering(&self) -> f32 {
-        f32::from_bits(BUFFERING.load(Ordering::Relaxed))
+        f32::from_bits(self.buffering.load(Ordering::Relaxed))
     }
 
     pub fn state(&self) -> State {
@@ -1921,6 +2035,27 @@ impl FrameBuf {
     }
 }
 
+impl Drop for VlcEngine {
+    fn drop(&mut self) {
+        unsafe {
+            // Stops it and waits for its threads, so no event is sent after this.
+            (self.api.libvlc_media_player_release)(self.mp);
+            let sub = *self.subscription.get_mut();
+            if !sub.is_null() {
+                drop(Box::from_raw(sub));
+            }
+            // Its video thread has stopped, so nothing draws with it now.
+            #[cfg(any(target_os = "linux", test))]
+            {
+                let output = *self.gtk_output.get_mut();
+                if !output.is_null() {
+                    drop(Box::from_raw(output));
+                }
+            }
+        }
+    }
+}
+
 impl Drop for FrameBuf {
     fn drop(&mut self) {
         unsafe { std::alloc::dealloc(self.ptr, self.layout) }
@@ -2402,6 +2537,14 @@ impl Engine for VlcEngine {
         VlcEngine::subscribe(self, tx)
     }
 
+    fn shutdown(&self) {
+        VlcEngine::shutdown(self)
+    }
+
+    fn new_player(&self, settings: &Settings) -> Result<std::sync::Arc<dyn Engine>, LoadError> {
+        Ok(Arc::new(self.sibling(settings)?))
+    }
+
     #[cfg(target_os = "macos")]
     fn set_nsview(&self, view: *mut c_void) {
         VlcEngine::set_nsview(self, view)
@@ -2418,6 +2561,9 @@ impl Engine for VlcEngine {
     }
 
     fn open(&self, uri: &str, options: &[String], trusted: bool) -> Result<(), String> {
+        // The option is shared by every player; this one's may have been
+        // changed by another window since.
+        self.put_teletext_background();
         VlcEngine::open(self, uri, options, trusted)
     }
 
@@ -2530,6 +2676,7 @@ impl Engine for VlcEngine {
     }
 
     fn set_subtitle_track(&self, id: i32) {
+        self.put_teletext_background();
         VlcEngine::set_subtitle_track(self, id)
     }
 
@@ -2592,7 +2739,8 @@ impl Engine for VlcEngine {
         // libVLC's teletext decoder reads vbi-opaque when it starts, so an
         // active teletext track is reselected to apply it, then the page is
         // requested again once the new decoder comes up.
-        self.set_config("vbi-opaque", &ConfigValue::Bool(!transparent));
+        self.teletext_transparent.store(transparent, Ordering::Relaxed);
+        self.put_teletext_background();
         if self.teletext_on() {
             let generation = self.generation();
             let track = self.subtitle_track();
@@ -2633,7 +2781,7 @@ impl Engine for VlcEngine {
     }
 
     fn audio_devices(&self) -> Vec<(String, String)> {
-        VlcEngine::audio_devices(self)
+        Instance::audio_devices(self)
     }
 
     fn set_aspect_ratio(&self, ratio: Option<&str>) {
