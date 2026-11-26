@@ -253,11 +253,18 @@ struct LibraryScan {
 /// seconds while thumbnails are made; new files show up after this.
 const LIBRARY_SCAN_TTL: Duration = Duration::from_secs(30);
 
-/// Files handed over before `setup` has made the player: on a cold launch
-/// from Finder the open event can come first, and elsewhere another copy of
-/// ReVLC can hand its files over early. `setup` plays them. Only touched on
-/// the main thread.
+/// Files macOS hands over before `setup` has made the player: on a cold
+/// launch from Finder, the open event can come first. `setup` plays them.
+/// Only touched on the main thread.
 static EARLY_OPENS: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
+/// What other copies of ReVLC hand over before `setup` has made the first
+/// window (WebView2 handles messages while it starts), in the order they
+/// came; `None` once `setup` has passed them on. Callbacks may run on
+/// another thread (D-Bus on Linux), so checking and adding happen under
+/// the lock that `setup` empties it under.
+#[cfg(any(windows, target_os = "linux"))]
+static EARLY_HAND_OVERS: Mutex<Option<Vec<HandOver>>> = Mutex::new(Some(Vec::new()));
 
 /// What was opened before the UI was ready, to play once it is.
 #[derive(Default)]
@@ -474,7 +481,10 @@ impl Session {
     /// Whether something is playing, paused or loading in this window, or
     /// is about to: an open routed here that hasn't started yet counts.
     fn is_busy(&self) -> bool {
-        matches!(self.engine.state(), State::Playing | State::Paused | State::Opening | State::Buffering)
+        let state = self.engine.state();
+        matches!(state, State::Playing | State::Paused | State::Opening | State::Buffering)
+            // Just opened: libVLC reports Opening only once its input starts.
+            || (state == State::Idle && self.playlist().current.is_some())
             || self.claimed.load(Ordering::Acquire)
             || !self.pending.lock().unwrap_or_else(|e| e.into_inner()).items.is_empty()
     }
@@ -840,15 +850,6 @@ impl Session {
     /// [`Core::add`], giving each new item the libVLC `options` (from the
     /// command line, like ":start-time=30").
     fn add_with_options(&self, uris: Vec<String>, play: bool, options: &[String]) -> Result<(), String> {
-        // However this ends, a routed open no longer holds the window: once
-        // it plays (or waits for the video view) the window is busy instead.
-        struct Unclaim<'a>(&'a AtomicBool);
-        impl Drop for Unclaim<'_> {
-            fn drop(&mut self) {
-                self.0.store(false, Ordering::Release);
-            }
-        }
-        let _unclaim = Unclaim(&self.claimed);
         let Opened { mut items, subtitles, folders, failed } = opened(uris);
         // A folder joins the library even if nothing in it, or in the rest, can play.
         for folder in folders {
@@ -867,6 +868,15 @@ impl Session {
             item.options.extend(options.iter().cloned());
         }
         self.add_with_subtitles(items, subtitles, play)
+    }
+
+    /// Plays `uris` in this window, which [`route_open`] picked and marked
+    /// as taken. However the open ends, it no longer holds the window: once
+    /// it plays (or waits for the video view) the window is busy instead.
+    fn add_routed(&self, uris: Vec<String>, options: &[String]) -> Result<(), String> {
+        let result = self.add_with_options(uris, true, options);
+        self.claimed.store(false, Ordering::Release);
+        result
     }
 
     fn add_items(&self, items: Vec<Item>, play: bool) -> Result<(), String> {
@@ -929,10 +939,18 @@ impl Session {
         let pending = {
             let mut pending = self.pending.lock().unwrap_or_else(|e| e.into_inner());
             self.ready.store(true, Ordering::Release);
+            // Busy while its files go from waiting to playing, too.
+            if !pending.items.is_empty() {
+                self.claimed.store(true, Ordering::Release);
+            }
             std::mem::take(&mut *pending)
         };
+        let waited = !pending.items.is_empty();
         if let Err(e) = self.add_with_subtitles(pending.items, pending.subtitles, true) {
             self.notice("error", e);
+        }
+        if waited {
+            self.claimed.store(false, Ordering::Release);
         }
     }
 
@@ -3700,7 +3718,7 @@ fn route_open(shared: &Shared, here: Option<Arc<Session>>, uris: &[String]) -> O
 /// so not on the main thread.
 fn open_routed(app: &AppHandle, shared: &Arc<Shared>, here: Option<Arc<Session>>, uris: Vec<String>, options: Vec<String>) -> Result<Arc<Session>, String> {
     match route_open(shared, here, &uris) {
-        Some(session) => session.add_with_options(uris, true, &options).map(|()| session),
+        Some(session) => session.add_routed(uris, &options).map(|()| session),
         None => open_player(app, shared, Launch { files: uris, media_options: options, ..Launch::default() }),
     }
 }
@@ -3870,6 +3888,15 @@ fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     if let Err(e) = session.add(early, true) {
         session.notice("error", e);
     }
+    // Other copies' files, routed like any open now that there's a window.
+    // Queued under the lock, so a hand-over coming meanwhile goes after them.
+    #[cfg(any(windows, target_os = "linux"))]
+    {
+        let mut early = EARLY_HAND_OVERS.lock().unwrap_or_else(|e| e.into_inner());
+        for HandOver { files, options } in early.take().unwrap_or_default() {
+            hand_over(&app_handle, &shared, files, options);
+        }
+    }
     Ok(())
 }
 
@@ -3947,14 +3974,15 @@ pub fn run() {
             }
             return;
         }
-        match app.try_state::<Players>() {
-            Some(players) => {
-                if let Ok(shared) = players.0.clone() {
-                    hand_over(app, &shared, cli.files, cli.media_options);
-                }
+        {
+            let mut early = EARLY_HAND_OVERS.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some(early) = early.as_mut() {
+                early.push(HandOver { files: cli.files, options: cli.media_options });
+                return;
             }
-            // Before there is a window, `setup` plays them.
-            None => EARLY_OPENS.lock().unwrap_or_else(|e| e.into_inner()).extend(cli.files),
+        }
+        if let Some(shared) = shared_of(app) {
+            hand_over(app, &shared, cli.files, cli.media_options);
         }
     }));
     let app = match builder
@@ -4455,10 +4483,26 @@ mod tests {
         let idle = test_window(&shared, mock);
         let missing = vec![dir.join("missing.m3u").to_string_lossy().into_owned()];
         let routed = route_open(&shared, None, &missing).expect("the idle window takes it");
-        assert!(routed.add_with_options(missing, true, &[]).is_err());
+        assert!(routed.add_routed(missing, &[]).is_err());
         // Nothing opened, so the next video still goes to the idle window.
         let next = vec![dir.join("b.mp4").to_string_lossy().into_owned()];
         assert!(route_open(&shared, None, &next).is_some_and(|s| s.label == idle.label));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn videos_opened_one_after_another_each_get_a_window() {
+        let (shared, mock, _, dir) = test_shared("route-in-a-row");
+        shared.settings().open_in_new_window = true;
+        let idle = test_window(&shared, mock.clone());
+        let uri = |n: &str| vec![dir.join(n).to_string_lossy().into_owned()];
+        let first = route_open(&shared, None, &uri("a.mp4")).expect("the idle window takes the first");
+        first.add_routed(uri("a.mp4"), &[]).unwrap();
+        // libVLC hasn't reported Opening yet: the window is busy all the same.
+        *mock.state.lock().unwrap() = State::Idle;
+        assert!(!idle.claimed.load(Ordering::Acquire));
+        assert!(idle.is_busy());
+        assert!(route_open(&shared, None, &uri("b.mp4")).is_none(), "the second gets a window of its own");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -4498,7 +4542,7 @@ mod tests {
         assert!(route_open(&shared, None, &uri("a.mp4")).is_some_and(|s| s.label == idle.label));
         assert!(route_open(&shared, None, &uri("b.mp4")).is_none());
         // Once its open has run, it's busy playing, and the claim is gone.
-        idle.add_with_options(uri("a.mp4"), true, &[]).unwrap();
+        idle.add_routed(uri("a.mp4"), &[]).unwrap();
         assert!(!idle.claimed.load(Ordering::Acquire));
         assert!(idle.is_busy());
         // A window still waiting for its video view counts as busy too.
