@@ -157,6 +157,9 @@ struct Shared {
     volume: AtomicI32,
     /// Set while a write of the volume is waiting to happen.
     volume_save_queued: AtomicBool,
+    /// Held while writing the volume, so writes don't overlap and quitting
+    /// waits for one under way.
+    volume_write: Mutex<()>,
     /// The player windows and their sessions.
     registry: Mutex<Registry>,
     /// Held while choosing which window an opened video plays in, so two
@@ -1101,6 +1104,7 @@ impl Shared {
     /// Writes the volume now if a write is waiting. Also called on quit, so
     /// a change made just before it isn't lost.
     fn flush_volume(&self) {
+        let _writing = self.volume_write.lock().unwrap_or_else(|e| e.into_inner());
         if !self.volume_save_queued.swap(false, Ordering::AcqRel) {
             return;
         }
@@ -1108,6 +1112,16 @@ impl Shared {
         if let Err(e) = store::write_json(&volume_file(&self.data_dir), &SavedVolume { volume }, false) {
             eprintln!("revlc: {e}");
         }
+    }
+
+    /// A new player, at the volume the user last set.
+    fn new_player(&self, settings: &Settings) -> Result<Arc<dyn Engine>, String> {
+        let engine = self.engine.new_player(settings).map_err(|e| e.message)?;
+        let volume = self.volume.load(Ordering::Relaxed);
+        if volume >= 0 {
+            engine.set_volume(volume);
+        }
+        Ok(engine)
     }
 
     fn settings(&self) -> MutexGuard<'_, Settings> {
@@ -3574,11 +3588,7 @@ fn open_player_as(
         // them here and the player being registered to get changes.
         let _changing = shared.settings_change.lock().unwrap_or_else(|e| e.into_inner());
         let settings = shared.settings().clone();
-        let engine = shared.engine.new_player(&settings).map_err(|e| e.message)?;
-        let volume = shared.volume.load(Ordering::Relaxed);
-        if volume >= 0 {
-            engine.set_volume(volume);
-        }
+        let engine = shared.new_player(&settings)?;
         let session = Arc::new(Session::new(shared.clone(), label.to_string(), engine, &launch));
         // Registered before the window exists: its page asks for a snapshot as soon as it loads.
         shared.registry().sessions.insert(label.to_string(), session.clone());
@@ -3910,6 +3920,7 @@ fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
         settings_change: Mutex::default(),
         volume: AtomicI32::new(load_volume(&data_dir)),
         volume_save_queued: AtomicBool::new(false),
+        volume_write: Mutex::default(),
         registry: Mutex::default(),
         routing: Mutex::default(),
         network_users: Mutex::default(),
@@ -4451,6 +4462,7 @@ mod tests {
             settings_change: Mutex::default(),
             volume: AtomicI32::new(-1),
             volume_save_queued: AtomicBool::new(false),
+            volume_write: Mutex::default(),
             registry: Mutex::default(),
             routing: Mutex::default(),
             network_users: Mutex::default(),
@@ -5066,6 +5078,32 @@ mod tests {
         assert!(!vlc_autodetects(&video, Path::new("/elsewhere/The Film (2020).srt"), 3), "another folder");
         assert!(!at("The Film (2020).mks", 3), "libVLC doesn't look for .mks files");
         assert!(!vlc_autodetects(&dir.join("---.mkv"), &dir.join("Other.srt"), 3), "a name of only punctuation matches nothing");
+    }
+
+    #[test]
+    fn the_volume_set_is_saved_once_and_new_players_start_at_it() {
+        let (shared, _mock, _ui, dir) = test_shared("volume-saved");
+        let player = shared.new_player(&Settings::default()).unwrap();
+        assert_eq!(player.volume(), 100, "nothing set yet: libVLC's default");
+
+        for volume in [120, 130, 140] {
+            shared.remember_volume(volume);
+        }
+        shared.flush_volume();
+        assert_eq!(load_volume(&dir), 140, "quitting writes the last change");
+        assert!(!shared.volume_save_queued.load(Ordering::Acquire));
+        let player = shared.new_player(&Settings::default()).unwrap();
+        assert_eq!(player.volume(), 140, "a new window starts at it");
+
+        // Nothing queued: the file is left alone.
+        std::fs::write(volume_file(&dir), br#"{"volume":55}"#).unwrap();
+        shared.flush_volume();
+        assert_eq!(load_volume(&dir), 55);
+
+        // The delayed write lands on its own, clamped.
+        shared.remember_volume(250);
+        assert!(wait_until(Duration::from_secs(5), || load_volume(&dir) == 200), "written shortly after the change");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
 
