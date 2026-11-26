@@ -505,6 +505,10 @@ pub(crate) fn audio_chain(effects: &Effects) -> String {
 /// DirectSound sets them on each player's own buffer, on the same curve.
 const AUDIO_MODULE: &str = if cfg!(target_os = "macos") { "auhal" } else if cfg!(windows) { "directsound" } else { "pulse" };
 
+/// The name libVLC lists [`AUDIO_MODULE`]'s devices under: its
+/// "<name>-audio-device" option. DirectSound's is "directx-audio-device".
+const AUDIO_DEVICES: &str = if cfg!(windows) { "directx" } else { AUDIO_MODULE };
+
 pub type Vlc = VlcEngine;
 
 /// The libVLC library and its one instance, shared by every player window
@@ -845,7 +849,7 @@ impl Instance {
 
     /// Audio outputs as (id, name). The id "" is the system default.
     pub fn audio_devices(&self) -> Vec<(String, String)> {
-        self.devices_of(AUDIO_MODULE)
+        self.devices_of(AUDIO_DEVICES)
     }
 
     /// The device to play to for the saved audio device `saved`. On Windows,
@@ -864,7 +868,8 @@ impl Instance {
         name.and_then(|name| devices.into_iter().find(|(_, n)| *n == name)).map(|(id, _)| id).unwrap_or_default()
     }
 
-    /// The (id, name) of each device libVLC's audio output `module` lists.
+    /// The (id, name) of each device listed under `module`'s
+    /// "<module>-audio-device" option.
     fn devices_of(&self, module: &str) -> Vec<(String, String)> {
         let module = cstr(module);
         let mut out = Vec::new();
