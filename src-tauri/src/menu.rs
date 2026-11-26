@@ -142,7 +142,7 @@ pub fn build<R: Runtime>(app: &AppHandle<R>, keys: &HashMap<String, String>) -> 
         "File",
         true,
         &[
-            &MenuItem::with_id(app, "newWindow", "New Window", true, Some("Shift+CmdOrCtrl+N"))?,
+            &item("newWindow", "New Window")?,
             &sep()?,
             &item("open", "Open…")?,
             &item("openFolder", "Add Folder…")?,

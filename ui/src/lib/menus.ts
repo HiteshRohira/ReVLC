@@ -15,6 +15,8 @@ export const MENUS: MenuDef[] = [
   {
     label: "Media",
     items: [
+      ["newWindow", "New Window"],
+      SEP,
       ["open", "Open File…"],
       ["openFolder", "Open Folder…"],
       ["openDisc", "Open Disc…"],

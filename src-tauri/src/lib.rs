@@ -160,6 +160,9 @@ struct Shared {
     /// The windows showing the network view. Discovery is shared, so it
     /// stops only once none is.
     network_users: Mutex<HashSet<String>>,
+    /// When files last came in from another copy of ReVLC (or the command
+    /// line), and the window they went to. See [`open_handed_over`].
+    last_launch: Mutex<Option<(Instant, String)>>,
 }
 
 /// The open player windows, and the session each one plays with.
@@ -858,18 +861,6 @@ impl Session {
         // Playing (or queued until the video view exists): busy either way.
         self.claimed.store(false, Ordering::Release);
         result
-    }
-
-    /// Plays files the system handed us on the main thread, from another
-    /// thread (see the comment above `open`).
-    #[cfg(any(windows, target_os = "linux"))]
-    fn add_from_main(self: &Arc<Self>, uris: Vec<String>, options: Vec<String>) {
-        let core = self.clone();
-        thread::spawn(move || {
-            if let Err(e) = core.add_with_options(uris, true, &options) {
-                core.notice("error", e);
-            }
-        });
     }
 
     fn add_items(&self, items: Vec<Item>, play: bool) -> Result<(), String> {
@@ -2274,7 +2265,7 @@ async fn open(app: AppHandle, player: Player, uris: Vec<String>, play: bool) -> 
     // With "Open each video in a new window", a video that would replace
     // what's playing starts in a new window instead.
     let (shared, here) = (player.shared()?.clone(), player.core()?.clone());
-    tauri::async_runtime::spawn_blocking(move || open_routed(&app, &shared, Some(here), uris, Vec::new()))
+    tauri::async_runtime::spawn_blocking(move || open_routed(&app, &shared, Some(here), uris, Vec::new()).map(|_| ()))
         .await
         .map_err(|e| e.to_string())?
 }
@@ -2419,8 +2410,6 @@ fn run_app_item(app: &AppHandle, id: &str) -> bool {
                 open_externally(dunce::simplified(&folder.unwrap_or(dir)));
             }
         }
-        // Only macOS has more than one player window.
-        #[cfg(target_os = "macos")]
         "newWindow" => {
             // Off the main thread, which creating a window can block.
             let app = app.clone();
@@ -3691,7 +3680,7 @@ fn route_open(shared: &Shared, here: Option<Arc<Session>>, uris: &[String]) -> O
         let with_video = shared.sessions().into_iter().rev().find(|s| !s.is_closing() && s.current_uri().is_some());
         return Some(with_video.unwrap_or(target));
     }
-    let new_window = cfg!(target_os = "macos") && shared.settings().open_in_new_window;
+    let new_window = shared.settings().open_in_new_window;
     if new_window && target.is_busy() {
         return None;
     }
@@ -3701,11 +3690,42 @@ fn route_open(shared: &Shared, here: Option<Arc<Session>>, uris: &[String]) -> O
 
 /// Plays `uris` where [`route_open`] says. Blocks (it may make a window),
 /// so not on the main thread.
-fn open_routed(app: &AppHandle, shared: &Arc<Shared>, here: Option<Arc<Session>>, uris: Vec<String>, options: Vec<String>) -> Res {
+fn open_routed(app: &AppHandle, shared: &Arc<Shared>, here: Option<Arc<Session>>, uris: Vec<String>, options: Vec<String>) -> Result<Arc<Session>, String> {
     match route_open(shared, here, &uris) {
-        Some(session) => session.add_with_options(uris, true, &options),
-        None => open_player(app, shared, Launch { files: uris, media_options: options, ..Launch::default() }).map(|_| ()),
+        Some(session) => session.add_with_options(uris, true, &options).map(|()| session),
+        None => open_player(app, shared, Launch { files: uris, media_options: options, ..Launch::default() }),
     }
+}
+
+/// How soon after one hand-over the next counts as part of the same
+/// selection. Explorer starts a copy of ReVLC for each file selected, and each
+/// hands its file over a moment after the last.
+const LAUNCH_BATCH: Duration = Duration::from_secs(1);
+
+/// The window files handed over at `now` join: the one the last hand-over
+/// went to, if that was moments ago and it's still open.
+fn batch_target(shared: &Shared, last: Option<&(Instant, String)>, now: Instant) -> Option<Arc<Session>> {
+    let (at, label) = last?;
+    if now.saturating_duration_since(*at) > LAUNCH_BATCH {
+        return None;
+    }
+    shared.session(label).filter(|s| !s.is_closing())
+}
+
+/// Plays files another copy of ReVLC handed over. Files opened together
+/// (several selected in Explorer, each in its own copy) go into one window
+/// as a playlist, rather than each taking a window of its own. Blocks, so
+/// not on the main thread.
+#[cfg_attr(target_os = "macos", allow(dead_code))]
+fn open_handed_over(app: &AppHandle, shared: &Arc<Shared>, uris: Vec<String>, options: Vec<String>) -> Res {
+    // Held throughout, so hand-overs arriving together are handled in turn.
+    let mut last = shared.last_launch.lock().unwrap_or_else(|e| e.into_inner());
+    let session = match batch_target(shared, last.as_ref(), Instant::now()) {
+        Some(session) => session.add_with_options(uris, false, &options).map(|()| session)?,
+        None => open_routed(app, shared, None, uris, options)?,
+    };
+    *last = Some((Instant::now(), session.label.clone()));
+    Ok(())
 }
 
 fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
@@ -3724,7 +3744,7 @@ fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     // Before the engine: the menu bar (and its Settings…) is there even if
     // the engine can't start. The UI sends the real bindings once it loads;
     // start with the defaults.
-    let keys: HashMap<String, String> = [("open", "Cmd+O"), ("openFolder", "Shift+Cmd+O"), ("openUrl", "Cmd+N"), ("queue", "Cmd+L")]
+    let keys: HashMap<String, String> = [("newWindow", "Shift+Cmd+N"), ("open", "Cmd+O"), ("openFolder", "Shift+Cmd+O"), ("openUrl", "Cmd+N"), ("queue", "Cmd+L")]
         .into_iter()
         .map(|(a, k)| (a.to_string(), k.to_string()))
         .collect();
@@ -3772,6 +3792,7 @@ fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
         registry: Mutex::default(),
         routing: Mutex::default(),
         network_users: Mutex::default(),
+        last_launch: Mutex::default(),
         data_dir,
     });
 
@@ -3797,7 +3818,12 @@ fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     // The first window gets the command line: its files, then any Finder
     // opened before now.
     let launch = Launch { files: cli.files, media_options: cli.media_options, fullscreen: cli.fullscreen, play_and_exit: cli.play_and_exit };
+    let opened = !launch.files.is_empty();
     let session = open_player(&app_handle, &shared, launch)?;
+    // Files handed over by copies started along with this one join these.
+    if opened {
+        *shared.last_launch.lock().unwrap_or_else(|e| e.into_inner()) = Some((Instant::now(), session.label.clone()));
+    }
     if !cli.ignored.is_empty() {
         session.notice("error", format!("Ignored command-line options: {}", cli.ignored.join(" ")));
     }
@@ -3881,8 +3907,8 @@ pub fn run() {
     surface_linux::init();
     let builder = tauri::Builder::default();
     // Windows starts a new process for each file opened from Explorer; it
-    // hands its files to the running copy and exits. Only macOS has more than
-    // one player window; elsewhere the files join the one there is.
+    // hands its files to the running copy and exits. They play where
+    // [`open_handed_over`] says.
     #[cfg(any(windows, target_os = "linux"))]
     let builder = builder.plugin(tauri_plugin_single_instance::init(|app, args, cwd| {
         if let Some(window) = target_label(app).and_then(|label| app.get_webview_window(&label)) {
@@ -3895,8 +3921,17 @@ pub fn run() {
         if cli.files.is_empty() {
             return;
         }
-        if let Some(session) = shared_of(app).and_then(|s| s.target_session()) {
-            session.add_from_main(cli.files, cli.media_options);
+        if let Some(shared) = shared_of(app) {
+            let app = app.clone();
+            // Off the main thread, which creating a window can block.
+            thread::spawn(move || {
+                if let Err(e) = open_handed_over(&app, &shared, cli.files, cli.media_options) {
+                    match shared.target_session() {
+                        Some(session) => session.notice("error", e),
+                        None => eprintln!("revlc: could not open the file: {e}"),
+                    }
+                }
+            });
         }
     }));
     let app = match builder
@@ -4287,6 +4322,7 @@ mod tests {
             registry: Mutex::default(),
             routing: Mutex::default(),
             network_users: Mutex::default(),
+            last_launch: Mutex::default(),
         });
         (shared, mock, ui, dir)
     }
@@ -4372,15 +4408,34 @@ mod tests {
         let here = route_open(&shared, Some(session.clone()), std::slice::from_ref(&srt));
         assert!(here.is_some_and(|s| s.label == session.label));
         let elsewhere = route_open(&shared, Some(session.clone()), std::slice::from_ref(&video));
-        assert_eq!(elsewhere.is_none(), cfg!(target_os = "macos"), "a video goes to a new window (macOS only)");
+        assert!(elsewhere.is_none(), "a video goes to a new window");
         // A video and its subtitles stay together, in the new window.
-        assert_eq!(route_open(&shared, Some(session.clone()), &[video, srt.clone()]).is_none(), cfg!(target_os = "macos"));
+        assert!(route_open(&shared, Some(session.clone()), &[video, srt.clone()]).is_none());
         // From Finder, the window used last may have nothing open: they go
         // to the video in another window instead.
         let idle = test_window(&shared, Arc::new(engine::mock::MockEngine::default()));
         shared.registry().windows.focus(&idle.label);
         let routed = route_open(&shared, None, std::slice::from_ref(&srt));
         assert!(routed.is_some_and(|s| s.label == session.label));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn files_handed_over_together_share_a_window() {
+        let (shared, mock, _, dir) = test_shared("handed-over");
+        shared.settings().open_in_new_window = true;
+        let first = test_window(&shared, mock);
+        let at = Instant::now();
+        let last = (at, first.label.clone());
+        // The next file from the same Explorer selection joins the first one's window...
+        let joined = batch_target(&shared, Some(&last), at + Duration::from_millis(300));
+        assert!(joined.is_some_and(|s| s.label == first.label));
+        // ...but one opened later is routed on its own.
+        assert!(batch_target(&shared, Some(&last), at + LAUNCH_BATCH + Duration::from_millis(1)).is_none());
+        assert!(batch_target(&shared, None, at).is_none());
+        // Nor does a file join a window that's closing.
+        first.begin_close("closed");
+        assert!(batch_target(&shared, Some(&last), at).is_none());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -4392,7 +4447,7 @@ mod tests {
         let uri = |n: &str| vec![dir.join(n).to_string_lossy().into_owned()];
         // The first takes the idle window; until it starts playing, the second can't.
         assert!(route_open(&shared, None, &uri("a.mp4")).is_some_and(|s| s.label == idle.label));
-        assert_eq!(route_open(&shared, None, &uri("b.mp4")).is_none(), cfg!(target_os = "macos"));
+        assert!(route_open(&shared, None, &uri("b.mp4")).is_none());
         // Once its open has run, it's busy playing, and the claim is gone.
         idle.add_with_options(uri("a.mp4"), true, &[]).unwrap();
         assert!(!idle.claimed.load(Ordering::Acquire));

@@ -97,6 +97,7 @@ export const ACTIONS: Action[] = [
   { id: "subtitleDelayUp", label: "Increase subtitle delay", group: "Subtitles", keys: "H", run: () => player.setSubtitleDelay(s().subtitleDelay + 50) },
   { id: "subtitleDelayDown", label: "Decrease subtitle delay", group: "Subtitles", keys: "G", run: () => player.setSubtitleDelay(s().subtitleDelay - 50) },
 
+  { id: "newWindow", label: "New window", group: "App", keys: "Shift+Cmd+N", run: () => invoke("app_menu_item", { id: "newWindow" }) },
   { id: "open", label: "Open files", group: "App", keys: "Cmd+O", run: (h) => h.openFiles() },
   { id: "openFolder", label: "Add folder", group: "App", keys: "Shift+Cmd+O", run: (h) => h.openFolder() },
   { id: "openUrl", label: "Open network stream", group: "App", keys: "Cmd+N", run: () => (ui.dialog = "url") },

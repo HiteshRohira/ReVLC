@@ -230,14 +230,12 @@
           {@render toggle("analytics")}
         </Row>
       </div>
-      {#if isMac}
-        <h3>Windows</h3>
-        <div class="group">
-          <Row label="Open each video in a new window" help="When a window is already playing a video, opening another one starts it in a new window instead of replacing it.">
-            {@render toggle("openInNewWindow")}
-          </Row>
-        </div>
-      {/if}
+      <h3>Windows</h3>
+      <div class="group">
+        <Row label="Open each video in a new window" help="When a window is already playing a video, opening another one starts it in a new window instead of replacing it.">
+          {@render toggle("openInNewWindow")}
+        </Row>
+      </div>
     {:else if tab === "video"}
       <h3>Display</h3>
       <div class="group">
