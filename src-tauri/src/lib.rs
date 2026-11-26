@@ -43,7 +43,7 @@ mod system_windows;
 mod updater;
 mod vlc;
 
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Receiver};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
@@ -51,7 +51,7 @@ use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager, RunEvent, WebviewUrl, WebviewWindowBuilder, WindowEvent};
 
 use bookmarks::{Bookmark, Bookmarks};
@@ -152,6 +152,11 @@ struct Shared {
     /// Held while applying a settings change, so changes apply in order, and
     /// while a new player is set up, so it can't miss one.
     settings_change: Mutex<()>,
+    /// The volume the user last set, in percent; negative until they set one.
+    /// New players start at it, like VLC's saved volume.
+    volume: AtomicI32,
+    /// Set while a write of the volume is waiting to happen.
+    volume_save_queued: AtomicBool,
     /// The player windows and their sessions.
     registry: Mutex<Registry>,
     /// Held while choosing which window an opened video plays in, so two
@@ -162,6 +167,24 @@ struct Shared {
     network_users: Mutex<HashSet<String>>,
     /// Files other copies of ReVLC handed over, waiting to be opened in turn.
     hand_overs: Mutex<Option<mpsc::Sender<HandOver>>>,
+}
+
+/// The volume as saved between launches.
+#[derive(Serialize, Deserialize)]
+struct SavedVolume {
+    volume: i32,
+}
+
+fn volume_file(data_dir: &Path) -> PathBuf {
+    data_dir.join("volume.json")
+}
+
+/// The saved volume, or -1 if there is none (or it can't be read).
+fn load_volume(data_dir: &Path) -> i32 {
+    match store::read_json::<SavedVolume>(&volume_file(data_dir)) {
+        Ok(Some(saved)) => saved.volume.clamp(0, 200),
+        _ => -1,
+    }
 }
 
 /// The open player windows, and the session each one plays with.
@@ -1059,6 +1082,32 @@ impl Shared {
     /// the transition lock, which shouldn't wait for the disk.
     fn save_history(&self) {
         let _ = self.history_saves.send(());
+    }
+
+    /// Remembers the volume the user set, and writes it soon. Slider drags
+    /// and held keys change it many times a second, so one write covers them.
+    fn remember_volume(self: &Arc<Self>, volume: i32) {
+        self.volume.store(volume.clamp(0, 200), Ordering::Relaxed);
+        if self.volume_save_queued.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        let shared = self.clone();
+        thread::spawn(move || {
+            thread::sleep(Duration::from_millis(500));
+            shared.flush_volume();
+        });
+    }
+
+    /// Writes the volume now if a write is waiting. Also called on quit, so
+    /// a change made just before it isn't lost.
+    fn flush_volume(&self) {
+        if !self.volume_save_queued.swap(false, Ordering::AcqRel) {
+            return;
+        }
+        let volume = self.volume.load(Ordering::Relaxed);
+        if let Err(e) = store::write_json(&volume_file(&self.data_dir), &SavedVolume { volume }, false) {
+            eprintln!("revlc: {e}");
+        }
     }
 
     fn settings(&self) -> MutexGuard<'_, Settings> {
@@ -2640,6 +2689,7 @@ fn next_frame(player: Player) -> Res {
 fn set_volume(player: Player, volume: i32) -> Res {
     let core = player.core()?;
     core.engine.set_volume(volume);
+    core.shared.remember_volume(volume);
     if volume > 0 && core.engine.muted() {
         core.engine.set_muted(false);
     }
@@ -3525,6 +3575,10 @@ fn open_player_as(
         let _changing = shared.settings_change.lock().unwrap_or_else(|e| e.into_inner());
         let settings = shared.settings().clone();
         let engine = shared.engine.new_player(&settings).map_err(|e| e.message)?;
+        let volume = shared.volume.load(Ordering::Relaxed);
+        if volume >= 0 {
+            engine.set_volume(volume);
+        }
         let session = Arc::new(Session::new(shared.clone(), label.to_string(), engine, &launch));
         // Registered before the window exists: its page asks for a snapshot as soon as it loads.
         shared.registry().sessions.insert(label.to_string(), session.clone());
@@ -3837,6 +3891,8 @@ fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
         history_saves,
         history_write: Mutex::default(),
         settings_change: Mutex::default(),
+        volume: AtomicI32::new(load_volume(&data_dir)),
+        volume_save_queued: AtomicBool::new(false),
         registry: Mutex::default(),
         routing: Mutex::default(),
         network_users: Mutex::default(),
@@ -4171,6 +4227,7 @@ pub fn run() {
                 }
                 // Now, rather than on the history thread, which quitting doesn't wait for.
                 let _ = shared.write_history(true);
+                shared.flush_volume();
             }
             telemetry::flush_on_exit();
         }
@@ -4375,6 +4432,8 @@ mod tests {
             history_saves,
             history_write: Mutex::default(),
             settings_change: Mutex::default(),
+            volume: AtomicI32::new(-1),
+            volume_save_queued: AtomicBool::new(false),
             registry: Mutex::default(),
             routing: Mutex::default(),
             network_users: Mutex::default(),
@@ -4990,5 +5049,24 @@ mod tests {
         assert!(!vlc_autodetects(&video, Path::new("/elsewhere/The Film (2020).srt"), 3), "another folder");
         assert!(!at("The Film (2020).mks", 3), "libVLC doesn't look for .mks files");
         assert!(!vlc_autodetects(&dir.join("---.mkv"), &dir.join("Other.srt"), 3), "a name of only punctuation matches nothing");
+    }
+}
+
+#[cfg(test)]
+mod volume_tests {
+    use super::*;
+
+    #[test]
+    fn saved_volume_is_read_back_and_bad_files_mean_none() {
+        let dir = std::env::temp_dir().join(format!("revlc-volume-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        assert_eq!(load_volume(&dir), -1, "nothing saved yet");
+        store::write_json(&volume_file(&dir), &SavedVolume { volume: 135 }, false).unwrap();
+        assert_eq!(load_volume(&dir), 135);
+        store::write_json(&volume_file(&dir), &SavedVolume { volume: 900 }, false).unwrap();
+        assert_eq!(load_volume(&dir), 200, "clamped to VLC's range");
+        std::fs::write(volume_file(&dir), b"nonsense").unwrap();
+        assert_eq!(load_volume(&dir), -1, "a damaged file is ignored");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
