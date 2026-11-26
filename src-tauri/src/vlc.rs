@@ -499,8 +499,11 @@ pub(crate) fn audio_chain(effects: &Effects) -> String {
     eq.into_iter().chain(rest).collect::<Vec<_>>().join(":")
 }
 
-/// libVLC's audio output module on this platform.
-const AUDIO_MODULE: &str = if cfg!(target_os = "macos") { "auhal" } else if cfg!(windows) { "mmdevice" } else { "pulse" };
+/// libVLC's audio output module on this platform. On Windows, libVLC 3's
+/// default (mmdevice) puts every player in the process into one Windows
+/// audio session, so each window's volume and mute would change the others'.
+/// DirectSound sets them on each player's own buffer, on the same curve.
+const AUDIO_MODULE: &str = if cfg!(target_os = "macos") { "auhal" } else if cfg!(windows) { "directsound" } else { "pulse" };
 
 pub type Vlc = VlcEngine;
 
@@ -694,7 +697,7 @@ impl VlcEngine {
         // libVLC's player has its own title-display default; apply ours.
         self.set_title_display(settings.show_title, settings.title_position, settings.title_timeout);
         if !settings.audio_device.is_empty() {
-            self.set_audio_device(&settings.audio_device);
+            self.set_audio_device(&self.audio_device_id(&settings.audio_device));
         }
     }
 
@@ -783,9 +786,12 @@ impl Instance {
         // layer-based output tries to blend them into hardware-decoded
         // frames, which fails for 10-bit video, so subtitles never show.
         let vout: &[&str] = if cfg!(target_os = "macos") { &["--vout=macosx"] } else { &[] };
+        // See AUDIO_MODULE. Elsewhere libVLC's default output is the one listed.
+        let aout: &[&str] = if cfg!(windows) { &["--aout=directsound"] } else { &[] };
         let args: Vec<CString> = ["--no-snapshot-preview"]
             .iter()
             .chain(vout)
+            .chain(aout)
             .map(|a| a.to_string())
             .chain(extra_args.iter().cloned())
             .map(|a| cstr(&a))
@@ -839,7 +845,28 @@ impl Instance {
 
     /// Audio outputs as (id, name). The id "" is the system default.
     pub fn audio_devices(&self) -> Vec<(String, String)> {
-        let module = cstr(AUDIO_MODULE);
+        self.devices_of(AUDIO_MODULE)
+    }
+
+    /// The device to play to for the saved audio device `saved`. On Windows,
+    /// one saved before 0.2.13 has libVLC's mmdevice id: it becomes the
+    /// DirectSound device with the same name, or the system default if
+    /// there's none. Elsewhere, and for ids already listed, `saved` itself.
+    pub fn audio_device_id(&self, saved: &str) -> String {
+        if !cfg!(windows) || saved.is_empty() {
+            return saved.to_string();
+        }
+        let devices = self.audio_devices();
+        if devices.iter().any(|(id, _)| id == saved) {
+            return saved.to_string();
+        }
+        let name = self.devices_of("mmdevice").into_iter().find(|(id, _)| id == saved).map(|(_, name)| name);
+        name.and_then(|name| devices.into_iter().find(|(_, n)| *n == name)).map(|(id, _)| id).unwrap_or_default()
+    }
+
+    /// The (id, name) of each device libVLC's audio output `module` lists.
+    fn devices_of(&self, module: &str) -> Vec<(String, String)> {
+        let module = cstr(module);
         let mut out = Vec::new();
         unsafe {
             let list = (self.api.libvlc_audio_output_device_list_get)(self.inst, module.as_ptr());
@@ -2775,7 +2802,7 @@ impl Engine for VlcEngine {
             }
         }
         if previous.is_none_or(|p| p.audio_device != settings.audio_device) {
-            self.set_audio_device(&settings.audio_device);
+            self.set_audio_device(&self.audio_device_id(&settings.audio_device));
         }
         changed
     }
@@ -2806,7 +2833,7 @@ impl Engine for VlcEngine {
 
     fn on_playing(&self, settings: &Settings, effects: &Effects) {
         if !settings.audio_device.is_empty() {
-            self.set_audio_device(&settings.audio_device);
+            self.set_audio_device(&self.audio_device_id(&settings.audio_device));
         }
         // The audio output picks its own stereo mode for each stream.
         if effects.stereo != StereoMode::Stereo && self.stereo_mode() != effects.stereo.code() {
