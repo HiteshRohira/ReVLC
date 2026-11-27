@@ -43,7 +43,7 @@ mod system_windows;
 mod updater;
 mod vlc;
 
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Receiver};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
@@ -51,7 +51,7 @@ use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager, RunEvent, WebviewUrl, WebviewWindowBuilder, WindowEvent};
 
 use bookmarks::{Bookmark, Bookmarks};
@@ -152,6 +152,27 @@ struct Shared {
     /// Held while applying a settings change, so changes apply in order, and
     /// while a new player is set up, so it can't miss one.
     settings_change: Mutex<()>,
+    /// The volume the user last set, in percent; negative until they set one.
+    /// New players start at it, like VLC's saved volume.
+    volume: AtomicI32,
+    /// Set while the volume has changed since it was last written.
+    volume_save_queued: AtomicBool,
+    /// Set while a thread is waiting to write the volume.
+    volume_write_scheduled: AtomicBool,
+    /// Whether a libVLC startup option (`--auhal-volume`,
+    /// `--directx-volume`…) sets the volume, so a player's 0 is meant, not
+    /// the 0 libVLC reports with no output device or PulseAudio stream.
+    startup_volume: bool,
+    /// Set once an update restart has begun: the installer ends the app
+    /// without the usual exit, so the volume is written then and later
+    /// changes aren't, rather than being cut off partway.
+    volume_frozen: AtomicBool,
+    /// Held while a change is recorded and while freezing, so no change
+    /// lands between the freeze and the write that follows it.
+    volume_publish: Mutex<()>,
+    /// Held while writing the volume, so writes don't overlap and quitting
+    /// waits for one under way.
+    volume_write: Mutex<()>,
     /// The player windows and their sessions.
     registry: Mutex<Registry>,
     /// Held while choosing which window an opened video plays in, so two
@@ -162,6 +183,30 @@ struct Shared {
     network_users: Mutex<HashSet<String>>,
     /// Files other copies of ReVLC handed over, waiting to be opened in turn.
     hand_overs: Mutex<Option<mpsc::Sender<HandOver>>>,
+}
+
+/// Whether a libVLC option sets an audio output's volume, like
+/// `--auhal-volume=64` or `--directx-volume 0.5`.
+fn sets_volume(arg: &str) -> bool {
+    arg.starts_with("--") && arg[2..].split('=').next().is_some_and(|name| name.ends_with("-volume"))
+}
+
+/// The volume as saved between launches.
+#[derive(Serialize, Deserialize)]
+struct SavedVolume {
+    volume: i32,
+}
+
+fn volume_file(data_dir: &Path) -> PathBuf {
+    data_dir.join("volume.json")
+}
+
+/// The saved volume, or -1 if there is none (or it can't be read).
+fn load_volume(data_dir: &Path) -> i32 {
+    match store::read_json::<SavedVolume>(&volume_file(data_dir)) {
+        Ok(Some(saved)) => saved.volume.clamp(0, 200),
+        _ => -1,
+    }
 }
 
 /// The open player windows, and the session each one plays with.
@@ -179,6 +224,15 @@ struct Session {
     label: String,
     /// This window's player.
     engine: Arc<dyn Engine>,
+    /// The volume set for this window, else the saved one, else the
+    /// player's own (100 unless a startup option says otherwise). It's what's shown, and what each new audio output is set to:
+    /// libVLC has none while stopped, a new output starts at the volume
+    /// last set in any window, and PulseAudio reports 0 until it has a
+    /// stream.
+    chosen_volume: AtomicI32,
+    /// Held while setting the volume, so the user's change and setting a
+    /// new output to `chosen_volume` can't interleave.
+    volume_lock: Mutex<()>,
     playlist: Mutex<Playlist>,
     /// Set once the video view exists; opens before that are queued so
     /// libVLC never falls back to its own window.
@@ -684,6 +738,21 @@ impl Session {
         self.emit_state();
     }
 
+    /// Sets a new audio output to this window's volume. False while there
+    /// is no output yet.
+    fn restore_volume(&self) -> bool {
+        let _setting = self.volume_lock.lock().unwrap_or_else(|e| e.into_inner());
+        let volume = self.engine.volume();
+        if volume < 0 {
+            return false;
+        }
+        let chosen = self.chosen_volume.load(Ordering::Relaxed);
+        if volume != chosen {
+            self.engine.set_volume(chosen);
+        }
+        true
+    }
+
     fn state(&self) -> PlayerState {
         let e = &*self.engine;
         let (loop_a, loop_b) = *self.ab_loop();
@@ -698,7 +767,7 @@ impl Session {
             seekable: e.seekable(),
             has_video: e.has_video(),
             rate: e.rate(),
-            volume: e.volume(),
+            volume: self.chosen_volume.load(Ordering::Relaxed),
             muted: e.muted(),
             buffering: e.buffering(),
             audio_delay: e.audio_delay(),
@@ -1059,6 +1128,63 @@ impl Shared {
     /// the transition lock, which shouldn't wait for the disk.
     fn save_history(&self) {
         let _ = self.history_saves.send(());
+    }
+
+    /// Remembers the volume the user set, and writes it soon. Slider drags
+    /// and held keys change it many times a second, so one write covers them.
+    fn remember_volume(self: &Arc<Self>, volume: i32) {
+        {
+            let _publishing = self.volume_publish.lock().unwrap_or_else(|e| e.into_inner());
+            if self.volume_frozen.load(Ordering::Acquire) {
+                return;
+            }
+            self.volume.store(volume.clamp(0, 200), Ordering::Relaxed);
+            self.volume_save_queued.store(true, Ordering::Release);
+        }
+        if self.volume_write_scheduled.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        let shared = self.clone();
+        thread::spawn(move || {
+            thread::sleep(Duration::from_millis(500));
+            shared.volume_write_scheduled.store(false, Ordering::Release);
+            shared.flush_volume();
+        });
+    }
+
+    /// Writes the volume, and stops saving changes: for an update restart,
+    /// which the installer ends without the usual exit.
+    fn freeze_volume(&self) {
+        {
+            let _publishing = self.volume_publish.lock().unwrap_or_else(|e| e.into_inner());
+            self.volume_frozen.store(true, Ordering::Release);
+        }
+        self.flush_volume();
+    }
+
+    /// Writes the volume now if a write is waiting. Also called on quit, so
+    /// a change made just before it isn't lost.
+    fn flush_volume(&self) {
+        let _writing = self.volume_write.lock().unwrap_or_else(|e| e.into_inner());
+        if !self.volume_save_queued.swap(false, Ordering::AcqRel) {
+            return;
+        }
+        let volume = self.volume.load(Ordering::Relaxed);
+        if let Err(e) = store::write_json(&volume_file(&self.data_dir), &SavedVolume { volume }, false) {
+            eprintln!("revlc: {e}");
+            // Tried again on quit, or with the next change.
+            self.volume_save_queued.store(true, Ordering::Release);
+        }
+    }
+
+    /// A new player, at the volume the user last set.
+    fn new_player(&self, settings: &Settings) -> Result<Arc<dyn Engine>, String> {
+        let engine = self.engine.new_player(settings).map_err(|e| e.message)?;
+        let volume = self.volume.load(Ordering::Relaxed);
+        if volume >= 0 {
+            engine.set_volume(volume);
+        }
+        Ok(engine)
     }
 
     fn settings(&self) -> MutexGuard<'_, Settings> {
@@ -1555,7 +1681,21 @@ fn pump_events(core: Arc<Session>, rx: Receiver<EngineEvent>) {
     let mut chained = None;
     // The media whose reported title has been looked at.
     let mut titled = None;
+    // Whether a new audio output may need this window's volume: from a new
+    // file or audio track until a second after it starts playing (when it
+    // did, once it has), since PulseAudio reports its stream's own volume
+    // a little after that.
+    let mut volume_due: Option<Option<Instant>> = Some(None);
+    // The audio track last seen, so other tracks' changes don't count.
+    let mut audio_track = None;
     while let Ok(first) = rx.recv() {
+        volume_settled(&mut volume_due);
+        // A new output gets this window's volume at once, before it plays much.
+        if (volume_due.is_some() || first.kind == EventKind::AudioDevice)
+            && matches!(first.kind, EventKind::AudioVolume | EventKind::AudioDevice | EventKind::EsAdded | EventKind::Playing)
+        {
+            core.restore_volume();
+        }
         // Let bursts of events (e.g. opening a file) arrive, then handle them together.
         thread::sleep(Duration::from_millis(20));
         let batch: Vec<EngineEvent> = std::iter::once(first).chain(rx.try_iter()).collect();
@@ -1674,6 +1814,32 @@ fn pump_events(core: Arc<Session>, rx: Receiver<EngineEvent>) {
             let effects = core.effects().clone();
             core.engine.on_playing(&settings, &effects);
         }
+        if has(EventKind::Opening) {
+            volume_due = Some(None);
+            audio_track = None;
+        }
+        // A new stream on the output, which PulseAudio may start at
+        // another window's volume.
+        if has(EventKind::AudioDevice) {
+            volume_due = Some(None);
+        }
+        if [EventKind::EsAdded, EventKind::EsDeleted, EventKind::EsSelected].iter().any(|&e| has(e)) {
+            let current = core.engine.tracks().audio_current;
+            if audio_track.replace(current) != Some(current) {
+                volume_due = Some(None);
+            }
+        }
+        volume_settled(&mut volume_due);
+        if let Some(playing_since) = volume_due
+            && [EventKind::Playing, EventKind::AudioVolume, EventKind::AudioDevice, EventKind::EsAdded, EventKind::TimeChanged]
+                .iter()
+                .any(|&e| has(e))
+            && core.restore_volume()
+            && playing_since.is_none()
+            && matches!(core.engine.state(), State::Playing | State::Paused)
+        {
+            volume_due = Some(Some(Instant::now()));
+        }
         if has(EventKind::Paused) {
             core.save_progress(true);
         }
@@ -1750,6 +1916,16 @@ fn pump_events(core: Arc<Session>, rx: Receiver<EngineEvent>) {
 }
 
 type Res = Result<(), String>;
+
+/// Ends the second after playback started in which a new audio output is
+/// held to the window's volume (see [`pump_events`]), paused or not.
+fn volume_settled(due: &mut Option<Option<Instant>>) {
+    if let Some(Some(at)) = *due
+        && at.elapsed() >= Duration::from_secs(1)
+    {
+        *due = None;
+    }
+}
 
 fn format_time(ms: i64) -> String {
     let s = ms / 1000;
@@ -2639,7 +2815,14 @@ fn next_frame(player: Player) -> Res {
 #[tauri::command]
 fn set_volume(player: Player, volume: i32) -> Res {
     let core = player.core()?;
-    core.engine.set_volume(volume);
+    let volume = volume.clamp(0, 200);
+    {
+        let _setting = core.volume_lock.lock().unwrap_or_else(|e| e.into_inner());
+        core.chosen_volume.store(volume, Ordering::Relaxed);
+        core.engine.set_start_volume(volume);
+        core.engine.set_volume(volume);
+    }
+    core.shared.remember_volume(volume);
     if volume > 0 && core.engine.muted() {
         core.engine.set_muted(false);
     }
@@ -3460,10 +3643,25 @@ impl Session {
     /// A window's session, with its own `engine` player. It plays nothing
     /// until [`Session::mark_ready`].
     fn new(shared: Arc<Shared>, label: String, engine: Arc<dyn Engine>, launch: &Launch) -> Self {
+        // Not the idle player's own volume, which isn't a choice: PulseAudio
+        // reports 0 until it has a stream.
+        // Nothing saved: the player's own, which a startup option such as
+        // --auhal-volume sets, else libVLC's 100. A 0 is only meant when an
+        // option sets it: libVLC also reports 0 with no output device, and
+        // PulseAudio until it has a stream.
+        let saved = shared.volume.load(Ordering::Relaxed);
+        let chosen_volume = AtomicI32::new(match engine.volume() {
+            _ if saved >= 0 => saved,
+            own if own > 0 || (own == 0 && shared.startup_volume) => own,
+            _ => 100,
+        });
+        engine.set_start_volume(chosen_volume.load(Ordering::Relaxed));
         Session {
             shared,
             label,
             engine,
+            chosen_volume,
+            volume_lock: Mutex::default(),
             playlist: Mutex::default(),
             ready: AtomicBool::new(false),
             pending: Mutex::default(),
@@ -3524,7 +3722,7 @@ fn open_player_as(
         // them here and the player being registered to get changes.
         let _changing = shared.settings_change.lock().unwrap_or_else(|e| e.into_inner());
         let settings = shared.settings().clone();
-        let engine = shared.engine.new_player(&settings).map_err(|e| e.message)?;
+        let engine = shared.new_player(&settings)?;
         let session = Arc::new(Session::new(shared.clone(), label.to_string(), engine, &launch));
         // Registered before the window exists: its page asks for a snapshot as soon as it loads.
         shared.registry().sessions.insert(label.to_string(), session.clone());
@@ -3812,6 +4010,7 @@ fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     if cfg!(target_os = "macos") {
         app.set_menu(menu::build(app.handle(), &keys)?)?;
     }
+    let startup_volume = args.iter().chain(&cli.vlc_args).any(|a| sets_volume(a));
     let engine = VlcEngine::load_with_settings(resource_dir.as_deref(), &args, &cli.vlc_args, &settings, &languages);
     let settings = match &engine {
         Ok(vlc) => carry_over_audio_device(vlc, settings, &data_dir),
@@ -3854,6 +4053,13 @@ fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
         history_saves,
         history_write: Mutex::default(),
         settings_change: Mutex::default(),
+        volume: AtomicI32::new(load_volume(&data_dir)),
+        volume_save_queued: AtomicBool::new(false),
+        volume_write_scheduled: AtomicBool::new(false),
+        startup_volume,
+        volume_frozen: AtomicBool::new(false),
+        volume_publish: Mutex::default(),
+        volume_write: Mutex::default(),
         registry: Mutex::default(),
         routing: Mutex::default(),
         network_users: Mutex::default(),
@@ -4188,6 +4394,7 @@ pub fn run() {
                 }
                 // Now, rather than on the history thread, which quitting doesn't wait for.
                 let _ = shared.write_history(true);
+                shared.flush_volume();
             }
             telemetry::flush_on_exit();
         }
@@ -4392,6 +4599,13 @@ mod tests {
             history_saves,
             history_write: Mutex::default(),
             settings_change: Mutex::default(),
+            volume: AtomicI32::new(-1),
+            volume_save_queued: AtomicBool::new(false),
+            volume_write_scheduled: AtomicBool::new(false),
+            startup_volume: false,
+            volume_frozen: AtomicBool::new(false),
+            volume_publish: Mutex::default(),
+            volume_write: Mutex::default(),
             registry: Mutex::default(),
             routing: Mutex::default(),
             network_users: Mutex::default(),
@@ -5007,5 +5221,169 @@ mod tests {
         assert!(!vlc_autodetects(&video, Path::new("/elsewhere/The Film (2020).srt"), 3), "another folder");
         assert!(!at("The Film (2020).mks", 3), "libVLC doesn't look for .mks files");
         assert!(!vlc_autodetects(&dir.join("---.mkv"), &dir.join("Other.srt"), 3), "a name of only punctuation matches nothing");
+    }
+
+    #[test]
+    fn the_volume_set_is_saved_once_and_new_players_start_at_it() {
+        let (shared, _mock, _ui, dir) = test_shared("volume-saved");
+        let player = shared.new_player(&Settings::default()).unwrap();
+        assert_eq!(player.volume(), 100, "nothing set yet: libVLC's default");
+
+        for volume in [120, 130, 140] {
+            shared.remember_volume(volume);
+        }
+        shared.flush_volume();
+        assert_eq!(load_volume(&dir), 140, "quitting writes the last change");
+        assert!(!shared.volume_save_queued.load(Ordering::Acquire));
+        let player = shared.new_player(&Settings::default()).unwrap();
+        assert_eq!(player.volume(), 140, "a new window starts at it");
+
+        // Nothing queued: the file is left alone.
+        std::fs::write(volume_file(&dir), br#"{"volume":55}"#).unwrap();
+        shared.flush_volume();
+        assert_eq!(load_volume(&dir), 55);
+
+        // The delayed write lands on its own, clamped.
+        shared.remember_volume(250);
+        assert!(wait_until(Duration::from_secs(5), || load_volume(&dir) == 200), "written shortly after the change");
+
+        // Once an update restart has begun, changes aren't saved.
+        shared.remember_volume(150);
+        shared.freeze_volume();
+        assert_eq!(load_volume(&dir), 150, "written by the freeze");
+        shared.remember_volume(33);
+        shared.flush_volume();
+        assert_eq!(load_volume(&dir), 150);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_failed_volume_write_is_tried_again() {
+        let (shared, _mock, _ui, dir) = test_shared("volume-retry");
+        // A folder where the file goes makes the write fail.
+        std::fs::create_dir_all(volume_file(&dir).join("x")).unwrap();
+        shared.remember_volume(70);
+        shared.flush_volume();
+        assert!(shared.volume_save_queued.load(Ordering::Acquire), "still waiting to be written");
+        std::fs::remove_dir_all(volume_file(&dir)).unwrap();
+        shared.flush_volume();
+        assert_eq!(load_volume(&dir), 70, "written on the next try");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn each_window_keeps_its_volume_across_new_audio_outputs() {
+        let (core, mock, _ui, dir) = test_core("volume-window");
+        let (tx, rx) = mpsc::channel();
+        mock.subscribe(tx);
+        let pump_core = core.clone();
+        let pump = thread::spawn(move || pump_events(pump_core, rx));
+        let volume = || mock.volume.load(Ordering::Acquire);
+
+        // Nothing saved or set: libVLC's 100, not PulseAudio's 0 before it
+        // has a stream (or for a video without sound). Each new media is set
+        // to it before it plays.
+        assert_eq!(core.chosen_volume.load(Ordering::Relaxed), 100);
+        assert_eq!(mock.start_volume.load(Ordering::Acquire), 100);
+        mock.volume.store(0, Ordering::Release);
+        assert_eq!(core.state().volume, 100);
+        *mock.state.lock().unwrap() = State::Playing;
+        assert_eq!(core.state().volume, 100);
+        mock.send_event(EventKind::Opening, 100.0, -1);
+        mock.volume.store(100, Ordering::Release);
+        *mock.state.lock().unwrap() = State::Playing;
+        mock.send_event(EventKind::Playing, 100.0, -1);
+        thread::sleep(Duration::from_millis(200));
+        assert_eq!(volume(), 100);
+
+        // Set to 60, then stopped: libVLC has no audio output, so no volume.
+        core.chosen_volume.store(60, Ordering::Relaxed);
+        mock.volume.store(-1, Ordering::Release);
+        *mock.state.lock().unwrap() = State::Stopped;
+        assert_eq!(core.state().volume, 60, "shown while there's no output");
+        mock.volume.store(0, Ordering::Release);
+        assert_eq!(core.state().volume, 60, "nor while PulseAudio has no stream yet");
+        mock.volume.store(-1, Ordering::Release);
+
+        // The next file's output starts at another window's volume.
+        mock.send_event(EventKind::Opening, 100.0, -1);
+        mock.volume.store(90, Ordering::Release);
+        *mock.state.lock().unwrap() = State::Playing;
+        mock.send_event(EventKind::Playing, 100.0, -1);
+        assert!(wait_until(Duration::from_secs(2), || volume() == 60), "set back to this window's");
+
+        // A stream that takes over a second to open, then reports its own
+        // volume a little after it starts playing.
+        *mock.state.lock().unwrap() = State::Opening;
+        mock.send_event(EventKind::Opening, 100.0, -1);
+        thread::sleep(Duration::from_millis(1100));
+        *mock.state.lock().unwrap() = State::Playing;
+        mock.send_event(EventKind::Playing, 100.0, -1);
+        thread::sleep(Duration::from_millis(100));
+        mock.volume.store(100, Ordering::Release);
+        mock.send_event(EventKind::AudioVolume, 100.0, -1);
+        assert!(wait_until(Duration::from_secs(2), || volume() == 60), "within a second of playing");
+
+        // So does a new stream for another audio track.
+        thread::sleep(Duration::from_millis(1100));
+        mock.send_event(EventKind::TimeChanged, 100.0, 1000);
+        mock.tracks.lock().unwrap().audio_current = 2;
+        mock.send_event(EventKind::EsSelected, 100.0, -1);
+        mock.volume.store(80, Ordering::Release);
+        mock.send_event(EventKind::AudioVolume, 100.0, -1);
+        assert!(wait_until(Duration::from_secs(2), || volume() == 60), "set back after a track change");
+
+        // Once the output has settled, even paused, a change from elsewhere
+        // (the system mixer) isn't undone.
+        *mock.state.lock().unwrap() = State::Paused;
+        mock.send_event(EventKind::Paused, 100.0, -1);
+        thread::sleep(Duration::from_millis(1100));
+        mock.volume.store(75, Ordering::Release);
+        mock.send_event(EventKind::AudioVolume, 100.0, -1);
+        thread::sleep(Duration::from_millis(200));
+        assert_eq!(volume(), 75);
+        // A stream started again on the output (a stereo mode change, or
+        // audio that starts late) is set to the window's volume again.
+        mock.send_event(EventKind::AudioDevice, 100.0, -1);
+        assert!(wait_until(Duration::from_secs(2), || volume() == 60), "set back for a new stream");
+        // It settles while paused too, after which the mixer is left alone.
+        thread::sleep(Duration::from_millis(1100));
+        mock.volume.store(75, Ordering::Release);
+        mock.send_event(EventKind::AudioVolume, 100.0, -1);
+        thread::sleep(Duration::from_millis(200));
+        assert_eq!(volume(), 75, "paused, a second after the new stream");
+
+        // Nor by another subtitle track: the audio stream stays.
+        *mock.state.lock().unwrap() = State::Playing;
+        mock.tracks.lock().unwrap().subtitle_current = 3;
+        mock.send_event(EventKind::EsSelected, 100.0, -1);
+        mock.send_event(EventKind::TimeChanged, 100.0, 4000);
+        thread::sleep(Duration::from_millis(200));
+        assert_eq!(volume(), 75);
+
+        *mock.tx.lock().unwrap() = None;
+        let _ = pump.join();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod volume_tests {
+    use super::*;
+
+    #[test]
+    fn saved_volume_is_read_back_and_bad_files_mean_none() {
+        let dir = std::env::temp_dir().join(format!("revlc-volume-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        assert_eq!(load_volume(&dir), -1, "nothing saved yet");
+        store::write_json(&volume_file(&dir), &SavedVolume { volume: 135 }, false).unwrap();
+        assert_eq!(load_volume(&dir), 135);
+        store::write_json(&volume_file(&dir), &SavedVolume { volume: 900 }, false).unwrap();
+        assert_eq!(load_volume(&dir), 200, "clamped to VLC's range");
+        std::fs::write(volume_file(&dir), b"nonsense").unwrap();
+        assert_eq!(load_volume(&dir), -1, "a damaged file is ignored");
+        assert!(sets_volume("--auhal-volume=0") && sets_volume("--directx-volume"));
+        assert!(!sets_volume("--volume-step=5") && !sets_volume("--no-audio") && !sets_volume("-volume"));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

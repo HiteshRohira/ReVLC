@@ -56,6 +56,30 @@ TIME = re.compile(r"^\s*(?:(\d+):)?(\d+):(\d\d)\s*/")
 TITLE_MENUS = ("Media", "Playback", "Audio", "Video", "Subtitles", "Tools", "Help")
 
 
+_audio_output = None
+
+
+def windows_audio_output():
+    """Whether Windows has a working audio playback device. Without one,
+    libVLC's DirectSound output can't open, and mute does nothing.
+    Playback endpoints' ids start {0.0.0.00000000}; microphones' {0.0.1...}."""
+    global _audio_output
+    if _audio_output is None:
+        out = subprocess.run(
+            ["powershell", "-NoProfile", "-Command",
+             # Unlike Get-PnpDevice, an empty result isn't an error, so
+             # -ErrorAction Stop only stops on a failed lookup.
+             "@(Get-CimInstance Win32_PnPEntity -ErrorAction Stop | Where-Object {"
+             " $_.PNPClass -eq 'AudioEndpoint' -and $_.Status -eq 'OK'"
+             " -and $_.DeviceID -like 'SWD\\MMDEVAPI\\{0.0.0.00000000}*' }).Count"],
+            capture_output=True, text=True, timeout=60)
+        count = out.stdout.strip()
+        if out.returncode != 0 or not count.isdigit():
+            raise RuntimeError(f"couldn't list the audio playback devices: {(out.stderr or count).strip()[:200]}")
+        _audio_output = int(count) > 0
+    return _audio_output
+
+
 class Fail(Exception):
     pass
 
@@ -1054,9 +1078,6 @@ def playback(ctx):
     ctx.check("5 jumps to 50%", jump, app=app)
 
     def volume():
-        before = app.slider("Volume")
-        if WIN and before == 0:
-            raise Skip("no audio output on this runner: libVLC reports volume 0")
         app.key("up")
         # The on-screen message, not the slider: Windows' UI Automation
         # doesn't follow the slider's value as it changes.
@@ -1067,8 +1088,8 @@ def playback(ctx):
     ctx.check("↑ raises the volume", volume, app=app)
 
     def mute():
-        if WIN and app.slider("Volume") == 0:
-            raise Skip("no audio output on this runner: libVLC reports volume 0")
+        if WIN and not windows_audio_output():
+            raise Skip("no audio output device on this runner, so libVLC can't mute")
         app.key("m")
         app.wait("Unmute", button=True, timeout=5)
         app.key("m")

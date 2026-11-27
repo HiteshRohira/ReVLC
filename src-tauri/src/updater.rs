@@ -244,6 +244,7 @@ pub async fn update_restart(app: AppHandle) {
             }
             // The Windows installer ends the app without the usual exit.
             let _ = shared.write_history(true);
+            shared.freeze_volume();
         }
     })
     .await;
@@ -257,6 +258,10 @@ pub async fn update_restart(app: AppHandle) {
             && let Err(e) = update.install(installer)
         {
             eprintln!("revlc: update install failed: {e}");
+            // Still running: volume changes are saved again.
+            if let Some(shared) = crate::shared_of(&app) {
+                shared.volume_frozen.store(false, std::sync::atomic::Ordering::Release);
+            }
             updater.set(&app, |s| s.status = Status::Available);
             notice(&app, "error", format!("Could not install the update: {e}"));
             return;
