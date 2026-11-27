@@ -214,10 +214,11 @@ struct Session {
     label: String,
     /// This window's player.
     engine: Arc<dyn Engine>,
-    /// The volume set for this window (or saved), negative if none. libVLC
-    /// has none while stopped, and a new audio output starts at the volume
-    /// last set in any window, so this is what's shown then and what each
-    /// new output is set to.
+    /// The volume set for this window, else the saved one, else libVLC's
+    /// 100. It's what's shown, and what each new audio output is set to:
+    /// libVLC has none while stopped, a new output starts at the volume
+    /// last set in any window, and PulseAudio reports 0 until it has a
+    /// stream.
     chosen_volume: AtomicI32,
     /// Held while setting the volume, so the user's change and setting a
     /// new output to `chosen_volume` can't interleave.
@@ -736,20 +737,10 @@ impl Session {
             return false;
         }
         let chosen = self.chosen_volume.load(Ordering::Relaxed);
-        if chosen >= 0 && volume != chosen {
+        if volume != chosen {
             self.engine.set_volume(chosen);
         }
         true
-    }
-
-    /// Takes a volume set from outside, such as the system mixer, as the
-    /// window's own, once its output has settled.
-    fn adopt_volume(&self) {
-        let _setting = self.volume_lock.lock().unwrap_or_else(|e| e.into_inner());
-        let volume = self.engine.volume();
-        if volume >= 0 && matches!(self.engine.state(), State::Playing | State::Paused) {
-            self.chosen_volume.store(volume, Ordering::Relaxed);
-        }
     }
 
     fn state(&self) -> PlayerState {
@@ -766,14 +757,7 @@ impl Session {
             seekable: e.seekable(),
             has_video: e.has_video(),
             rate: e.rate(),
-            // The window's own volume: libVLC has none while stopped, and
-            // PulseAudio reports 0 until it has a stream (and for media
-            // without sound). With none chosen, 100 is libVLC's own.
-            volume: match (e.volume(), self.chosen_volume.load(Ordering::Relaxed)) {
-                (_, chosen) if chosen >= 0 => chosen,
-                (v, _) if v > 0 && matches!(e.state(), State::Playing | State::Paused) => v,
-                _ => 100,
-            },
+            volume: self.chosen_volume.load(Ordering::Relaxed),
             muted: e.muted(),
             buffering: e.buffering(),
             audio_delay: e.audio_delay(),
@@ -1829,17 +1813,13 @@ fn pump_events(core: Arc<Session>, rx: Receiver<EngineEvent>) {
             }
         }
         volume_settled(&mut volume_due);
-        match volume_due {
-            None if has(EventKind::AudioVolume) => core.adopt_volume(),
-            Some(playing_since)
-                if [EventKind::Playing, EventKind::AudioVolume, EventKind::EsAdded, EventKind::TimeChanged].iter().any(|&e| has(e))
-                    && core.restore_volume()
-                    && playing_since.is_none()
-                    && core.engine.state() == State::Playing =>
-            {
-                volume_due = Some(Some(Instant::now()));
-            }
-            _ => {}
+        if let Some(playing_since) = volume_due
+            && [EventKind::Playing, EventKind::AudioVolume, EventKind::EsAdded, EventKind::TimeChanged].iter().any(|&e| has(e))
+            && core.restore_volume()
+            && playing_since.is_none()
+            && core.engine.state() == State::Playing
+        {
+            volume_due = Some(Some(Instant::now()));
         }
         if has(EventKind::Paused) {
             core.save_progress(true);
@@ -3645,7 +3625,8 @@ impl Session {
     fn new(shared: Arc<Shared>, label: String, engine: Arc<dyn Engine>, launch: &Launch) -> Self {
         // Not the idle player's own volume, which isn't a choice: PulseAudio
         // reports 0 until it has a stream.
-        let chosen_volume = AtomicI32::new(shared.volume.load(Ordering::Relaxed));
+        let saved = shared.volume.load(Ordering::Relaxed);
+        let chosen_volume = AtomicI32::new(if saved >= 0 { saved } else { 100 });
         Session {
             shared,
             label,
@@ -5267,13 +5248,13 @@ mod tests {
         let pump = thread::spawn(move || pump_events(pump_core, rx));
         let volume = || mock.volume.load(Ordering::Acquire);
 
-        // Nothing chosen yet: the output's own volume is left alone, even
-        // PulseAudio's 0 before it has a stream.
-        assert_eq!(core.chosen_volume.load(Ordering::Relaxed), -1);
+        // Nothing saved or set: libVLC's 100, not PulseAudio's 0 before it
+        // has a stream (or for a video without sound).
+        assert_eq!(core.chosen_volume.load(Ordering::Relaxed), 100);
         mock.volume.store(0, Ordering::Release);
-        assert_eq!(core.state().volume, 100, "libVLC's own, not PulseAudio's 0");
+        assert_eq!(core.state().volume, 100);
         *mock.state.lock().unwrap() = State::Playing;
-        assert_eq!(core.state().volume, 100, "nor for a video without sound");
+        assert_eq!(core.state().volume, 100);
         mock.send_event(EventKind::Opening, 100.0, -1);
         mock.volume.store(100, Ordering::Release);
         *mock.state.lock().unwrap() = State::Playing;
@@ -5319,22 +5300,21 @@ mod tests {
         assert!(wait_until(Duration::from_secs(2), || volume() == 60), "set back after a track change");
 
         // Once the output has settled, even paused, a change from elsewhere
-        // isn't undone: it becomes the window's volume.
+        // (the system mixer) isn't undone.
         *mock.state.lock().unwrap() = State::Paused;
         mock.send_event(EventKind::Paused, 100.0, -1);
         thread::sleep(Duration::from_millis(1100));
         mock.volume.store(75, Ordering::Release);
         mock.send_event(EventKind::AudioVolume, 100.0, -1);
-        assert!(wait_until(Duration::from_secs(2), || core.state().volume == 75), "taken as the window's");
+        thread::sleep(Duration::from_millis(200));
         assert_eq!(volume(), 75);
         // Nor by another subtitle track: the audio stream stays.
         *mock.state.lock().unwrap() = State::Playing;
         mock.tracks.lock().unwrap().subtitle_current = 3;
         mock.send_event(EventKind::EsSelected, 100.0, -1);
-        mock.volume.store(70, Ordering::Release);
-        mock.send_event(EventKind::AudioVolume, 100.0, -1);
-        assert!(wait_until(Duration::from_secs(2), || core.state().volume == 70));
-        assert_eq!(volume(), 70);
+        mock.send_event(EventKind::TimeChanged, 100.0, 4000);
+        thread::sleep(Duration::from_millis(200));
+        assert_eq!(volume(), 75);
 
         *mock.tx.lock().unwrap() = None;
         let _ = pump.join();
