@@ -244,7 +244,7 @@ pub async fn update_restart(app: AppHandle) {
             }
             // The Windows installer ends the app without the usual exit.
             let _ = shared.write_history(true);
-            shared.volume_write_now.store(true, std::sync::atomic::Ordering::Release);
+            shared.volume_frozen.store(true, std::sync::atomic::Ordering::Release);
             shared.flush_volume();
         }
     })

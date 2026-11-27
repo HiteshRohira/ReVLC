@@ -160,8 +160,9 @@ struct Shared {
     /// Set while a thread is waiting to write the volume.
     volume_write_scheduled: AtomicBool,
     /// Set once an update restart has begun: the installer ends the app
-    /// without the usual exit, so each change is written straight away.
-    volume_write_now: AtomicBool,
+    /// without the usual exit, so the volume is written then and later
+    /// changes aren't, rather than being cut off partway.
+    volume_frozen: AtomicBool,
     /// Held while writing the volume, so writes don't overlap and quitting
     /// waits for one under way.
     volume_write: Mutex<()>,
@@ -1122,12 +1123,11 @@ impl Shared {
     /// Remembers the volume the user set, and writes it soon. Slider drags
     /// and held keys change it many times a second, so one write covers them.
     fn remember_volume(self: &Arc<Self>, volume: i32) {
-        self.volume.store(volume.clamp(0, 200), Ordering::Relaxed);
-        self.volume_save_queued.store(true, Ordering::Release);
-        if self.volume_write_now.load(Ordering::Acquire) {
-            self.flush_volume();
+        if self.volume_frozen.load(Ordering::Acquire) {
             return;
         }
+        self.volume.store(volume.clamp(0, 200), Ordering::Relaxed);
+        self.volume_save_queued.store(true, Ordering::Release);
         if self.volume_write_scheduled.swap(true, Ordering::AcqRel) {
             return;
         }
@@ -1663,7 +1663,13 @@ fn pump_events(core: Arc<Session>, rx: Receiver<EngineEvent>) {
     // output is there, since PulseAudio reports its stream's own volume
     // a little after the output appears.
     let mut volume_due = Some(Instant::now());
+    // The audio track last seen, so other tracks' changes don't count.
+    let mut audio_track = None;
     while let Ok(first) = rx.recv() {
+        // A new output gets this window's volume at once, before it plays much.
+        if volume_due.is_some() && matches!(first.kind, EventKind::AudioVolume | EventKind::EsAdded | EventKind::Playing) {
+            core.restore_volume();
+        }
         // Let bursts of events (e.g. opening a file) arrive, then handle them together.
         thread::sleep(Duration::from_millis(20));
         let batch: Vec<EngineEvent> = std::iter::once(first).chain(rx.try_iter()).collect();
@@ -1782,8 +1788,15 @@ fn pump_events(core: Arc<Session>, rx: Receiver<EngineEvent>) {
             let effects = core.effects().clone();
             core.engine.on_playing(&settings, &effects);
         }
-        if [EventKind::Opening, EventKind::EsAdded, EventKind::EsDeleted, EventKind::EsSelected].iter().any(|&e| has(e)) {
+        if has(EventKind::Opening) {
             volume_due = Some(Instant::now());
+            audio_track = None;
+        }
+        if [EventKind::EsAdded, EventKind::EsDeleted, EventKind::EsSelected].iter().any(|&e| has(e)) {
+            let current = core.engine.tracks().audio_current;
+            if audio_track.replace(current) != Some(current) {
+                volume_due = Some(Instant::now());
+            }
         }
         if let Some(since) = volume_due
             && [EventKind::Playing, EventKind::AudioVolume, EventKind::EsAdded, EventKind::TimeChanged].iter().any(|&e| has(e))
@@ -3986,7 +3999,7 @@ fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
         volume: AtomicI32::new(load_volume(&data_dir)),
         volume_save_queued: AtomicBool::new(false),
         volume_write_scheduled: AtomicBool::new(false),
-        volume_write_now: AtomicBool::new(false),
+        volume_frozen: AtomicBool::new(false),
         volume_write: Mutex::default(),
         registry: Mutex::default(),
         routing: Mutex::default(),
@@ -4530,7 +4543,7 @@ mod tests {
             volume: AtomicI32::new(-1),
             volume_save_queued: AtomicBool::new(false),
             volume_write_scheduled: AtomicBool::new(false),
-            volume_write_now: AtomicBool::new(false),
+            volume_frozen: AtomicBool::new(false),
             volume_write: Mutex::default(),
             registry: Mutex::default(),
             routing: Mutex::default(),
@@ -5173,10 +5186,11 @@ mod tests {
         shared.remember_volume(250);
         assert!(wait_until(Duration::from_secs(5), || load_volume(&dir) == 200), "written shortly after the change");
 
-        // Once an update restart has begun, a change is written at once.
-        shared.volume_write_now.store(true, Ordering::Release);
+        // Once an update restart has begun, changes aren't saved.
+        shared.volume_frozen.store(true, Ordering::Release);
         shared.remember_volume(33);
-        assert_eq!(load_volume(&dir), 33);
+        shared.flush_volume();
+        assert_eq!(load_volume(&dir), 200);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -5227,6 +5241,7 @@ mod tests {
         // So does a new stream for another audio track.
         thread::sleep(Duration::from_millis(1100));
         mock.send_event(EventKind::TimeChanged, 100.0, 1000);
+        mock.tracks.lock().unwrap().audio_current = 2;
         mock.send_event(EventKind::EsSelected, 100.0, -1);
         mock.volume.store(80, Ordering::Release);
         mock.send_event(EventKind::AudioVolume, 100.0, -1);
@@ -5238,6 +5253,12 @@ mod tests {
         thread::sleep(Duration::from_millis(100));
         mock.volume.store(75, Ordering::Release);
         mock.send_event(EventKind::TimeChanged, 100.0, 3000);
+        thread::sleep(Duration::from_millis(200));
+        assert_eq!(volume(), 75);
+        // Nor by another subtitle track: the audio stream stays.
+        mock.tracks.lock().unwrap().subtitle_current = 3;
+        mock.send_event(EventKind::EsSelected, 100.0, -1);
+        mock.send_event(EventKind::TimeChanged, 100.0, 3200);
         thread::sleep(Duration::from_millis(200));
         assert_eq!(volume(), 75);
 
