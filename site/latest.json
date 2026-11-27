@@ -1,15 +1,15 @@
 {
-  "version": "0.2.13",
-  "notes": "Play several videos at once: each window has its own player. New Window is ⇧⌘N on macOS and Ctrl+Shift+N on Windows and Linux, and Settings > General can open each video in a new window. On Windows, each window now has its own volume and mute.",
-  "pub_date": "2026-11-26T22:06:09Z",
+  "version": "0.2.14",
+  "notes": "ReVLC remembers the volume between launches, like VLC. Each window keeps its own volume, and a new window starts at the one set last. Mute isn't saved.",
+  "pub_date": "2026-11-27T02:04:09Z",
   "platforms": {
     "darwin-aarch64": {
-      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSVlR1Wml6L0lBejRhRk1TcTkrdFY2ZHFuaDRHeHhka2lqNGJBaXRqVWtXbDJtSXBkaVBzRVd6a1AralBMNXlFUnljTEQzS1dtYi9PSWJaYzUwUzhOZWx6NzArS2hUVWdRPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzk1NzMwNjgwCWZpbGU6UmVWTEMuYXBwLnRhci5negl2ZXJzaW9uOjAuMi4xMwpPTjY1NlVsd0s4bmNhcVlpSUNFVzFpbE93SjdDTlpJVzhRZUI5ZjViUmxZSnFBZmt5NERhK0tvOWwxdEVQVWhvSm0wMHJ4bFhpNXhrMmxFMXJQOExDUT09Cg==",
-      "url": "https://github.com/HiteshRohira/ReVLC/releases/download/v0.2.13-alpha/ReVLC-0.2.13-alpha-arm64.app.tar.gz"
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSVlR1Wml6L0lBejJkTmpUcndQMFJHMEdxYlAyanpCN0NYbElXdzFkYXZDWmZER0ZGVlo4OVF2dlBKUXYxNUtOeGVjQ3VTWWd0Ymh2T0pKeVFqTGFFUUhtMFI1YzBXOFFRPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzk1NzQ0ODU1CWZpbGU6UmVWTEMuYXBwLnRhci5negl2ZXJzaW9uOjAuMi4xNApKVDdDWnVhVitOczZML0Z4ZS9wSlNYTElweExBdHBsSFc3Y0RLNG5UR0RlRHY5d2JMSEVaQW12T2tCajBkQ3FDQUpsMjcyWEVvWEx5QXYrYUdEUlpCUT09Cg==",
+      "url": "https://github.com/HiteshRohira/ReVLC/releases/download/v0.2.14-alpha/ReVLC-0.2.14-alpha-arm64.app.tar.gz"
     },
     "windows-x86_64": {
-      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSVlR1Wml6L0lBejh0ZDNsRHpYUjBnOElCVlNaVitFUG8vbm96M1RIajd2RklJcmNnSitGamZPdUtZQ21xTUsvWURidkdnbGcrTm5ueWwwSUlXZ1Z0d3NHTjRubVJ0QXc4PQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzk1NzMwNzQ0CWZpbGU6UmVWTENfMC4yLjEzX3g2NC1zZXR1cC5leGUJdmVyc2lvbjowLjIuMTMKVzdRTzluSFlNWmFEdGJ1REpscWpXclBzU2pyZlU0ekhXem9ycDJ1VHVDRnhseE54TzJFZnV1ZzBnRXJzaWpqWUw5SVdZbzRQa1hscWxHUksyUGdrRFE9PQo=",
-      "url": "https://github.com/HiteshRohira/ReVLC/releases/download/v0.2.13-alpha/ReVLC-0.2.13-alpha-x64-setup.exe"
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSVlR1Wml6L0lBejZ0bU1oeFd2V2VZTzlzTEJ1M3gvandqcVVuSlJhS1VnUmJpcmtzQWFtTmRnVmJhdU5rdkFFcTMxU3JZUUNORGpTWVhrMXc5d2p1VmFrYkk2ODRKdHc0PQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzk1NzQ1MDIzCWZpbGU6UmVWTENfMC4yLjE0X3g2NC1zZXR1cC5leGUJdmVyc2lvbjowLjIuMTQKNVZIVWltMnZKSHJVVFJ1bEJQSVord2JTUHRmNDVlb0t1elI3RGNiNEYxSkRQVHV5YlZoNExoaVVkb2ZCckx2RzdTazJTTWxvT0lyMkVKKzE5cGdERFE9PQo=",
+      "url": "https://github.com/HiteshRohira/ReVLC/releases/download/v0.2.14-alpha/ReVLC-0.2.14-alpha-x64-setup.exe"
     }
   }
 }
