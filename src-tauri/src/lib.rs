@@ -214,8 +214,8 @@ struct Session {
     label: String,
     /// This window's player.
     engine: Arc<dyn Engine>,
-    /// The volume set for this window, else the saved one, else libVLC's
-    /// 100. It's what's shown, and what each new audio output is set to:
+    /// The volume set for this window, else the saved one, else the
+    /// player's own (100 unless a startup option says otherwise). It's what's shown, and what each new audio output is set to:
     /// libVLC has none while stopped, a new output starts at the volume
     /// last set in any window, and PulseAudio reports 0 until it has a
     /// stream.
@@ -1681,7 +1681,9 @@ fn pump_events(core: Arc<Session>, rx: Receiver<EngineEvent>) {
     while let Ok(first) = rx.recv() {
         volume_settled(&mut volume_due);
         // A new output gets this window's volume at once, before it plays much.
-        if volume_due.is_some() && matches!(first.kind, EventKind::AudioVolume | EventKind::EsAdded | EventKind::Playing) {
+        if (volume_due.is_some() || first.kind == EventKind::AudioDevice)
+            && matches!(first.kind, EventKind::AudioVolume | EventKind::AudioDevice | EventKind::EsAdded | EventKind::Playing)
+        {
             core.restore_volume();
         }
         // Let bursts of events (e.g. opening a file) arrive, then handle them together.
@@ -1806,6 +1808,11 @@ fn pump_events(core: Arc<Session>, rx: Receiver<EngineEvent>) {
             volume_due = Some(None);
             audio_track = None;
         }
+        // A new stream on the output, which PulseAudio may start at
+        // another window's volume.
+        if has(EventKind::AudioDevice) {
+            volume_due = Some(None);
+        }
         if [EventKind::EsAdded, EventKind::EsDeleted, EventKind::EsSelected].iter().any(|&e| has(e)) {
             let current = core.engine.tracks().audio_current;
             if audio_track.replace(current) != Some(current) {
@@ -1814,7 +1821,9 @@ fn pump_events(core: Arc<Session>, rx: Receiver<EngineEvent>) {
         }
         volume_settled(&mut volume_due);
         if let Some(playing_since) = volume_due
-            && [EventKind::Playing, EventKind::AudioVolume, EventKind::EsAdded, EventKind::TimeChanged].iter().any(|&e| has(e))
+            && [EventKind::Playing, EventKind::AudioVolume, EventKind::AudioDevice, EventKind::EsAdded, EventKind::TimeChanged]
+                .iter()
+                .any(|&e| has(e))
             && core.restore_volume()
             && playing_since.is_none()
             && core.engine.state() == State::Playing
@@ -3625,8 +3634,14 @@ impl Session {
     fn new(shared: Arc<Shared>, label: String, engine: Arc<dyn Engine>, launch: &Launch) -> Self {
         // Not the idle player's own volume, which isn't a choice: PulseAudio
         // reports 0 until it has a stream.
+        // Nothing saved: the player's own, which a startup option such as
+        // --auhal-volume sets, else libVLC's 100.
         let saved = shared.volume.load(Ordering::Relaxed);
-        let chosen_volume = AtomicI32::new(if saved >= 0 { saved } else { 100 });
+        let chosen_volume = AtomicI32::new(match engine.volume() {
+            _ if saved >= 0 => saved,
+            own if own > 0 => own,
+            _ => 100,
+        });
         Session {
             shared,
             label,
@@ -5308,8 +5323,16 @@ mod tests {
         mock.send_event(EventKind::AudioVolume, 100.0, -1);
         thread::sleep(Duration::from_millis(200));
         assert_eq!(volume(), 75);
-        // Nor by another subtitle track: the audio stream stays.
+        // A stream started again on the output (a stereo mode change, or
+        // audio that starts late) is set to the window's volume again.
+        mock.send_event(EventKind::AudioDevice, 100.0, -1);
+        assert!(wait_until(Duration::from_secs(2), || volume() == 60), "set back for a new stream");
         *mock.state.lock().unwrap() = State::Playing;
+        mock.send_event(EventKind::Playing, 100.0, -1);
+        thread::sleep(Duration::from_millis(1100));
+        mock.volume.store(75, Ordering::Release);
+
+        // Nor by another subtitle track: the audio stream stays.
         mock.tracks.lock().unwrap().subtitle_current = 3;
         mock.send_event(EventKind::EsSelected, 100.0, -1);
         mock.send_event(EventKind::TimeChanged, 100.0, 4000);

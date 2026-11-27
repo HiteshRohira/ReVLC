@@ -299,12 +299,13 @@ mod event {
     pub const MUTED: i32 = 0x119;
     pub const UNMUTED: i32 = 0x11a;
     pub const AUDIO_VOLUME: i32 = 0x11b;
+    pub const AUDIO_DEVICE: i32 = 0x11c;
     pub const CHAPTER_CHANGED: i32 = 0x11d;
 
     pub const ALL: &[i32] = &[
         MEDIA_CHANGED, OPENING, BUFFERING, PLAYING, PAUSED, STOPPED, END_REACHED, ERROR,
         TIME_CHANGED, SEEKABLE_CHANGED, TITLE_CHANGED, SNAPSHOT_TAKEN, LENGTH_CHANGED, VOUT, ES_ADDED,
-        ES_DELETED, ES_SELECTED, MUTED, UNMUTED, AUDIO_VOLUME, CHAPTER_CHANGED,
+        ES_DELETED, ES_SELECTED, MUTED, UNMUTED, AUDIO_VOLUME, AUDIO_DEVICE, CHAPTER_CHANGED,
     ];
 
     pub fn to_kind(ty: i32) -> Option<EventKind> {
@@ -329,6 +330,7 @@ mod event {
             MUTED => EventKind::Muted,
             UNMUTED => EventKind::Unmuted,
             AUDIO_VOLUME => EventKind::AudioVolume,
+            AUDIO_DEVICE => EventKind::AudioDevice,
             CHAPTER_CHANGED => EventKind::ChapterChanged,
             _ => return None,
         })

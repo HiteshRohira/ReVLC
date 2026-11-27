@@ -39,6 +39,9 @@ pub enum EventKind {
     Muted,
     Unmuted,
     AudioVolume,
+    /// The audio output started on a device, which it does each time it
+    /// (re)connects: PulseAudio's stream, after a stereo mode change too.
+    AudioDevice,
     ChapterChanged,
 }
 
