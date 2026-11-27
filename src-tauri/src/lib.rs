@@ -753,9 +753,12 @@ impl Session {
             seekable: e.seekable(),
             has_video: e.has_video(),
             rate: e.rate(),
+            // The window's own volume unless something is playing: libVLC
+            // has none while stopped, and PulseAudio reports 0 until it
+            // has a stream.
             volume: match (e.volume(), self.chosen_volume.load(Ordering::Relaxed)) {
+                (v, chosen) if chosen >= 0 && (v < 0 || !matches!(e.state(), State::Playing | State::Paused)) => chosen,
                 (v, _) if v >= 0 => v,
-                (_, chosen) if chosen >= 0 => chosen,
                 _ => 100,
             },
             muted: e.muted(),
@@ -5231,6 +5234,9 @@ mod tests {
         core.chosen_volume.store(60, Ordering::Relaxed);
         mock.volume.store(-1, Ordering::Release);
         assert_eq!(core.state().volume, 60, "shown while there's no output");
+        mock.volume.store(0, Ordering::Release);
+        assert_eq!(core.state().volume, 60, "nor while PulseAudio has no stream yet");
+        mock.volume.store(-1, Ordering::Release);
 
         // The next file's output starts at another window's volume.
         mock.send_event(EventKind::Opening, 100.0, -1);
