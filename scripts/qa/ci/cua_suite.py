@@ -56,6 +56,22 @@ TIME = re.compile(r"^\s*(?:(\d+):)?(\d+):(\d\d)\s*/")
 TITLE_MENUS = ("Media", "Playback", "Audio", "Video", "Subtitles", "Tools", "Help")
 
 
+_audio_output = None
+
+
+def windows_audio_output():
+    """Whether Windows has a working audio output device. Without one,
+    libVLC's DirectSound output can't open, and mute does nothing."""
+    global _audio_output
+    if _audio_output is None:
+        out = subprocess.run(
+            ["powershell", "-NoProfile", "-Command",
+             "@(Get-PnpDevice -Class AudioEndpoint -Status OK -ErrorAction SilentlyContinue).Count"],
+            capture_output=True, text=True, timeout=60)
+        _audio_output = out.stdout.strip() not in ("", "0")
+    return _audio_output
+
+
 class Fail(Exception):
     pass
 
@@ -1054,9 +1070,6 @@ def playback(ctx):
     ctx.check("5 jumps to 50%", jump, app=app)
 
     def volume():
-        before = app.slider("Volume")
-        if WIN and before == 0:
-            raise Skip("no audio output on this runner: libVLC reports volume 0")
         app.key("up")
         # The on-screen message, not the slider: Windows' UI Automation
         # doesn't follow the slider's value as it changes.
@@ -1067,8 +1080,8 @@ def playback(ctx):
     ctx.check("↑ raises the volume", volume, app=app)
 
     def mute():
-        if WIN and app.slider("Volume") == 0:
-            raise Skip("no audio output on this runner: libVLC reports volume 0")
+        if WIN and not windows_audio_output():
+            raise Skip("no audio output device on this runner, so libVLC can't mute")
         app.key("m")
         app.wait("Unmute", button=True, timeout=5)
         app.key("m")
