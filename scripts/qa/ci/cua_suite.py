@@ -60,15 +60,20 @@ _audio_output = None
 
 
 def windows_audio_output():
-    """Whether Windows has a working audio output device. Without one,
-    libVLC's DirectSound output can't open, and mute does nothing."""
+    """Whether Windows has a working audio playback device. Without one,
+    libVLC's DirectSound output can't open, and mute does nothing.
+    Playback endpoints' ids start {0.0.0.00000000}; microphones' {0.0.1...}."""
     global _audio_output
     if _audio_output is None:
         out = subprocess.run(
             ["powershell", "-NoProfile", "-Command",
-             "@(Get-PnpDevice -Class AudioEndpoint -Status OK -ErrorAction SilentlyContinue).Count"],
+             "@(Get-PnpDevice -Class AudioEndpoint -Status OK -ErrorAction SilentlyContinue"
+             " | Where-Object { $_.InstanceId -like 'SWD\\MMDEVAPI\\{0.0.0.00000000}*' }).Count"],
             capture_output=True, text=True, timeout=60)
-        _audio_output = out.stdout.strip() not in ("", "0")
+        count = out.stdout.strip()
+        if out.returncode != 0 or not count.isdigit():
+            raise RuntimeError(f"couldn't list the audio playback devices: {(out.stderr or count).strip()[:200]}")
+        _audio_output = int(count) > 0
     return _audio_output
 
 
