@@ -755,10 +755,10 @@ impl Session {
             rate: e.rate(),
             // The window's own volume unless something is playing: libVLC
             // has none while stopped, and PulseAudio reports 0 until it
-            // has a stream.
+            // has a stream. 100 is libVLC's own.
             volume: match (e.volume(), self.chosen_volume.load(Ordering::Relaxed)) {
-                (v, chosen) if chosen >= 0 && (v < 0 || !matches!(e.state(), State::Playing | State::Paused)) => chosen,
-                (v, _) if v >= 0 => v,
+                (v, _) if v >= 0 && matches!(e.state(), State::Playing | State::Paused) => v,
+                (_, chosen) if chosen >= 0 => chosen,
                 _ => 100,
             },
             muted: e.muted(),
@@ -1661,11 +1661,11 @@ fn pump_events(core: Arc<Session>, rx: Receiver<EngineEvent>) {
     let mut chained = None;
     // The media whose reported title has been looked at.
     let mut titled = None;
-    // Since when a new audio output may have this window's volume to be
-    // given: from a new file or audio track until a second after its
-    // output is there, since PulseAudio reports its stream's own volume
-    // a little after the output appears.
-    let mut volume_due = Some(Instant::now());
+    // Whether a new audio output may need this window's volume: from a new
+    // file or audio track until a second after it starts playing (when it
+    // did, once it has), since PulseAudio reports its stream's own volume
+    // a little after that.
+    let mut volume_due: Option<Option<Instant>> = Some(None);
     // The audio track last seen, so other tracks' changes don't count.
     let mut audio_track = None;
     while let Ok(first) = rx.recv() {
@@ -1792,21 +1792,25 @@ fn pump_events(core: Arc<Session>, rx: Receiver<EngineEvent>) {
             core.engine.on_playing(&settings, &effects);
         }
         if has(EventKind::Opening) {
-            volume_due = Some(Instant::now());
+            volume_due = Some(None);
             audio_track = None;
         }
         if [EventKind::EsAdded, EventKind::EsDeleted, EventKind::EsSelected].iter().any(|&e| has(e)) {
             let current = core.engine.tracks().audio_current;
             if audio_track.replace(current) != Some(current) {
-                volume_due = Some(Instant::now());
+                volume_due = Some(None);
             }
         }
-        if let Some(since) = volume_due
+        if let Some(playing_since) = volume_due
             && [EventKind::Playing, EventKind::AudioVolume, EventKind::EsAdded, EventKind::TimeChanged].iter().any(|&e| has(e))
             && core.restore_volume()
-            && since.elapsed() >= Duration::from_secs(1)
+            && core.engine.state() == State::Playing
         {
-            volume_due = None;
+            match playing_since {
+                None => volume_due = Some(Some(Instant::now())),
+                Some(at) if at.elapsed() >= Duration::from_secs(1) => volume_due = None,
+                Some(_) => {}
+            }
         }
         if has(EventKind::Paused) {
             core.save_progress(true);
@@ -5224,8 +5228,10 @@ mod tests {
         // PulseAudio's 0 before it has a stream.
         assert_eq!(core.chosen_volume.load(Ordering::Relaxed), -1);
         mock.volume.store(0, Ordering::Release);
+        assert_eq!(core.state().volume, 100, "libVLC's own, not PulseAudio's 0");
         mock.send_event(EventKind::Opening, 100.0, -1);
         mock.volume.store(100, Ordering::Release);
+        *mock.state.lock().unwrap() = State::Playing;
         mock.send_event(EventKind::Playing, 100.0, -1);
         thread::sleep(Duration::from_millis(200));
         assert_eq!(volume(), 100);
@@ -5233,6 +5239,7 @@ mod tests {
         // Set to 60, then stopped: libVLC has no audio output, so no volume.
         core.chosen_volume.store(60, Ordering::Relaxed);
         mock.volume.store(-1, Ordering::Release);
+        *mock.state.lock().unwrap() = State::Stopped;
         assert_eq!(core.state().volume, 60, "shown while there's no output");
         mock.volume.store(0, Ordering::Release);
         assert_eq!(core.state().volume, 60, "nor while PulseAudio has no stream yet");
@@ -5241,8 +5248,21 @@ mod tests {
         // The next file's output starts at another window's volume.
         mock.send_event(EventKind::Opening, 100.0, -1);
         mock.volume.store(90, Ordering::Release);
+        *mock.state.lock().unwrap() = State::Playing;
         mock.send_event(EventKind::Playing, 100.0, -1);
         assert!(wait_until(Duration::from_secs(2), || volume() == 60), "set back to this window's");
+
+        // A stream that takes over a second to open, then reports its own
+        // volume a little after it starts playing.
+        *mock.state.lock().unwrap() = State::Opening;
+        mock.send_event(EventKind::Opening, 100.0, -1);
+        thread::sleep(Duration::from_millis(1100));
+        *mock.state.lock().unwrap() = State::Playing;
+        mock.send_event(EventKind::Playing, 100.0, -1);
+        thread::sleep(Duration::from_millis(100));
+        mock.volume.store(100, Ordering::Release);
+        mock.send_event(EventKind::AudioVolume, 100.0, -1);
+        assert!(wait_until(Duration::from_secs(2), || volume() == 60), "within a second of playing");
 
         // So does a new stream for another audio track.
         thread::sleep(Duration::from_millis(1100));
