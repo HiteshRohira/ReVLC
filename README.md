@@ -2,7 +2,7 @@
 
 A modern, lightweight media player built on libVLC.
 
-**[revlc.vercel.app](https://revlc.vercel.app)** · [Download the alpha](https://github.com/HiteshRohira/ReVLC/releases/tag/v0.2.13-alpha)
+**[revlc.vercel.app](https://revlc.vercel.app)** · [Download the alpha](https://github.com/HiteshRohira/ReVLC/releases/tag/v0.2.14-alpha)
 
 ReVLC aims for full VLC feature parity with a cleaner, faster UI. It is early:
 see the [feature parity checklist](docs/parity.md) for what works today and
@@ -112,7 +112,7 @@ Download the experimental x64 `.deb` from [Releases](../../releases) for
 Linux Mint 22.x or Ubuntu 24.04, and install it:
 
 ```sh
-sudo apt install ./ReVLC-0.2.13-alpha-amd64.deb
+sudo apt install ./ReVLC-0.2.14-alpha-amd64.deb
 ```
 
 APT installs libVLC 3 and its plugins from your distribution. Launch ReVLC
