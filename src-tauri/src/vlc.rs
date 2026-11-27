@@ -5,7 +5,7 @@
 
 use std::ffi::{CStr, CString, c_char, c_float, c_int, c_uint, c_void};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicPtr, AtomicU32, AtomicU64, Ordering};
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -552,6 +552,10 @@ pub struct VlcEngine {
     generation: Arc<AtomicU64>,
     /// What the event callback reads; freed after the player (see [`Drop`]).
     subscription: AtomicPtr<Subscription>,
+    /// The volume each new media is set to between libVLC getting it and
+    /// playing it, negative for none: PulseAudio gives a volume set then to
+    /// the new stream, which it otherwise starts at the one it last had.
+    start_volume: AtomicI32,
     /// The teletext page last asked for, and the media generation it was for.
     teletext_page: Mutex<Option<(u64, i32)>>,
     /// This player's teletext background. libVLC keeps it in the shared
@@ -680,6 +684,7 @@ impl VlcEngine {
                 buffering: Arc::default(),
                 generation: Arc::default(),
                 subscription: AtomicPtr::new(std::ptr::null_mut()),
+                start_volume: AtomicI32::new(-1),
                 teletext_page: Mutex::default(),
                 // VLC's default (vbi-opaque off).
                 teletext_transparent: AtomicBool::new(true),
@@ -1050,6 +1055,10 @@ impl VlcEngine {
             }
             (self.api.libvlc_media_player_set_media)(self.mp, media);
             self.generation.fetch_add(1, Ordering::AcqRel);
+            let volume = self.start_volume.load(Ordering::Relaxed);
+            if volume >= 0 {
+                (self.api.libvlc_audio_set_volume)(self.mp, volume.clamp(0, 200));
+            }
             (self.api.libvlc_media_player_play)(self.mp)
         }
     }
@@ -2655,6 +2664,10 @@ impl Engine for VlcEngine {
 
     fn set_volume(&self, volume: i32) {
         VlcEngine::set_volume(self, volume)
+    }
+
+    fn set_start_volume(&self, volume: i32) {
+        self.start_volume.store(volume, Ordering::Relaxed);
     }
 
     fn muted(&self) -> bool {

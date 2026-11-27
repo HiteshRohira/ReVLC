@@ -2819,6 +2819,7 @@ fn set_volume(player: Player, volume: i32) -> Res {
     {
         let _setting = core.volume_lock.lock().unwrap_or_else(|e| e.into_inner());
         core.chosen_volume.store(volume, Ordering::Relaxed);
+        core.engine.set_start_volume(volume);
         core.engine.set_volume(volume);
     }
     core.shared.remember_volume(volume);
@@ -3654,6 +3655,7 @@ impl Session {
             own if own > 0 || (own == 0 && shared.startup_volume) => own,
             _ => 100,
         });
+        engine.set_start_volume(chosen_volume.load(Ordering::Relaxed));
         Session {
             shared,
             label,
@@ -5279,8 +5281,10 @@ mod tests {
         let volume = || mock.volume.load(Ordering::Acquire);
 
         // Nothing saved or set: libVLC's 100, not PulseAudio's 0 before it
-        // has a stream (or for a video without sound).
+        // has a stream (or for a video without sound). Each new media is set
+        // to it before it plays.
         assert_eq!(core.chosen_volume.load(Ordering::Relaxed), 100);
+        assert_eq!(mock.start_volume.load(Ordering::Acquire), 100);
         mock.volume.store(0, Ordering::Release);
         assert_eq!(core.state().volume, 100);
         *mock.state.lock().unwrap() = State::Playing;

@@ -315,6 +315,8 @@ pub trait Engine: Send + Sync {
     fn next_frame(&self);
     fn volume(&self) -> i32;
     fn set_volume(&self, volume: i32);
+    /// The volume each new media is set to before it plays (negative: none).
+    fn set_start_volume(&self, volume: i32);
     fn muted(&self) -> bool;
     fn set_muted(&self, muted: bool);
 
@@ -401,6 +403,7 @@ pub mod mock {
         pub buffering: Mutex<f32>,
         pub rate: Mutex<f32>,
         pub volume: AtomicI32,
+        pub start_volume: AtomicI32,
         pub muted: AtomicBool,
         pub stream_info: Mutex<StreamInfo>,
         pub media_title: Mutex<Option<String>>,
@@ -439,6 +442,7 @@ pub mod mock {
                 buffering: Mutex::new(100.0),
                 rate: Mutex::new(1.0),
                 volume: AtomicI32::new(100),
+                start_volume: AtomicI32::new(-1),
                 muted: AtomicBool::new(false),
                 stream_info: Mutex::new(StreamInfo {
                     video_codec: Some("h264".into()),
@@ -569,6 +573,9 @@ pub mod mock {
         }
         fn set_volume(&self, volume: i32) {
             self.volume.store(volume.clamp(0, 200), Ordering::Release);
+        }
+        fn set_start_volume(&self, volume: i32) {
+            self.start_volume.store(volume, Ordering::Release);
         }
         fn muted(&self) -> bool {
             self.muted.load(Ordering::Acquire)

@@ -67,8 +67,11 @@ def windows_audio_output():
     if _audio_output is None:
         out = subprocess.run(
             ["powershell", "-NoProfile", "-Command",
-             "@(Get-PnpDevice -Class AudioEndpoint -Status OK -ErrorAction SilentlyContinue"
-             " | Where-Object { $_.InstanceId -like 'SWD\\MMDEVAPI\\{0.0.0.00000000}*' }).Count"],
+             # Unlike Get-PnpDevice, an empty result isn't an error, so
+             # -ErrorAction Stop only stops on a failed lookup.
+             "@(Get-CimInstance Win32_PnPEntity -ErrorAction Stop | Where-Object {"
+             " $_.PNPClass -eq 'AudioEndpoint' -and $_.Status -eq 'OK'"
+             " -and $_.DeviceID -like 'SWD\\MMDEVAPI\\{0.0.0.00000000}*' }).Count"],
             capture_output=True, text=True, timeout=60)
         count = out.stdout.strip()
         if out.returncode != 0 or not count.isdigit():
