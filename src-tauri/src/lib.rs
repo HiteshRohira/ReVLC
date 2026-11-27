@@ -159,6 +159,10 @@ struct Shared {
     volume_save_queued: AtomicBool,
     /// Set while a thread is waiting to write the volume.
     volume_write_scheduled: AtomicBool,
+    /// Whether a libVLC startup option (`--auhal-volume`,
+    /// `--directx-volume`…) sets the volume, so a player's 0 is meant, not
+    /// the 0 libVLC reports with no output device or PulseAudio stream.
+    startup_volume: bool,
     /// Set once an update restart has begun: the installer ends the app
     /// without the usual exit, so the volume is written then and later
     /// changes aren't, rather than being cut off partway.
@@ -179,6 +183,12 @@ struct Shared {
     network_users: Mutex<HashSet<String>>,
     /// Files other copies of ReVLC handed over, waiting to be opened in turn.
     hand_overs: Mutex<Option<mpsc::Sender<HandOver>>>,
+}
+
+/// Whether a libVLC option sets an audio output's volume, like
+/// `--auhal-volume=64` or `--directx-volume 0.5`.
+fn sets_volume(arg: &str) -> bool {
+    arg.starts_with("--") && arg[2..].split('=').next().is_some_and(|name| name.ends_with("-volume"))
 }
 
 /// The volume as saved between launches.
@@ -3635,12 +3645,13 @@ impl Session {
         // Not the idle player's own volume, which isn't a choice: PulseAudio
         // reports 0 until it has a stream.
         // Nothing saved: the player's own, which a startup option such as
-        // --auhal-volume sets, else libVLC's 100. PulseAudio's 0 is only a
-        // placeholder until it has a stream.
+        // --auhal-volume sets, else libVLC's 100. A 0 is only meant when an
+        // option sets it: libVLC also reports 0 with no output device, and
+        // PulseAudio until it has a stream.
         let saved = shared.volume.load(Ordering::Relaxed);
         let chosen_volume = AtomicI32::new(match engine.volume() {
             _ if saved >= 0 => saved,
-            own if own > 0 || (own == 0 && !cfg!(target_os = "linux")) => own,
+            own if own > 0 || (own == 0 && shared.startup_volume) => own,
             _ => 100,
         });
         Session {
@@ -3997,6 +4008,7 @@ fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     if cfg!(target_os = "macos") {
         app.set_menu(menu::build(app.handle(), &keys)?)?;
     }
+    let startup_volume = args.iter().chain(&cli.vlc_args).any(|a| sets_volume(a));
     let engine = VlcEngine::load_with_settings(resource_dir.as_deref(), &args, &cli.vlc_args, &settings, &languages);
     let settings = match &engine {
         Ok(vlc) => carry_over_audio_device(vlc, settings, &data_dir),
@@ -4042,6 +4054,7 @@ fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
         volume: AtomicI32::new(load_volume(&data_dir)),
         volume_save_queued: AtomicBool::new(false),
         volume_write_scheduled: AtomicBool::new(false),
+        startup_volume,
         volume_frozen: AtomicBool::new(false),
         volume_publish: Mutex::default(),
         volume_write: Mutex::default(),
@@ -4587,6 +4600,7 @@ mod tests {
             volume: AtomicI32::new(-1),
             volume_save_queued: AtomicBool::new(false),
             volume_write_scheduled: AtomicBool::new(false),
+            startup_volume: false,
             volume_frozen: AtomicBool::new(false),
             volume_publish: Mutex::default(),
             volume_write: Mutex::default(),
@@ -5364,6 +5378,8 @@ mod volume_tests {
         assert_eq!(load_volume(&dir), 200, "clamped to VLC's range");
         std::fs::write(volume_file(&dir), b"nonsense").unwrap();
         assert_eq!(load_volume(&dir), -1, "a damaged file is ignored");
+        assert!(sets_volume("--auhal-volume=0") && sets_volume("--directx-volume"));
+        assert!(!sets_volume("--volume-step=5") && !sets_volume("--no-audio") && !sets_volume("-volume"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
